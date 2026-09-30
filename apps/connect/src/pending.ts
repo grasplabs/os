@@ -168,7 +168,13 @@ const descriptionOf = (
         : undefined;
       return value === undefined
         ? []
-        : [{ label: field.label, value: shownValue(value) }];
+        : [
+            {
+              input: field.input,
+              label: field.label,
+              value: shownValue(value),
+            },
+          ];
     }),
     complete: Object.keys(held).every((key) => shown.has(key)),
   };
@@ -179,7 +185,7 @@ const nameOf = (connection: ShownConnection): string | null => {
   if (connection === null) {
     return null;
   }
-  const name = providerName(connection.provider);
+  const name = providerName(connection);
   return connection.accountName === null
     ? name
     : `${name} (${connection.accountName})`;

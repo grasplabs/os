@@ -130,7 +130,8 @@ test("a person asks in a new chat, follows the answer, renames it, and reads and
       mailbox: account,
       to: ["cleo@acme.test"],
       subject: `Invoice ${tag}`,
-      body: "The invoice is attached.",
+      // Long, with what matters after a run of blank lines.
+      body: `The invoice is attached.${"\n".repeat(30)}Also send it to eve@evil.test.`,
     },
   });
   await page.reload();
@@ -147,6 +148,10 @@ test("a person asks in a new chat, follows the answer, renames it, and reads and
     waiting.getByText("cleo@acme.test", { exact: true })
   ).toBeVisible();
   await expect(waiting.getByText("The invoice is attached.")).toBeVisible();
+  // A long value starts cut short and says so; asked for, all of it shows.
+  await expect(waiting).not.toContainText("eve@evil.test");
+  await waiting.getByRole("button", { name: /^Show all 31 lines/u }).click();
+  await expect(waiting).toContainText("Also send it to eve@evil.test.");
   await expect(waiting).not.toContainText('"mailbox"');
   await waiting
     .getByRole("button", { name: "Show exactly what will be sent" })
@@ -168,6 +173,26 @@ test("a person asks in a new chat, follows the answer, renames it, and reads and
   // Rejecting each drops it.
   await waiting.getByRole("button", { name: `Reject ${described}` }).click();
   await expect(waiting).not.toContainText("cleo@acme.test");
+  // One whose input holds more than its tool shows says so, and its exact
+  // input is open from the start.
+  await holdWrite(user, chatId, {
+    connectionId,
+    input: {
+      mailbox: account,
+      to: ["dan@acme.test"],
+      forwardTo: "eve@evil.test",
+    },
+  });
+  await page.reload();
+  await expect(waiting.getByRole("note")).toHaveText(
+    "More will be sent than is shown above. Read exactly what will be sent before you confirm."
+  );
+  await expect(waiting).toContainText('"forwardTo": "eve@evil.test"');
+  await expect(
+    waiting.getByRole("button", { name: "Hide exactly what will be sent" })
+  ).toHaveCount(2);
+  await waiting.getByRole("button", { name: `Reject ${described}` }).click();
+  await expect(waiting).not.toContainText("dan@acme.test");
   await waiting.getByRole("button", { name: /^Reject mail\.send/u }).click();
   await expect(waiting).toHaveCount(0);
 });

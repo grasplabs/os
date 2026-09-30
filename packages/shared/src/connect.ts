@@ -455,10 +455,10 @@ export interface ActionDescription {
   title: string;
   /**
    * The input's properties the tool shows, those the input holds, each
-   * under its label: a string as it is, a list of strings as it is, any
-   * other value as its JSON text.
+   * (`input`, once) under its label: a string as it is, a list of strings
+   * as it is, any other value as its JSON text.
    */
-  fields: { label: string; value: string | string[] }[];
+  fields: { input: string; label: string; value: string | string[] }[];
   /**
    * Whether `fields` show every property the input holds. When not, say
    * so: the exact input (`PendingAction.input`) holds more.
@@ -490,7 +490,8 @@ export interface PendingAction {
   /**
    * The connection as people know it, by what it reaches and its account,
    * such as "Microsoft 365 (anna@acme.test)"; a Composio connection by its
-   * toolkit. `null` when connect no longer has the connection.
+   * toolkit's slug, whatever that is, never by a native connector's name.
+   * `null` when connect no longer has the connection.
    */
   connectionName: string | null;
   resource: string | null;

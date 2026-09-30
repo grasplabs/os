@@ -279,10 +279,10 @@ describe("a side effect from chat", () => {
       description: {
         title: "Send an email",
         fields: [
-          { label: "From", value: input.mailbox },
-          { label: "To", value: input.to },
-          { label: "Subject", value: input.subject },
-          { label: "Body", value: input.body },
+          { input: "mailbox", label: "From", value: input.mailbox },
+          { input: "to", label: "To", value: input.to },
+          { input: "subject", label: "Subject", value: input.subject },
+          { input: "body", label: "Body", value: input.body },
         ],
         complete: true,
       },
@@ -325,13 +325,36 @@ describe("a side effect from chat", () => {
       description: {
         title: "Send an email",
         fields: [
-          { label: "From", value: "anna@acme.test" },
-          { label: "To", value: JSON.stringify(input.to, null, 2) },
-          { label: "Subject", value: "Invoice" },
+          { input: "mailbox", label: "From", value: "anna@acme.test" },
+          {
+            input: "to",
+            label: "To",
+            value: JSON.stringify(input.to, null, 2),
+          },
+          { input: "subject", label: "Subject", value: "Invoice" },
         ],
         complete: false,
       },
       input: JSON.stringify(input),
+    });
+  });
+
+  it("on a Composio connection is never shown as a native connector's, whatever its toolkit is called", async () => {
+    const anna = someone();
+    // A toolkit slugged as a native provider, with a tool named as the
+    // native connector's is.
+    const connectionId = await addConnection({
+      provider: "microsoft",
+      accountName: "anna@acme.test",
+    });
+    await hold(inChat(anna), mail(connectionId));
+    const held = await heldFor(anna);
+    expect({
+      connectionName: held.connectionName,
+      described: "description" in held,
+    }).toStrictEqual({
+      connectionName: "microsoft (anna@acme.test)",
+      described: false,
     });
   });
 

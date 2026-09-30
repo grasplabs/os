@@ -38,13 +38,23 @@ const nativeShown: Record<
 };
 
 /**
- * What a connection reaches, as people know it: a native provider by the
- * name the catalog shows, a Composio toolkit by its slug (its name is
- * Composio's to list, and not asked for here).
+ * What a connection reaches, as people know it: a native connection's
+ * provider by the name the catalog shows, a Composio connection's toolkit
+ * by its slug (its name is Composio's to list, and not asked for here). By
+ * the connection's kind, never the provider alone: a toolkit slugged
+ * `google` isn't shown as our Google Workspace connector.
  */
-export const providerName = (provider: string): string => {
+export const providerName = ({
+  serverKind,
+  provider,
+}: {
+  serverKind: "native" | "composio";
+  provider: string;
+}): string => {
   const native = oauthProviderSchema.safeParse(provider);
-  return native.success ? nativeShown[native.data].name : provider;
+  return serverKind === "native" && native.success
+    ? nativeShown[native.data].name
+    : provider;
 };
 
 /** The native providers whose connector is in this release. */

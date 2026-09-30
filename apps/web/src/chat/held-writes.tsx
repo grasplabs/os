@@ -69,18 +69,56 @@ const inputOf = (input: string): string => {
   }
 };
 
+/** Lines of a value shown before the rest waits behind "Show all". */
+const shownLines = 12;
+
+/** Characters of a value shown before the rest waits behind "Show all". */
+const shownCharacters = 1200;
+
+/**
+ * A text value, exactly as the input holds it, all of it: no scroll box
+ * hides a part. A very long one starts cut short, with a control that says
+ * how much there is and shows it all, so what follows a run of blank lines
+ * can't go unseen unnoticed.
+ */
+const TextValue = ({ value }: { value: string }) => {
+  const [all, setAll] = useState(false);
+  const lines = value.split("\n");
+  const start = lines.slice(0, shownLines).join("\n").slice(0, shownCharacters);
+  const long = start.length < value.length;
+  return (
+    <dd className="flex flex-col items-start gap-1">
+      <span className="break-words whitespace-pre-wrap">
+        {all || !long ? value : `${start}…`}
+      </span>
+      {long ? (
+        <Button
+          aria-expanded={all}
+          onClick={() => {
+            setAll(!all);
+          }}
+          size="sm"
+          variant="outline"
+        >
+          {all
+            ? "Show less"
+            : `Show all ${lines.length} lines (${value.length} characters)`}
+        </Button>
+      ) : null}
+    </dd>
+  );
+};
+
 /** One value of a description, exactly as the input holds it. */
 const FieldValue = ({ value }: { value: string | string[] }) =>
   typeof value === "string" ? (
-    <dd className="max-h-60 overflow-y-auto break-words whitespace-pre-wrap">
-      {value}
-    </dd>
+    <TextValue value={value} />
   ) : (
     <dd>
       <ul className="flex flex-col">
         {value.map((item, index) => (
           // By position: the input's own order, and values may repeat.
-          <li className="break-words" key={index}>
+          <li className="break-words whitespace-pre-wrap" key={index}>
             {item}
           </li>
         ))}
@@ -91,8 +129,8 @@ const FieldValue = ({ value }: { value: string | string[] }) =>
 /** The parts of the input its tool shows, each under its label. */
 const Described = ({ description }: { description: ActionDescription }) => (
   <dl className="flex flex-col gap-2 text-sm">
-    {description.fields.map(({ label, value }) => (
-      <div className="flex flex-col" key={label}>
+    {description.fields.map(({ input, label, value }) => (
+      <div className="flex flex-col" key={input}>
         <dt className="text-muted-foreground">{label}</dt>
         <FieldValue value={value} />
       </div>
