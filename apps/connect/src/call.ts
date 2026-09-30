@@ -1,7 +1,11 @@
 import { maxRetryAfterSeconds } from "@grasp-os/connector-kit/manifest";
 import type { CapabilityClaims } from "@grasp-os/shared/capability";
 import { connectErrors } from "@grasp-os/shared/connect";
-import type { ConnectCall, PendingReference } from "@grasp-os/shared/connect";
+import type {
+  ConnectCall,
+  HeldOutcome,
+  PendingReference,
+} from "@grasp-os/shared/connect";
 import type { Json } from "@grasp-os/shared/json";
 import type { BatchItem } from "drizzle-orm/batch";
 import { z } from "zod";
@@ -13,7 +17,7 @@ import {
 } from "./connections.ts";
 import type { Connection } from "./connections.ts";
 import { nativeAction, nativeServer } from "./connectors.ts";
-import { hashCall, idempotencyStore } from "./idempotency.ts";
+import { hashCall, idempotencyStore, replay } from "./idempotency.ts";
 import type { StoredAnswer } from "./idempotency.ts";
 import { fieldOf, masked, maskedPaths } from "./mask.ts";
 import { McpError } from "./mcp.ts";
@@ -23,7 +27,7 @@ import type {
   McpTool,
   McpToolResult,
 } from "./mcp.ts";
-import { hold } from "./pending.ts";
+import { hold, waitingUnder } from "./pending.ts";
 import type { HeldAction } from "./pending.ts";
 import {
   checkResourceScope,
@@ -229,7 +233,7 @@ export const connectionFor = async (
   env: Env,
   claims: CapabilityClaims,
   connectionId: string,
-  held: HeldAction | undefined
+  held?: HeldAction
 ): Promise<Connection> => {
   const connection = await usableConnection(
     env.DB,
@@ -240,6 +244,75 @@ export const connectionFor = async (
     throw connectErrors.create("connect.connection_changed");
   }
   return connection;
+};
+
+/**
+ * How the held call `claims` name ended, for a caller whose capability for
+ * that call is verified: authorised now as the call itself would be, on a
+ * connection it may use now, and for the resource the call was for. The
+ * answer is the stored one, masked again as this capability says, which
+ * is the permission's mask as it is now; a mask connect can't apply is
+ * refused, never ignored. Throws `connect.pending_not_found` when no such
+ * call was held or stored. `pendingActionId` is the held action, while it
+ * waits.
+ */
+export const heldOutcome = async (
+  env: Env,
+  claims: CapabilityClaims
+): Promise<{ outcome: HeldOutcome; pendingActionId?: string }> => {
+  const { authority, connectionId, resource, action, idempotencyKey } = claims;
+  if (idempotencyKey === null) {
+    throw connectErrors.create("connect.invalid");
+  }
+  const connection = await connectionFor(env, claims, connectionId);
+  const masks = masksFor(connection, claims, action);
+  const pendingActionId = await waitingUnder(env, claims);
+  if (pendingActionId !== undefined) {
+    return { outcome: { state: "waiting" }, pendingActionId };
+  }
+  const row = await idempotencyStore(
+    env.DB,
+    {
+      subject: authority.subject,
+      onBehalfOf: authority.onBehalfOf,
+      connectionId,
+      action,
+      idempotencyKey,
+      resource,
+    },
+    ""
+  ).find();
+  // Only the call for the resource this capability was checked for.
+  if (row === undefined || row.resource !== resource) {
+    throw connectErrors.create("connect.pending_not_found");
+  }
+  let answer: StoredAnswer;
+  try {
+    answer = maskedAnswer(replay(row, row.inputHash, Date.now()), masks);
+  } catch (error) {
+    const reason = connectErrors.codeOf(error);
+    if (reason === "connect.declined") {
+      return { outcome: { state: "declined" } };
+    }
+    // Confirmed, and being carried out now.
+    if (reason === "connect.call_in_progress") {
+      return { outcome: { state: "waiting" } };
+    }
+    if (reason === undefined) {
+      throw error;
+    }
+    // Its outcome is unknown, or its answer is no longer kept.
+    return { outcome: { state: "failed", reason, output: null } };
+  }
+  return {
+    outcome: answer.failed
+      ? {
+          state: "failed",
+          reason: "connect.action_failed",
+          output: answer.result.output,
+        }
+      : { state: "done", result: answer.result },
+  };
 };
 
 /**
@@ -288,6 +361,7 @@ export const carryOut = async (
             connectionId: call.connectionId,
             action: call.action,
             idempotencyKey,
+            resource,
           },
           inputHash
         );

@@ -1,5 +1,6 @@
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import { connectErrors } from "@grasp-os/shared/connect";
+import { permissionErrors } from "@grasp-os/shared/permissions";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
@@ -88,6 +89,15 @@ const texts = async (
   const results = await codeResults(stub, chatId);
   return results.map(({ text }) => text);
 };
+
+/** The events that record a read of a held call's outcome, or the call held. */
+const reads = (all: AuditEvent[]) =>
+  all.filter(
+    ({ action, detail }) =>
+      (action === "agent.call" && detail.method === "connections.outcome") ||
+      (action === "connection.call" &&
+        ["held", "replayed"].includes(String(detail.outcome)))
+  );
 
 describe("a chat's connections", setUpTime, () => {
   it("hold a write, with no key of the model's, for the person to confirm, and send it once when they do", async () => {
@@ -413,44 +423,84 @@ describe("a chat's connections", setUpTime, () => {
       otherChat: [`Returned:\n${notFound}`],
       bens: [`Returned:\n${notFound}`],
     });
-    // Each read of the outcome is audited, with the connection it read.
+    // Each read is recorded once: by connect as a call (still held, then
+    // handed over as a repeat's answer), and what never reached connect as
+    // a call, by core.
     const events = await eventsOf(
       chat.agent.agentId,
-      (all) =>
-        all.filter(({ detail }) => detail.method === "connections.outcome")
-          .length === 3
+      (all) => reads(all).length === 4
     );
     expect(
-      events
-        .filter(({ detail }) => detail.method === "connections.outcome")
-        .map(({ detail }) => ({
-          outcome: detail.outcome,
-          status: detail.status ?? detail.reason,
-          connection: detail.connection ?? null,
-          pendingActionId: detail.pendingActionId,
-        }))
-        .toSorted((one, two) =>
-          String(one.status).localeCompare(String(two.status))
+      reads(events)
+        .map(
+          ({ action, detail }) =>
+            `${action} ${String(detail.outcome)} ${String(detail.reason ?? "")}`
         )
+        .toSorted()
     ).toStrictEqual([
-      {
-        outcome: "refused",
-        status: "connect.pending_not_found",
-        connection: null,
-        pendingActionId: id,
-      },
-      {
-        outcome: "ok",
-        status: "done",
-        connection: mail.id,
-        pendingActionId: id,
-      },
-      {
-        outcome: "ok",
-        status: "waiting",
-        connection: mail.id,
-        pendingActionId: id,
-      },
+      "agent.call refused connect.pending_not_found",
+      // The call itself, held, and the read of it while it waited.
+      "connection.call held ",
+      "connection.call held ",
+      "connection.call replayed ",
+    ]);
+  });
+
+  it("read a held call's outcome only as the call would be allowed now: not once its resource's permission is revoked, and under the mask in force now", async () => {
+    const person = await signedInApi(idp, "user");
+    const admin = await signedInApi(idp, "admin");
+    // Searches held to the query they name, as the admin's rule says.
+    const mail = await mailConnection(
+      [],
+      ["mail.send", { name: "mail.search", read: true, resource: "query" }]
+    );
+    const chat = await chatOf(
+      person.userId,
+      codeStep(
+        `export default async (env) => await env.connections.call("INVOICES", "mail.search", { query: "invoice" });`
+      ),
+      says("It waits for you.")
+    );
+    const permissionFor = async (
+      binding: string,
+      resource: string,
+      mask?: string[]
+    ) =>
+      await requestGranted(idp, admin, {
+        subject: chat.agent,
+        object: {
+          type: "connection",
+          connectionId: mail.id,
+          resource,
+          ...(mask === undefined ? {} : { mask }),
+        },
+        actions: ["mail.search"],
+        binding,
+      });
+    const invoices = await permissionFor("INVOICES", "invoice");
+    await permissionFor("OTHER", "other");
+    await chat.stub.restrictChat(chat.chat.id);
+
+    await chat.ask("Find the invoice.");
+    const [held] = await person.api.pendingActions.list();
+    const id = held?.id ?? "";
+    await person.api.pendingActions.confirm(id, held?.inputHash ?? "");
+
+    // The permission for that resource goes; one for another stays.
+    await admin.api.permissions.revoke(invoices);
+    await pointAtGateway(
+      chat.stub,
+      fakeGateway(outcomeOf(id), says("No."), outcomeOf(id), says("No."))
+    );
+    await chat.ask("What did it find?");
+    // A new permission for it masks a field: this server can't mask.
+    await permissionFor("MASKED", "invoice", ["body"]);
+    await chat.ask("And now?");
+
+    await expect(texts(chat.stub, chat.chat.id)).resolves.toStrictEqual([
+      `Returned:\n${JSON.stringify({ output: null, pending: { id } })}`,
+      `Returned:\n${permissionErrors.create("permission.denied").message}`,
+      `Returned:\n${connectErrors.create("connect.mask_unsupported").message}`,
     ]);
   });
 

@@ -42,6 +42,8 @@ export interface IdempotencyScope {
   connectionId: string;
   action: string;
   idempotencyKey: string;
+  /** The one resource the call is for; null for the whole connection. */
+  resource: string | null;
 }
 
 /**
@@ -141,6 +143,9 @@ export const idempotencyStore = (
     await db.select().from(idempotentCalls).where(key).get();
 
   return {
+    /** The stored row of an earlier call with this key, as it is. */
+    find,
+
     /** The stored answer of an earlier call with this key, if there was one. */
     replay: async (): Promise<StoredAnswer | undefined> => {
       const row = await find();
@@ -174,6 +179,7 @@ export const idempotencyStore = (
             connectionId: scope.connectionId,
             action: scope.action,
             idempotencyKey: scope.idempotencyKey,
+            resource: scope.resource,
             inputHash,
             state: "running",
             createdAt: new Date(now),

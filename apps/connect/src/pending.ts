@@ -7,7 +7,7 @@ import {
   connectionPersonSchema,
   declineChatActionsSchema,
   endedRunsSchema,
-  heldOutcomeRequestSchema,
+  heldCallRequestSchema,
   heldRequestSchema,
   pendingKeySchema,
   refuseConfirmationSchema,
@@ -15,7 +15,7 @@ import {
 import type {
   ConnectCall,
   ConnectionPerson,
-  HeldOutcome,
+  HeldCall,
   PendingAction,
   PendingReference,
 } from "@grasp-os/shared/connect";
@@ -34,7 +34,6 @@ import { recordEvents, recordEventsIf } from "./audit.ts";
 import type { GuardedChange } from "./audit.ts";
 import type { Connection } from "./connections.ts";
 import { connections, idempotentCalls, pendingActions } from "./db/schema.ts";
-import { replay } from "./idempotency.ts";
 
 // Side effects that wait for their person (threat model R7, R12). A side
 // effect a person is there for (`interactive`: from chat, or from a person
@@ -140,7 +139,7 @@ const detailOf = (
  * spends its key in the same batch, so its step's retry fails
  * (`connect.declined`) rather than asking again. So does a chat's under a
  * key connect made (`madeKey`), so its chat can be told it was declined
- * (`heldOutcome`): the key, never the input.
+ * (`heldCall`, `heldOutcome`): the key, never the input.
  */
 const deletion = (
   env: Env,
@@ -166,6 +165,7 @@ const deletion = (
           output: sql<string | null>`${spentAs ?? null}`.as("output"),
           provenance: sql<null>`NULL`.as("provenance"),
           createdAt: sql<Date>`${Date.now()}`.as("created_at"),
+          resource: pendingActions.resource,
         })
         .from(pendingActions)
         .where(
@@ -263,7 +263,7 @@ const value = <T>(literal: T, column: string) => sql<T>`${literal}`.as(column);
 /**
  * The idempotency key connect makes for a side effect held without one: a
  * chat's carries the chat, so the chat can later be told how the action
- * ended by the held action's ID alone (`heldOutcome`), and no other chat
+ * ended by the held action's ID alone (`heldCall`), and no other chat
  * can.
  */
 const madeKey = (context: WorkContext, id: string): string =>
@@ -578,29 +578,31 @@ export const pendingActionFor = async (
 };
 
 /**
- * How a held action ended, for the chat whose agent asked for it
- * (`ConnectApi.heldOutcome`). A chat's code has only the ID its held call
- * was answered with, so that finds it: while it waits, the held action
- * itself, which names its chat; once decided, the stored answer under the
- * key connect made for it, which carries the chat (`madeKey`). Anything
- * else is not found: another chat's, agent's or person's, one held under
- * its caller's own key, and one taken by a confirmation whose call hasn't
- * claimed its key yet, which a moment later is found.
+ * Which call a held action of a chat was (`ConnectApi.heldCall`), for the
+ * chat whose agent asked for it. A chat's code has only the ID its held
+ * call was answered with, so that finds it: while it waits, the held
+ * action itself; once decided, the stored call under the key connect made
+ * for it, which carries the chat (`madeKey`). Anything else is not found:
+ * another chat's, agent's or person's, one held under its caller's own
+ * key, and one taken by a confirmation whose call hasn't claimed its key
+ * yet, which a moment later is found. It says nothing of how the call
+ * ended: that is read with a capability for the call (`heldOutcome`).
  */
-export const heldOutcome = async (
+export const heldCall = async (
   env: Env,
   request: unknown
-): Promise<HeldOutcome> => {
-  const parsed = heldOutcomeRequestSchema.safeParse(request);
+): Promise<HeldCall> => {
+  const parsed = heldCallRequestSchema.safeParse(request);
   if (!parsed.success) {
     throw connectErrors.create("connect.invalid");
   }
   const { agentId, onBehalfOf, workspaceId, chatId, id } = parsed.data;
   const db = drizzle(env.DB);
-  const key = madeKey({ type: "chat", workspaceId, chatId }, id);
+  const idempotencyKey = madeKey({ type: "chat", workspaceId, chatId }, id);
   const waiting = await db
     .select({
       connectionId: pendingActions.connectionId,
+      resource: pendingActions.resource,
       action: pendingActions.action,
     })
     .from(pendingActions)
@@ -610,54 +612,70 @@ export const heldOutcome = async (
         eq(pendingActions.subjectType, "agent"),
         eq(pendingActions.subjectId, agentId),
         eq(pendingActions.onBehalfOf, onBehalfOf),
-        eq(pendingActions.idempotencyKey, key)
+        eq(pendingActions.idempotencyKey, idempotencyKey)
       )
     )
     .get();
-  if (waiting !== undefined) {
-    return { ...waiting, state: "waiting" };
-  }
-  const row = await db
-    .select()
-    .from(idempotentCalls)
-    .where(
-      and(
-        eq(idempotentCalls.idempotencyKey, key),
-        eq(idempotentCalls.subjectType, "agent"),
-        eq(idempotentCalls.subjectId, agentId),
-        eq(idempotentCalls.onBehalfOf, onBehalfOf)
+  const found =
+    waiting ??
+    (await db
+      .select({
+        connectionId: idempotentCalls.connectionId,
+        resource: idempotentCalls.resource,
+        action: idempotentCalls.action,
+      })
+      .from(idempotentCalls)
+      .where(
+        and(
+          eq(idempotentCalls.idempotencyKey, idempotencyKey),
+          eq(idempotentCalls.subjectType, "agent"),
+          eq(idempotentCalls.subjectId, agentId),
+          eq(idempotentCalls.onBehalfOf, onBehalfOf)
+        )
       )
-    )
-    .get();
-  if (row === undefined) {
+      .get());
+  if (found === undefined) {
     throw connectErrors.create("connect.pending_not_found");
   }
-  const called = { connectionId: row.connectionId, action: row.action };
-  try {
-    const answer = replay(row, row.inputHash, Date.now());
-    return answer.failed
-      ? {
-          ...called,
-          state: "failed",
-          reason: "connect.action_failed",
-          output: answer.result.output,
-        }
-      : { ...called, state: "done", result: answer.result };
-  } catch (error) {
-    const reason = connectErrors.codeOf(error);
-    if (reason === undefined) {
-      throw error;
-    }
-    if (reason === "connect.declined") {
-      return { ...called, state: "declined" };
-    }
-    // Confirmed, and being carried out now.
-    if (reason === "connect.call_in_progress") {
-      return { ...called, state: "waiting" };
-    }
-    // Its outcome is unknown, or its answer is no longer kept.
-    return { ...called, state: "failed", reason, output: null };
+  return { ...found, idempotencyKey };
+};
+
+/**
+ * The held action waiting under the call `claims` name, if one still is:
+ * its ID.
+ */
+export const waitingUnder = async (
+  env: Env,
+  {
+    authority,
+    connectionId,
+    resource,
+    action,
+    idempotencyKey,
+  }: CapabilityClaims
+): Promise<string | undefined> => {
+  if (idempotencyKey === null) {
+    return undefined;
   }
+  const { subject } = authority;
+  const held = await drizzle(env.DB)
+    .select({ id: pendingActions.id, resource: pendingActions.resource })
+    .from(pendingActions)
+    .where(
+      and(
+        eq(pendingActions.subjectType, subject.type),
+        eq(
+          pendingActions.subjectId,
+          subject.type === "app" ? subject.appId : subject.agentId
+        ),
+        eq(pendingActions.onBehalfOf, authority.onBehalfOf),
+        eq(pendingActions.connectionId, connectionId),
+        eq(pendingActions.action, action),
+        eq(pendingActions.idempotencyKey, idempotencyKey)
+      )
+    )
+    .get();
+  return held?.resource === resource ? held.id : undefined;
 };
 
 /** Most held actions one round of `declineChatActions` reads and declines. */

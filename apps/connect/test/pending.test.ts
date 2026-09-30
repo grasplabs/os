@@ -3,6 +3,7 @@ import { connectErrors } from "@grasp-os/shared/connect";
 import type {
   ConnectionPerson,
   ConnectResult,
+  HeldCall,
   PendingAction,
 } from "@grasp-os/shared/connect";
 import type { Authority } from "@grasp-os/shared/permissions";
@@ -120,6 +121,27 @@ const confirm = async (
       ...signed,
     }),
   });
+
+/** Reads `held`'s outcome as core does: by `authority`, with what `signed` says. */
+const readOutcome = async (
+  authority: Authority,
+  held: HeldCall,
+  signed: Signed & { resource?: string }
+) => {
+  const stated = {
+    connectionId: held.connectionId,
+    action: held.action,
+    idempotencyKey: held.idempotencyKey,
+    ...(signed.resource === undefined ? {} : { resource: signed.resource }),
+  };
+  return await exports.default.heldOutcome({
+    ...stated,
+    capability: await signCapability(env.CAPABILITY_SIGNING_KEY, authority, {
+      ...stated,
+      ...signed,
+    }),
+  });
+};
 
 const decline = async (
   person: ConnectionPerson,
@@ -349,7 +371,7 @@ describe("a side effect from chat", () => {
     expect(new Set(waiting.map(({ id }) => id)).size).toBe(3);
   });
 
-  it("tells the chat that asked how it ended, by its ID, and no other chat, agent or person", async () => {
+  it("is found again by its ID only by the chat that asked, and its outcome read only with a capability for that very call", async () => {
     const anna = someone();
     const connectionId = await addConnection();
     const { idempotencyKey: _key, ...call } = mail(connectionId);
@@ -369,10 +391,16 @@ describe("a side effect from chat", () => {
     // One under a key of its caller's: only a repeat of the call finds it.
     const keyed = await hold(inChat(anna), mail(connectionId, "dan@acme.test"));
     const id = send.pending?.id ?? "";
-    const ended = async (request: object) =>
-      await exports.default.heldOutcome({ ...chat, id, ...request });
-    const called = { connectionId, action: "mail.send" };
-    const whileWaiting = await ended({});
+    const callOf = async (request: object = {}) =>
+      await exports.default.heldCall({ ...chat, id, ...request });
+    const ended = async (
+      held: HeldCall,
+      signed: Signed & { resource?: string } = {},
+      authority = inChat(anna)
+    ) => await readOutcome(authority, held, signed);
+    const sent = await callOf();
+    const archived = await callOf({ id: archive.pending?.id });
+    const whileWaiting = await ended(sent);
     const others = await Promise.all(
       [
         { chatId: "chat-2" },
@@ -380,7 +408,7 @@ describe("a side effect from chat", () => {
         { agentId: "agent-other" },
         { id: crypto.randomUUID() },
         { id: keyed.pending?.id },
-      ].map(async (request) => await outcome(ended(request)))
+      ].map(async (request) => await outcome(callOf(request)))
     );
     const waiting = await waitingFor(anna);
     const heldOf = (pendingId: string | undefined): PendingAction => {
@@ -393,26 +421,58 @@ describe("a side effect from chat", () => {
     await confirm(anna, heldOf(id));
     await decline(anna, heldOf(archive.pending?.id));
     expect({
+      sent,
       whileWaiting,
       others,
-      confirmed: await ended({}),
-      declined: await ended({ id: archive.pending?.id }),
+      confirmed: await ended(sent),
+      declined: await ended(archived),
       // Decided, it is still only its own chat's.
-      elsewhere: await outcome(ended({ chatId: "chat-2" })),
+      elsewhere: await outcome(callOf({ chatId: "chat-2" })),
+      // A capability for another resource, another agent's, or one whose
+      // permission masks what this server can't mask, reads nothing.
+      otherResource: await outcome(ended(sent, { resource: "other" })),
+      otherAgent: await outcome(ended(sent, {}, inChat(anna, "agent-other"))),
+      masked: await outcome(ended(sent, { mask: ["body"] })),
+      confirming: await outcome(ended(sent, { confirms: id })),
     }).toStrictEqual({
-      whileWaiting: { ...called, state: "waiting" },
+      sent: {
+        connectionId,
+        resource: null,
+        action: "mail.send",
+        idempotencyKey: `chat-1:${id}`,
+      },
+      whileWaiting: { state: "waiting" },
       others: others.map(() => "connect.pending_not_found"),
       confirmed: {
-        ...called,
         state: "done",
         result: {
           output: '{"sent":"ben@acme.test"}',
           provenance: ["mail/mail.send"],
         },
       },
-      declined: { connectionId, action: "mail.archive", state: "declined" },
+      declined: { state: "declined" },
       elsewhere: "connect.pending_not_found",
+      otherResource: "connect.pending_not_found",
+      otherAgent: "connect.pending_not_found",
+      masked: "connect.mask_unsupported",
+      confirming: "capability.invalid",
     });
+    // Each read is recorded as a call is: waiting, handed over, refused.
+    const events = await eventsFor(connectionId);
+    expect(
+      events.slice(events.findIndex(({ outcome: end }) => end === "held") + 3)
+    ).toStrictEqual([
+      { action: "connection.call", actor: "agent", outcome: "held" },
+      { action: "connection.action.confirmed", actor: "person", outcome: null },
+      { action: "connection.call", actor: "agent", outcome: "ok" },
+      { action: "connection.action.declined", actor: "person", outcome: null },
+      { action: "connection.call", actor: "agent", outcome: "replayed" },
+      { action: "connection.call", actor: "agent", outcome: "refused" },
+      { action: "connection.call", actor: "agent", outcome: "refused" },
+      { action: "connection.call", actor: "agent", outcome: "refused" },
+      { action: "connection.call", actor: "agent", outcome: "refused" },
+      { action: "connection.call", actor: "agent", outcome: "refused" },
+    ]);
     // Declined, it left its key spent and nothing of its input.
     const { held, answers } = await leftFor(connectionId);
     expect({

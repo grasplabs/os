@@ -18,7 +18,12 @@ import {
   requireOpenRun,
 } from "./agent-scope.ts";
 import type { AgentApi, AgentScope } from "./agent-scope.ts";
-import { connectionGrantOf, forSandbox, signedStubCall } from "./bindings.ts";
+import {
+  connectionGrantOf,
+  forSandbox,
+  signedCall,
+  signedStubCall,
+} from "./bindings.ts";
 import type { ConnectionGrant } from "./bindings.ts";
 import { connectionOwnersOf } from "./connections.ts";
 import { workspace } from "./durable-objects.ts";
@@ -238,62 +243,80 @@ export class ConnectionsApi extends WorkerEntrypoint<Env, AgentScope> {
    * How the held call `pendingId` of this chat ended: the chat's code has
    * no other way to a confirmed call's answer, as a call made again is a
    * call of its own. Only for a call this chat's agent made for its
-   * person (connect finds no other), and only while the agent still holds
-   * a permission that allows that action on that connection. What it
-   * hands over it records with the chat first, as a direct call's answer
-   * (`call`), and the call is audited with the connection and the held
-   * action it read.
+   * person (connect finds no other), and authorised exactly as that call
+   * would be now: by a permission the agent holds now for that action on
+   * that connection and that same resource, checked and signed as any
+   * call's (`signedCall`), so the answer comes back under that
+   * permission's mask as it is now, or is refused where connect can't
+   * apply it. Connect records it, as it records a call; what is refused
+   * before connect has the call is recorded here, once. What it hands
+   * over is recorded with the chat first, as a direct call's answer.
    */
   async outcome(pendingId: unknown): Promise<AgentCallOutcome> {
     const scope = this.ctx.props;
     await requireOpenRun(this.env, scope, "connections.outcome");
     const id = pendingIdSchema.safeParse(pendingId);
-    try {
-      const ended = await auditedCall(
+    const request = await (async () => {
+      requireFeature(this.env, "connections");
+      if (!id.success) {
+        throw connectErrors.create("connect.invalid");
+      }
+      const held = await this.env.CONNECT.heldCall({
+        agentId: scope.agentId,
+        onBehalfOf: scope.personId,
+        workspaceId: scope.workspaceId,
+        chatId: scope.chatId,
+        id: id.data,
+      });
+      // The agent's permissions for exactly that call, as they are now;
+      // of several, the one that masks least, as the agent could call by
+      // it directly.
+      const grants = await connectionGrants(this.env, scope);
+      const [grant] = grants
+        .filter(
+          ({ connection, actions }) =>
+            connection.connectionId === held.connectionId &&
+            (connection.resource ?? null) === held.resource &&
+            actions.includes(held.action)
+        )
+        .toSorted(
+          (one, other) =>
+            (one.connection.mask?.length ?? 0) -
+            (other.connection.mask?.length ?? 0)
+        );
+      if (grant === undefined) {
+        throw permissionErrors.create("permission.denied", {
+          action: held.action,
+        });
+      }
+      const { capability, scope: call } = await signedCall(
         this.env,
-        scope,
-        {
-          method: "connections.outcome",
-          detail: { pendingActionId: id.success ? id.data : null },
-          detailOf: ({ state, connectionId, action }: HeldOutcome) => ({
-            status: state,
-            connection: connectionId,
-            action,
-          }),
-        },
-        async () => {
-          requireFeature(this.env, "connections");
-          if (!id.success) {
-            throw connectErrors.create("connect.invalid");
-          }
-          const outcome = await this.env.CONNECT.heldOutcome({
-            agentId: scope.agentId,
-            onBehalfOf: scope.personId,
-            workspaceId: scope.workspaceId,
-            chatId: scope.chatId,
-            id: id.data,
-          });
-          const grants = await connectionGrants(this.env, scope);
-          const allowed = grants.some(
-            ({ connection, actions }) =>
-              connection.connectionId === outcome.connectionId &&
-              actions.includes(outcome.action)
-          );
-          if (!allowed) {
-            throw permissionErrors.create("permission.denied", {
-              action: outcome.action,
-            });
-          }
-          if (outcome.state === "done" || outcome.state === "failed") {
-            await recordSources(this.env, scope, [outcome.connectionId]);
-          }
-          return outcome;
-        }
+        { ...grant, authority: chatAuthority(scope) },
+        { action: held.action, idempotencyKey: held.idempotencyKey }
       );
-      return callOutcome(ended);
+      return { capability, ...call, idempotencyKey: held.idempotencyKey };
+    })().catch(
+      async (error: unknown) =>
+        await auditRefusal(
+          this.env,
+          scope,
+          {
+            method: "connections.outcome",
+            detail: { pendingActionId: id.success ? id.data : null },
+          },
+          forSandbox(error)
+        )
+    );
+    let outcome: HeldOutcome;
+    try {
+      outcome = await this.env.CONNECT.heldOutcome(request);
     } catch (error) {
       throw forSandbox(error);
     }
+    if (outcome.state === "done" || outcome.state === "failed") {
+      await recordSources(this.env, scope, [request.connectionId]);
+    }
+    return callOutcome(outcome);
   }
 }
 

@@ -118,6 +118,12 @@ export const idempotentCalls = sqliteTable(
     output: text(),
     provenance: text(),
     createdAt: timestamp("created_at").notNull(),
+    /**
+     * The one resource the call's capability named, or null for the whole
+     * connection: what reading the answer later is authorised against
+     * again (`heldOutcome`).
+     */
+    resource: text(),
   },
   (table) => [
     primaryKey({

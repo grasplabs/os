@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "c97b105c-13af-4c06-96da-e9e29da64419",
+  "id": "a6bfc765-ea42-43c6-bc81-1fd759330e17",
   "prevId": "2d2d796a-55c0-4c14-88ae-15074fec6ce7",
   "tables": {
     "audit_outbox": {
@@ -733,6 +733,13 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
+          "autoincrement": false
+        },
+        "resource": {
+          "name": "resource",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
           "autoincrement": false
         }
       },

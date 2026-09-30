@@ -515,10 +515,11 @@ export const heldRequestSchema = z.strictObject({
 export type HeldRequest = z.input<typeof heldRequestSchema>;
 
 /**
- * How one held action of a chat ended, for the chat's agent: core names
- * the agent, its person and the chat from the chat's own scope.
+ * Which call a held action of a chat was, for the chat's agent, which has
+ * only the ID the call was answered with: core names the agent, its person
+ * and the chat from the chat's own scope.
  */
-export const heldOutcomeRequestSchema = z.strictObject({
+export const heldCallRequestSchema = z.strictObject({
   agentId: identifierSchema,
   onBehalfOf: identifierSchema,
   /** The Workspace object that holds the chat, as its context names it. */
@@ -526,21 +527,41 @@ export const heldOutcomeRequestSchema = z.strictObject({
   chatId: chatIdSchema,
   id: z.uuid(),
 });
+export type HeldCallRequest = z.input<typeof heldCallRequestSchema>;
+
+/**
+ * The call a held action was, as far as authorising it again takes: the
+ * connection, the one resource its capability named (`null` for the whole
+ * connection), the action, and the key connect made for it. Never its
+ * input.
+ */
+export interface HeldCall {
+  connectionId: string;
+  resource: string | null;
+  action: string;
+  idempotencyKey: string;
+}
+
+/**
+ * Reads how a held call ended: the call as `HeldCall` names it, with the
+ * capability core made for exactly that call, as for carrying it out.
+ */
+export const heldOutcomeRequestSchema = connectCallSchema
+  .omit({ input: true })
+  .required({ idempotencyKey: true });
 export type HeldOutcomeRequest = z.input<typeof heldOutcomeRequestSchema>;
 
 /**
- * What became of a held action a chat's agent asked for under a key
- * connect made: it still waits for its person (or is being carried out
- * now); they declined it, or it was dropped; it ran and answered (`done`);
- * or it didn't end well (`failed`: `reason` is the error's code, and
- * `output` what the tool said, for a tool's own error).
+ * What became of a held action: it still waits for its person (or is being
+ * carried out now); they declined it, or it was dropped; it ran and
+ * answered (`done`); or it didn't end well (`failed`: `reason` is the
+ * error's code, and `output` what the tool said, for a tool's own error).
  */
-export type HeldOutcome = { connectionId: string; action: string } & (
+export type HeldOutcome =
   | { state: "waiting" }
   | { state: "declined" }
   | { state: "done"; result: ConnectResult }
-  | { state: "failed"; reason: string; output: string | null }
-);
+  | { state: "failed"; reason: string; output: string | null };
 
 /** Workflow runs that have ended, each with its App: at most 50. */
 export const endedRunsSchema = z.strictObject({
@@ -730,10 +751,17 @@ export interface ConnectApi {
   /** One held action waiting for the person, or `null`. */
   pendingAction: (request: HeldRequest) => Promise<PendingAction | null>;
   /**
-   * How a held action ended, for the chat whose agent asked for it, by the
-   * ID its call was answered with: `connect.pending_not_found` for any
-   * other chat, agent or person, as for an ID there never was, and for an
-   * action held under a key of its caller's.
+   * Which call a held action was, for the chat whose agent asked for it,
+   * by the ID its call was answered with: `connect.pending_not_found` for
+   * any other chat, agent or person, as for an ID there never was, and for
+   * an action held under a key of its caller's.
+   */
+  heldCall: (request: HeldCallRequest) => Promise<HeldCall>;
+  /**
+   * How a held call ended, for a caller core authorised for that call as
+   * it would be now: its capability is checked as any call's, and the
+   * answer is masked as that capability says, or refused
+   * (`connect.mask_unsupported`) where connect can't. Recorded as a call.
    */
   heldOutcome: (request: HeldOutcomeRequest) => Promise<HeldOutcome>;
   /**
