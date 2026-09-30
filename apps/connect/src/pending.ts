@@ -13,6 +13,7 @@ import {
   refuseConfirmationSchema,
 } from "@grasp-os/shared/connect";
 import type {
+  ActionDescription,
   ConnectCall,
   ConnectionPerson,
   HeldCall,
@@ -32,7 +33,9 @@ import { drizzle } from "drizzle-orm/d1";
 
 import { recordEvents, recordEventsIf } from "./audit.ts";
 import type { GuardedChange } from "./audit.ts";
+import { providerName } from "./catalog.ts";
 import type { Connection } from "./connections.ts";
+import { nativeConnector } from "./connectors.ts";
 import { connections, idempotentCalls, pendingActions } from "./db/schema.ts";
 
 // Side effects that wait for their person (threat model R7, R12). A side
@@ -96,22 +99,125 @@ export const callOf = (row: Row): Omit<ConnectCall, "capability"> => {
   });
 };
 
-const summaryOf = (row: Row): PendingAction => ({
-  id: row.id,
-  subject: subjectOf(row),
-  appVersion: row.appVersion,
-  mode: row.mode,
-  context: workContextSchema.parse(JSON.parse(row.context)),
-  restricted: row.restricted,
-  permissionId: row.permissionId,
-  connectionId: row.connectionId,
-  resource: row.resource,
-  action: row.action,
-  idempotencyKey: row.idempotencyKey,
-  input: row.input,
-  inputHash: row.inputHash,
-  requestedAt: row.createdAt.toISOString(),
-});
+/** A held action with its connection, as a list reads them together. */
+const withConnection = {
+  row: pendingActions,
+  connection: {
+    provider: connections.provider,
+    accountName: connections.accountName,
+    serverKind: connections.serverKind,
+    server: connections.server,
+  },
+};
+
+/** What a held action's connection is, if connect still has it. */
+type ShownConnection = Pick<
+  Connection,
+  "provider" | "accountName" | "serverKind" | "server"
+> | null;
+
+/** One value of a call's input, as a description shows it (`ActionDescription`). */
+const shownValue = (value: Json): string | string[] => {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    const strings = value.filter((item) => typeof item === "string");
+    if (strings.length === value.length) {
+      return strings;
+    }
+  }
+  return JSON.stringify(value, null, 2);
+};
+
+/**
+ * The held call as its tool describes it: only a native connector's tool
+ * does, in this release's manifest, which is ours and reviewed. The values
+ * are the stored input's own, so the person reads what will run; whatever
+ * a Composio server says of its tools is never shown as a description.
+ */
+const descriptionOf = (
+  row: Row,
+  connection: ShownConnection
+): ActionDescription | undefined => {
+  if (connection?.serverKind !== "native") {
+    return undefined;
+  }
+  const manifest = nativeConnector(connection.server)?.manifest;
+  if (
+    manifest?.provider !== connection.provider ||
+    !Object.hasOwn(manifest.actions, row.action)
+  ) {
+    return undefined;
+  }
+  const describe = manifest.actions[row.action]?.describe;
+  if (describe === undefined) {
+    return undefined;
+  }
+  const { input } = callOf(row);
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return undefined;
+  }
+  const held: Readonly<Record<string, Json | undefined>> = input;
+  const shown = new Set(describe.fields.map((field) => field.input));
+  return {
+    title: describe.title,
+    fields: describe.fields.flatMap((field) => {
+      const value = Object.hasOwn(held, field.input)
+        ? held[field.input]
+        : undefined;
+      return value === undefined
+        ? []
+        : [
+            {
+              input: field.input,
+              label: field.label,
+              value: shownValue(value),
+            },
+          ];
+    }),
+    complete: Object.keys(held).every((key) => shown.has(key)),
+  };
+};
+
+/** The connection's name for people: what it reaches, and its account. */
+const nameOf = (connection: ShownConnection): string | null => {
+  if (connection === null) {
+    return null;
+  }
+  const name = providerName(connection);
+  return connection.accountName === null
+    ? name
+    : `${name} (${connection.accountName})`;
+};
+
+const summaryOf = ({
+  row,
+  connection,
+}: {
+  row: Row;
+  connection: ShownConnection;
+}): PendingAction => {
+  const description = descriptionOf(row, connection);
+  return {
+    id: row.id,
+    subject: subjectOf(row),
+    appVersion: row.appVersion,
+    mode: row.mode,
+    context: workContextSchema.parse(JSON.parse(row.context)),
+    restricted: row.restricted,
+    permissionId: row.permissionId,
+    connectionId: row.connectionId,
+    connectionName: nameOf(connection),
+    resource: row.resource,
+    action: row.action,
+    ...(description === undefined ? {} : { description }),
+    idempotencyKey: row.idempotencyKey,
+    input: row.input,
+    inputHash: row.inputHash,
+    requestedAt: row.createdAt.toISOString(),
+  };
+};
 
 /**
  * What a held action's events say of it: identifiers, never its input;
@@ -540,8 +646,9 @@ export const listPendingActions = async (
     return [];
   }
   const rows = await drizzle(env.DB)
-    .select()
+    .select(withConnection)
     .from(pendingActions)
+    .leftJoin(connections, eq(connections.id, pendingActions.connectionId))
     .where(eq(pendingActions.onBehalfOf, parsed.data.userId))
     .orderBy(desc(pendingActions.createdAt), desc(pendingActions.id))
     .limit(listLimit);
@@ -564,9 +671,10 @@ export const pendingActionFor = async (
   if (person.staff) {
     return null;
   }
-  const row = await drizzle(env.DB)
-    .select()
+  const held = await drizzle(env.DB)
+    .select(withConnection)
     .from(pendingActions)
+    .leftJoin(connections, eq(connections.id, pendingActions.connectionId))
     .where(
       and(
         eq(pendingActions.id, id),
@@ -574,7 +682,7 @@ export const pendingActionFor = async (
       )
     )
     .get();
-  return row === undefined ? null : summaryOf(row);
+  return held === undefined ? null : summaryOf(held);
 };
 
 /**

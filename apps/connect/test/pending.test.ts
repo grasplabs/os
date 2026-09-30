@@ -230,6 +230,9 @@ describe("a side effect from chat", () => {
         context: chatOrigin.context,
         permissionId: chatOrigin.permissionId,
         connectionId,
+        // A Composio connection: known by its toolkit, and its tools
+        // describe nothing connect shows.
+        connectionName: "mail",
         resource: null,
         restricted: false,
         action: "mail.send",
@@ -244,6 +247,115 @@ describe("a side effect from chat", () => {
     await expect(eventsFor(connectionId)).resolves.toStrictEqual([
       { action: "connection.call", actor: "agent", outcome: "held" },
     ]);
+  });
+
+  it("on a native connection is shown as its tool describes it, in the input's own values, with the connection's name", async () => {
+    const anna = someone();
+    const connectionId = await addConnection({
+      provider: "microsoft",
+      serverKind: "native",
+      server: "microsoft-365",
+      accountName: "anna@acme.test",
+    });
+    const input = {
+      mailbox: "anna@acme.test",
+      to: ["ben@acme.test", "cleo@acme.test"],
+      subject: "Invoice INV-7",
+      body: "Hi Ben,\n\nThe invoice is attached.",
+    };
+    await hold(inChat(anna), {
+      connectionId,
+      action: "mail.send",
+      input,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    const held = await heldFor(anna);
+    expect({
+      connectionName: held.connectionName,
+      description: held.description,
+      input: held.input,
+    }).toStrictEqual({
+      connectionName: "Microsoft 365 (anna@acme.test)",
+      description: {
+        title: "Send an email",
+        fields: [
+          { input: "mailbox", label: "From", value: input.mailbox },
+          { input: "to", label: "To", value: input.to },
+          { input: "subject", label: "Subject", value: input.subject },
+          { input: "body", label: "Body", value: input.body },
+        ],
+        complete: true,
+      },
+      input: JSON.stringify(input),
+    });
+    // The one the person is asked about on confirming reads the same.
+    await expect(
+      exports.default.pendingAction({ person: anna, id: held.id })
+    ).resolves.toStrictEqual(held);
+  });
+
+  it("says its description is incomplete when the input holds what the tool doesn't show, and shows other values as JSON", async () => {
+    const anna = someone();
+    const connectionId = await addConnection({
+      provider: "microsoft",
+      serverKind: "native",
+      server: "microsoft-365",
+    });
+    // Held before the tool reads it, so it may hold anything: a property
+    // the tool doesn't take, a value of another type.
+    const input = {
+      mailbox: "anna@acme.test",
+      to: ["ben@acme.test", 7],
+      subject: "Invoice",
+      forwardTo: "eve@evil.test",
+    };
+    await hold(inChat(anna), {
+      connectionId,
+      action: "mail.send",
+      input,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    const held = await heldFor(anna);
+    expect({
+      connectionName: held.connectionName,
+      description: held.description,
+      input: held.input,
+    }).toStrictEqual({
+      connectionName: "Microsoft 365",
+      description: {
+        title: "Send an email",
+        fields: [
+          { input: "mailbox", label: "From", value: "anna@acme.test" },
+          {
+            input: "to",
+            label: "To",
+            value: JSON.stringify(input.to, null, 2),
+          },
+          { input: "subject", label: "Subject", value: "Invoice" },
+        ],
+        complete: false,
+      },
+      input: JSON.stringify(input),
+    });
+  });
+
+  it("on a Composio connection is never shown as a native connector's, whatever its toolkit is called", async () => {
+    const anna = someone();
+    // A toolkit slugged as a native provider, with a tool named as the
+    // native connector's is.
+    const connectionId = await addConnection({
+      provider: "microsoft",
+      accountName: "anna@acme.test",
+    });
+    await hold(inChat(anna), mail(connectionId));
+    const held = await heldFor(anna);
+    expect({
+      connectionName: held.connectionName,
+      described: "description" in held,
+    }).toStrictEqual({
+      connectionName: "microsoft (anna@acme.test)",
+      described: false,
+    });
   });
 
   it("is the same held action when the call is repeated, and refused with another input", async () => {

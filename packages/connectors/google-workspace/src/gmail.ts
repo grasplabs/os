@@ -476,6 +476,15 @@ const labelMessage = defineTool({
   destructive: true,
   resource: "mailbox",
   routes: [post("/messages/{message}/modify")],
+  describe: {
+    title: "Change an email's labels",
+    fields: [
+      { label: "Mailbox", input: "mailbox" },
+      { label: "Message", input: "message" },
+      { label: "Add labels", input: "add" },
+      { label: "Remove labels", input: "remove" },
+    ],
+  },
   run: async ({ mailbox, message: id, add = [], remove = [] }) => {
     if (add.length === 0 && remove.length === 0) {
       throw new ToolError("Name a label to add or to remove", {
@@ -514,6 +523,21 @@ const draftInput = z.strictObject({
   replyTo: recipientsSchema.optional(),
 });
 
+/**
+ * A message as the person asked to confirm it reads it: every property of
+ * {@link draftInput}, so nothing it sends goes unshown.
+ */
+const draftFields = [
+  { label: "From", input: "mailbox" },
+  { label: "To", input: "to" },
+  { label: "Cc", input: "cc" },
+  { label: "Bcc", input: "bcc" },
+  { label: "Reply to", input: "replyTo" },
+  { label: "Subject", input: "subject" },
+  { label: "Body", input: "body" },
+  { label: "Body format", input: "bodyType" },
+] as const;
+
 /** The message as Gmail's `raw` takes it, from the mailbox itself. */
 const rawOf = (input: z.output<typeof draftInput>): string =>
   rawMessage({
@@ -547,6 +571,7 @@ const sendMail = defineTool({
   destructive: false,
   resource: "mailbox",
   routes: [post("/messages/send")],
+  describe: { title: "Send an email", fields: draftFields },
   run: async (input) => {
     const sent = await googleJson(
       googleUrl(gmailHost, mailboxPath(input.mailbox, "/messages/send")),
@@ -578,6 +603,7 @@ const createDraft = defineTool({
   destructive: false,
   resource: "mailbox",
   routes: [post("/drafts")],
+  describe: { title: "Create a draft email", fields: draftFields },
   run: async (input) => {
     const draft = await googleJson(
       googleUrl(gmailHost, mailboxPath(input.mailbox, "/drafts")),

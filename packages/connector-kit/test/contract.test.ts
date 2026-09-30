@@ -341,6 +341,47 @@ describe("a connector", () => {
     }
   });
 
+  it("describes a call by its tools' own input properties, each once", () => {
+    // Typed loosely, as `toolWith` takes it: a described property is
+    // otherwise held to the input's own by its type.
+    const input: z.ZodObject = z.strictObject({
+      to: z.string(),
+      body: z.string(),
+    });
+    const described = (fields: { label: string; input: string }[]) =>
+      connectorWith({
+        tools: [
+          defineTool({
+            name: "items.send",
+            description: "Sends an item",
+            input,
+            output: z.strictObject({}),
+            readOnly: false,
+            routes: [{ ...route, method: "POST" }],
+            describe: { title: "Send an item", fields },
+            run: async () => await Promise.resolve({ output: {} }),
+          }),
+        ],
+      });
+    const fields = [
+      { label: "To", input: "to" },
+      { label: "Body", input: "body" },
+    ];
+    expect(
+      described(fields).manifest.actions["items.send"]?.describe
+    ).toStrictEqual({
+      title: "Send an item",
+      fields,
+    });
+    for (const broken of [
+      [{ label: "To", input: "recipient" }],
+      [...fields, { label: "Again", input: "to" }],
+      [],
+    ]) {
+      expect(() => described(broken)).toThrow(z.ZodError);
+    }
+  });
+
   it("has one tool per name", () => {
     const tool = toolWith(z.strictObject({}));
     expect(() => connectorWith({ tools: [tool, tool] })).toThrow("Two tools");

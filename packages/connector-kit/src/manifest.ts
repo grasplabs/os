@@ -192,10 +192,33 @@ export type Route = z.infer<typeof routeSchema>;
 const maxRoutes = 32;
 
 /**
+ * How a call of an action reads to the person asked to confirm it: a
+ * title, and the input properties that matter, each under a label. The
+ * person is shown each property's value exactly as the call holds it,
+ * never a summary of it, and is told when the call's input holds more than
+ * these show.
+ */
+const actionDescribeSchema = z.strictObject({
+  title: z.string().min(1).max(120),
+  fields: z
+    .array(
+      z.strictObject({
+        label: z.string().min(1).max(64),
+        /** The input property whose value it shows. */
+        input: z.string().min(1).max(128),
+      })
+    )
+    .min(1)
+    .max(32),
+});
+export type ActionDescribe = z.infer<typeof actionDescribeSchema>;
+
+/**
  * What connect knows of one action (tool) before running it, and decides
  * by before it reads a token: whether it is read-only, the input property
  * that selects its resource, its input properties, and the only requests
- * it may send.
+ * it may send. And how a held call of it is shown (`describe`), if the
+ * tool says.
  */
 const actionManifestSchema = z.strictObject({
   routes: z.array(routeSchema).max(maxRoutes),
@@ -211,6 +234,7 @@ const actionManifestSchema = z.strictObject({
    * one of its names.
    */
   mask: z.array(z.string().min(1).max(256)).max(64).default([]),
+  describe: actionDescribeSchema.optional(),
 });
 export type ActionManifest = z.infer<typeof actionManifestSchema>;
 
@@ -245,6 +269,17 @@ export const connectorManifestSchema = z
         ({ resource, input }) => resource === null || input.includes(resource)
       ),
     "An action's resource must be one of its input properties"
+  )
+  .refine(
+    ({ actions }) =>
+      Object.values(actions).every(
+        ({ describe, input }) =>
+          describe === undefined ||
+          (describe.fields.every((field) => input.includes(field.input)) &&
+            new Set(describe.fields.map((field) => field.input)).size ===
+              describe.fields.length)
+      ),
+    "An action describes only its own input properties, each once"
   )
   .refine(
     ({ actions }) =>
