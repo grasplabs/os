@@ -720,6 +720,80 @@ describe("model rules", { timeout: 60_000 }, () => {
     }
   });
 
+  it("count an answer that breaks off midway, with no end and no count, by an estimate of what came", async () => {
+    // The stream closes after the answer's first 12 characters.
+    const { agent, call } = withRules(
+      { budgets: { user: { limit: 0.01 } } },
+      env.FEATURES,
+      {
+        text: "Hello there, how are you today?",
+        inputTokens: 1000,
+        outputTokens: 100,
+        cut: 12,
+      }
+    );
+    // Some 50,000 tokens at four characters each: past a cent from Llama
+    // 3.3, as above.
+    const prompt = "word ".repeat(40_000);
+    /** A request of `trigger`'s to `model`, and what reached its caller. */
+    const brokenOff = async (
+      model: string,
+      trigger: ReturnType<typeof newPerson>
+    ) => {
+      const session = await agent({
+        model,
+        purpose: "chat.turn",
+        trigger,
+        work: requireWork(),
+      });
+      const stream = session.stream(
+        session.model,
+        normalizeContext({
+          messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
+        })
+      );
+      let streamed = "";
+      for await (const event of stream) {
+        if (event.type === "text_delta") {
+          streamed += event.delta;
+        }
+      }
+      const { stopReason } = await stream.result();
+      return [stopReason, streamed];
+    };
+    const ada = newPerson();
+    const ben = newPerson();
+    const ended = [
+      await brokenOff(workersAi, ada),
+      await brokenOff(anthropic, ben),
+    ];
+    const after = await outcome(call(hello(workersAi, { trigger: ada })));
+    const [[adas], [bens]] = [await eventsOf(ada), await eventsOf(ben)];
+    const tokens = adas?.model?.inputTokens ?? 0;
+    expect({
+      ended,
+      after,
+      ada: [adas?.action, adas?.detail, adas?.model?.outputTokens],
+      prompt: tokens >= prompt.length / 4 && tokens < prompt.length / 4 + 200,
+      ben: [bens?.action, bens?.detail, bens?.model],
+    }).toMatchObject({
+      // What came reached the caller, before the failure.
+      ended: [
+        ["error", "Hello there,"],
+        ["error", "Hello there,"],
+      ],
+      // And is paid for: the estimate used up Ada's cent.
+      after: "model.over_budget",
+      ada: ["model.call", { outcome: "failed", estimated: true }, 3],
+      prompt: true,
+      ben: [
+        "model.call",
+        { outcome: "failed", estimated: true },
+        { inputTokens: 1000, outputTokens: 3 },
+      ],
+    });
+  });
+
   it("alert admins once for every limit lowered below what was spent, and count each month on its own", async () => {
     const month = newMonth();
     const spend = withRules(

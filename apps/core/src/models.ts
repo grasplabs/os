@@ -1129,6 +1129,8 @@ const relayEvents = async (
   out: AssistantMessageEventStream,
   limit: Deadline
 ): Promise<void> => {
+  // The answer as far as it came, as the adapter's last event had it.
+  let partial: AssistantMessage | undefined = undefined;
   for await (const event of events) {
     if (event.type === "error") {
       const sent: Sent = { answer: event.error, ...response };
@@ -1165,10 +1167,17 @@ const relayEvents = async (
       out.push(event);
       return;
     }
+    ({ partial } = event);
     out.push(event);
   }
-  // The adapter ended without a last event: a failure, recorded as one.
-  const answer = failedAnswer(route.model, "The model call failed.");
+  // The adapter ended without a last event: a failure, recorded as one,
+  // with what came of the answer, and was streamed on, so it is counted
+  // (`usedBy`).
+  const answer: AssistantMessage = {
+    ...failedAnswer(route.model, "The model call failed."),
+    content: partial?.content ?? [],
+    usage: partial?.usage ?? noUsage,
+  };
   await record(env, route, { answer, ...response }, 1, "failed");
   out.push({ type: "error", reason: "error", error: answer });
 };

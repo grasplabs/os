@@ -30,6 +30,12 @@ export type GatewayReply =
        * mid-stream.
        */
       pause?: { at: number; until: Promise<unknown> };
+      /**
+       * Streams the text's first `cut` characters, then closes the stream
+       * with nothing after them, neither an end nor a count (Anthropic and
+       * chat completions): an answer that breaks off.
+       */
+      cut?: number;
     }
   | { status: number; errorType?: string }
   | { hang: true };
@@ -386,11 +392,26 @@ const providerStream = (
   logId: string
 ): Response => {
   const { pathname } = new URL(url);
+  const { cut } = answer;
+  // An answer that breaks off: only the events up to its first text.
+  const begun = { ...answer, text: answer.text.slice(0, cut), toolCalls: [] };
   if (pathname.endsWith("/v1/messages")) {
-    return eventStream(anthropicEvents(answer), logId, signal);
+    return eventStream(
+      cut === undefined
+        ? anthropicEvents(answer)
+        : anthropicEvents(begun).slice(0, 3),
+      logId,
+      signal
+    );
   }
   if (pathname.endsWith("/chat/completions")) {
-    return eventStream(chatCompletionEvents(answer), logId, signal);
+    return eventStream(
+      cut === undefined
+        ? chatCompletionEvents(answer)
+        : chatCompletionEvents(begun).slice(0, 1),
+      logId,
+      signal
+    );
   }
   if (pathname.endsWith("/responses")) {
     return eventStream(responsesEvents(answer), logId, signal);
