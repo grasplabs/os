@@ -31,7 +31,7 @@ import {
 } from "./apps.ts";
 import type { Acting, Member } from "./auth/identity.ts";
 import { workspace } from "./durable-objects.ts";
-import { featureEnabled, requireFeature } from "./features.ts";
+import { featureEnabled, previewsEnabled, requireFeature } from "./features.ts";
 import { appsCollectionEnabled } from "./knowledge/access.ts";
 import { appsCollectionId } from "./knowledge/app-entries.ts";
 import { requestPermission } from "./permissions.ts";
@@ -311,7 +311,7 @@ const previewOf = async (
   revision: number,
   built: boolean
 ): Promise<DraftCheck["preview"]> => {
-  if (!featureEnabled(env, "app_preview")) {
+  if (!previewsEnabled(env)) {
     return undefined;
   }
   const outcome = await workspace(env, workspaceId).previewOutcome(
@@ -1021,11 +1021,11 @@ ${previewField}    failedInARow: number;
 
 /**
  * `env.build`: what its checks say of the draft's preview only while
- * previews are on (`app_preview`).
+ * previews are on (`previewsEnabled`).
  */
 export const buildApi = (env: Env): AgentApi => ({
   name: "build",
   types: buildTypes,
-  declaration: buildDeclaration(featureEnabled(env, "app_preview")),
+  declaration: buildDeclaration(previewsEnabled(env)),
   stub: (scope) => exports.BuildApi({ props: scope }),
 });

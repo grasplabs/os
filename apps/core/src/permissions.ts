@@ -22,6 +22,7 @@ import type {
   DeclaredPermission,
   Permission,
   PermissionObject,
+  PermissionStatus,
   PermissionSubject,
 } from "@grasp-os/shared/permissions";
 import {
@@ -1356,6 +1357,20 @@ export const requireActivePerson = async (
   }
 };
 
+/** A subject's permissions in any of `statuses`, in the order asked for. */
+const permissionsIn = async (
+  env: Env,
+  subject: PermissionSubject,
+  statuses: PermissionStatus[]
+): Promise<Permission[]> => {
+  const rows = await drizzle(env.DB)
+    .select()
+    .from(permissions)
+    .where(and(ofSubject(subject), inArray(permissions.status, statuses)))
+    .orderBy(asc(permissions.requestedAt), asc(permissions.id));
+  return rows.map(toPermission);
+};
+
 /**
  * The active permissions of an App or agent, whoever it acts for. Only for
  * building an env whose stubs check the person on every call.
@@ -1363,14 +1378,22 @@ export const requireActivePerson = async (
 export const activePermissions = async (
   env: Env,
   subject: PermissionSubject
-): Promise<Permission[]> => {
-  const rows = await drizzle(env.DB)
-    .select()
-    .from(permissions)
-    .where(and(ofSubject(subject), eq(permissions.status, "active")))
-    .orderBy(asc(permissions.requestedAt), asc(permissions.id));
-  return rows.map(toPermission);
-};
+): Promise<Permission[]> => await permissionsIn(env, subject, ["active"]);
+
+/**
+ * An App's permissions that are active or asked for and not yet granted:
+ * every binding name its code may be written against. Only for the env of
+ * a draft's preview (preview-bindings.ts), whose stubs allow nothing
+ * whatever a permission's status, never for an env that acts.
+ */
+export const activeOrRequestedPermissions = async (
+  env: Env,
+  app: AppId
+): Promise<Permission[]> =>
+  await permissionsIn(env, { type: "app", appId: app }, [
+    "active",
+    "requested",
+  ]);
 
 /** The active permissions of the App or agent `authority` names. */
 export const grantedPermissions = async (

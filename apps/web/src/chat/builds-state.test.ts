@@ -236,12 +236,15 @@ describe("the Being built section", () => {
 
 describe("the screen a draft's preview shows", () => {
   it("is the one picked while the draft still changes it, otherwise the first it changes", () => {
-    const changed = changedScreens([
-      "app/server.ts",
-      "screens/zeta.tsx",
-      "screens/alpha.tsx",
-      "screens/lib/format.ts",
-    ]);
+    const changed = changedScreens({
+      changed: [
+        "app/server.ts",
+        "screens/zeta.tsx",
+        "screens/alpha.tsx",
+        "screens/lib/format.ts",
+      ],
+      deleted: [],
+    });
 
     expect({
       changed,
@@ -256,6 +259,31 @@ describe("the screen a draft's preview shows", () => {
       picked: "alpha",
       gone: "zeta",
       none: undefined,
+    });
+  });
+
+  it("is never a screen the draft deletes", () => {
+    const paths = ["screens/alpha.tsx", "screens/beta.tsx", "screens/zeta.tsx"];
+    const kept = changedScreens({
+      changed: paths,
+      deleted: ["screens/alpha.tsx"],
+    });
+    const none = changedScreens({ changed: paths, deleted: paths });
+
+    expect({
+      kept,
+      first: previewedScreen(kept),
+      // Picked before the write that deleted it.
+      picked: previewedScreen(kept, "alpha"),
+      none,
+      // Core shows the draft's first screen, from the version it is over.
+      noneLeft: previewedScreen(none, "alpha"),
+    }).toStrictEqual({
+      kept: ["beta", "zeta"],
+      first: "beta",
+      picked: "beta",
+      none: [],
+      noneLeft: undefined,
     });
   });
 });

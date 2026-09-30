@@ -12,26 +12,36 @@ import { WorkerEntrypoint, exports } from "cloudflare:workers";
 
 import { collectionGrantOf, exportGrantOf, stubsOf } from "./bindings.ts";
 import { workspace } from "./durable-objects.ts";
-import { activePermissions } from "./permissions.ts";
+import { activeOrRequestedPermissions } from "./permissions.ts";
 
 // The env of a draft's preview (preview.ts): the binding names the App's
-// active permissions give its server code, so the draft's code runs as it
+// permissions give its server code, so the draft's code runs as it
 // would, but every stub a preview's own, which can't cause a side effect
-// or read real data. Each stub that refuses names its preview (the chat
-// and the App), and before the draft's code hears of a refusal tells the
-// preview which server call it refused, by the caller token that call
-// passed it (`Previews.refused`, preview.ts): so core, not what the
-// draft's code writes, says what a refusal caused (preview-reports.ts).
-// What that means for each:
+// or read real data. The names are those of its active permissions and of
+// the ones asked for and not granted yet: the agent asks for what a new
+// App needs and writes its code against it in the same turn, and only an
+// admin grants it, so without them a draft's call would fail on a binding
+// that isn't there, which nothing the agent writes can fix. A stub allows
+// nothing, so a name gives nothing its permission hasn't.
+//
+// Each stub that refuses names its preview (the chat and the App), and
+// before the draft's code hears of a refusal tells the preview which
+// server call it refused, by the caller token that call passed it
+// (`Previews.refused`, preview.ts): so core, not what the draft's code
+// writes, says what a refusal caused (preview-reports.ts). What a preview
+// means for each binding:
 //
 // - A connection (`OUTLOOK`): every call refused, reads too. A preview
 //   reaches no outside system: a read would carry out what the draft
 //   sends, and bring back what the person's mailbox holds.
 // - A collection (`HANDBOOK`): an empty collection. A list, a search or a
-//   page of records finds nothing, a document named isn't found, and
-//   `canWrite` is false; a write (`saveRecord`) is refused. Nothing of
-//   Knowledge is read, so nothing real reaches the preview's screens, or
-//   what they report.
+//   page of records finds nothing, a document named isn't found,
+//   `canWrite` is false and the App owns none of its record types
+//   (`ownedTypes`): the two hints say the same, that nothing can be
+//   written here, so code that asks before it writes stops where it
+//   would for someone who can't write, and a write (`saveRecord`) is
+//   refused. Nothing of Knowledge is read, a type's declaration neither,
+//   so nothing real reaches the preview's screens, or what they report.
 // - Another App's exports: every call refused. That App's code and data
 //   are real, whatever its export says it does.
 // - Statistics (`STATISTICS`, and the platform's under a grant): a point
@@ -83,8 +93,11 @@ const nothingRead = { collectionIds: [], sensitive: false, restricted: false };
 const notFound = (): Error => knowledgeErrors.create("knowledge.not_found");
 
 // Each stub has exactly the methods of the binding it stands in for, so a
-// call the real one doesn't have fails in a preview as it would live: the
-// runtime refuses a method its receiver doesn't implement.
+// call the real one doesn't have fails in a preview as it would live (the
+// runtime refuses a method its receiver doesn't implement), and one it has
+// never fails for being missing here. The type check holds them to it:
+// test/preview-bindings.test-d.ts fails to compile when a stub's methods
+// and its binding's differ.
 
 /** A connection, in a preview (`AppConnectionBinding`'s methods). */
 export class PreviewConnection extends WorkerEntrypoint<Env, PreviewOf> {
@@ -152,6 +165,11 @@ export class PreviewCollection extends WorkerEntrypoint<Env, PreviewOf> {
     return false;
   }
 
+  // oxlint-disable-next-line class-methods-use-this -- a preview's stubs answer the same, whoever holds them
+  ownedTypes(): string[] {
+    return [];
+  }
+
   async saveRecord(caller: unknown): Promise<never> {
     return await refuse(this.env, this.ctx.props, caller);
   }
@@ -187,8 +205,8 @@ type PreviewStub =
 
 /**
  * The env of `of`, a preview of App `app`'s draft: a preview stub under
- * each name its permissions give its server code now (app-bindings.ts),
- * and `STATISTICS`, which every App has.
+ * each name its permissions give its server code now (app-bindings.ts)
+ * or will once granted, and `STATISTICS`, which every App has.
  */
 export const previewBindings = async (
   env: Env,
@@ -197,7 +215,7 @@ export const previewBindings = async (
   const { app } = of;
   const collectionOf = collectionGrantOf({ type: "app", appId: app });
   const granted = stubsOf<PreviewStub>(
-    await activePermissions(env, { type: "app", appId: app }),
+    await activeOrRequestedPermissions(env, app),
     (permission) => {
       if (permission.object.type === "connection") {
         return exports.PreviewConnection({ props: of });

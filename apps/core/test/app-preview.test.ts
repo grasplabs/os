@@ -25,8 +25,11 @@ import { auditedDuring, signedInApi } from "./sign-in.ts";
 // from the ways it can fail: the draft's code writes to the App's real
 // storage or Knowledge, calls a connection or another App, records a
 // statistic, reaches the network, or reads real data it could show; a
-// preview keeps what an earlier draft wrote; and someone other than the
-// chat's person, or a person who no longer builds the App, previews it.
+// name a permission asked for and not granted gives the preview reaches
+// what only a grant allows; a preview keeps what an earlier draft wrote;
+// someone other than the chat's person, or a person who no longer builds
+// the App, previews it; and a preview runs App code while Apps or screens
+// are switched off.
 
 const idp = mockIdp();
 
@@ -88,19 +91,21 @@ ${
   tries
     ? `
   async tries(caller: Caller, documentId: string): Promise<Record<string, unknown>> {
-    const { MAIL, HANDBOOK, LEDGER, STATISTICS } = env(this);
+    const { MAIL, ARCHIVE, HANDBOOK, LEDGER, STATISTICS } = env(this);
     const listed = await HANDBOOK.listDocuments(caller);
     const found = await HANDBOOK.search(caller, "note");
     const records = await HANDBOOK.listRecords(caller);
     const stats = await STATISTICS.read(caller, { measure: "opened", days: 1, where: {} });
     return {
       mail: await outcome(MAIL.call(caller, "mail.send", { to: "ben@acme.test", subject: "Hi" }, { idempotencyKey: "k" })),
+      archive: await outcome(ARCHIVE.call(caller, "mail.send", { to: "ben@acme.test", subject: "Hi" }, { idempotencyKey: "k" })),
       listed: listed.documents.length,
       found: found.hits.length,
       records: records.records.length,
       read: await outcome(HANDBOOK.getDocument(caller, documentId)),
       section: await outcome(HANDBOOK.read(caller, documentId)),
       canWrite: await HANDBOOK.canWrite(caller),
+      owned: await HANDBOOK.ownedTypes(caller),
       save: await outcome(HANDBOOK.saveRecord(caller, { path: "a.md", ifVersion: 0, record: {}, body: "" })),
       ledger: await outcome(LEDGER.call(caller, "book", {})),
       point: await outcome(STATISTICS.record(caller, { measure: "opened", value: 1 })),
@@ -225,7 +230,8 @@ const chatWithDraft = async (
 /**
  * An App with a mail connection (`MAIL`), a collection with a note
  * (`HANDBOOK`) and another App's exports (`LEDGER`), each granted by an
- * admin, and a draft of it in a chat of its builder's.
+ * admin, the same mail connection asked for again and not granted
+ * (`ARCHIVE`), and a draft of it in a chat of its builder's.
  */
 const setUp = async () => {
   const admin = await signedInApi(idp, "admin");
@@ -260,6 +266,13 @@ const setUp = async () => {
     object: { type: "app", appId: ledger },
     actions: ["write"],
     binding: "LEDGER",
+  });
+  // Asked for, as the agent does for a new App, and granted by nobody.
+  await builder.api.permissions.request({
+    subject,
+    object: { type: "connection", connectionId: mail.id },
+    actions: ["mail.send"],
+    binding: "ARCHIVE",
   });
   const draft = await chatWithDraft(builder, app, {
     "app/server.ts": serverCode(true),
@@ -345,7 +358,7 @@ describe("previewing a chat's draft", { timeout: 120_000 }, () => {
     });
   });
 
-  it("never writes, calls out or reads real data, under the names the App's permissions give", async () => {
+  it("never writes, calls out or reads real data, under the names the App's permissions give, granted or only asked for", async () => {
     const { builder, app, mail, noteId, chatId, revision } = await setUp();
     const { chats } = builder.api;
     const asBuilder = {
@@ -385,17 +398,22 @@ describe("previewing a chat's draft", { timeout: 120_000 }, () => {
       events,
     }).toStrictEqual({
       names: {
-        preview: ["HANDBOOK", "LEDGER", "MAIL", "STATISTICS"],
+        // What the App asked for and wasn't granted has a name in the
+        // preview only, so the draft's code runs as written; the App's
+        // own env has it once an admin grants it.
+        preview: ["ARCHIVE", "HANDBOOK", "LEDGER", "MAIL", "STATISTICS"],
         app: ["HANDBOOK", "LEDGER", "MAIL", "STATISTICS"],
       },
       tried: {
         mail: refused,
+        archive: refused,
         listed: 0,
         found: 0,
         records: 0,
         read: "knowledge.not_found",
         section: "knowledge.not_found",
         canWrite: false,
+        owned: [],
         save: refused,
         ledger: refused,
         point: "ok",
@@ -446,28 +464,36 @@ describe("previewing a chat's draft", { timeout: 120_000 }, () => {
     };
     const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
     const { FEATURES: features } = env;
-    let off: unknown[];
+    // Previews themselves, and the kill switch of each thing one runs: an
+    // App's server code (`apps`) and its screens (`screens`).
+    const off: Record<string, unknown[]> = {};
     try {
-      env.FEATURES = { ...on, app_preview: false };
-      off = await both(builder, chatId, revision);
+      for (const feature of ["app_preview", "apps", "screens"]) {
+        env.FEATURES = { ...on, [feature]: false };
+        // oxlint-disable-next-line no-await-in-loop -- one switch at a time
+        off[feature] = await both(builder, chatId, revision);
+      }
     } finally {
       env.FEATURES = features;
     }
 
+    const disabled = ["feature.disabled", "feature.disabled"];
     expect({ ...refusals, off }).toStrictEqual({
       strangers: ["agent.chat_not_found", "agent.chat_not_found"],
       empty: ["app.no_draft", "app.no_draft"],
       user: ["role.forbidden", "role.forbidden"],
-      off: ["feature.disabled", "feature.disabled"],
+      off: { app_preview: disabled, apps: disabled, screens: disabled },
     });
   });
 
-  it("gives each binding exactly its real binding's methods, so a wrong call fails as it would live", async () => {
-    const { builder, app, chatId, revision } = await setUp();
+  it("fails a call of a method its binding doesn't have as that call fails live", async () => {
+    const { admin, builder, app, chatId, revision } = await setUp();
     // The same code as the App's own: the live answers to compare with.
+    // Made current by an admin, so what the App was granted stays granted
+    // and its own env has each binding too.
     await serverBuilt(
       app,
-      await release(builder, app, { "app/server.ts": serverCode(true) })
+      await release(admin, app, { "app/server.ts": serverCode(true) })
     );
 
     const preview = await builder.api.chats.previewCall(
@@ -483,14 +509,38 @@ describe("previewing a chat's draft", { timeout: 120_000 }, () => {
       { userId: builder.userId, mode: "interactive" },
       "kinds"
     );
+    // A connection has no `listDocuments`, a collection no `call`, another
+    // App's exports no `record`, statistics no `getDocument`.
     expect({ preview, live }).toStrictEqual({
       preview: live,
-      live: [
-        expect.stringContaining("listDocuments"),
-        expect.stringContaining("call"),
-        expect.stringContaining("record"),
-        expect.stringContaining("getDocument"),
-      ],
+      live: ["listDocuments", "call", "record", "getDocument"].map(
+        (method) => `The RPC receiver does not implement "${method}".`
+      ),
+    });
+  });
+
+  it("says which of its paths a draft deletes, and previews no screen it deleted", async () => {
+    const builder = await signedInApi(idp, "builder");
+    const app = await newApp(builder, "Invoice desk", released);
+    const { chatId } = await chatWithDraft(builder, app, {
+      "screens/desk.tsx": null,
+      "screens/list.tsx": screen,
+    });
+    const { chats } = builder.api;
+
+    const [draft] = await chats.drafts(chatId);
+    const first = await chats.preview(chatId, app);
+
+    expect({
+      changed: draft?.changed,
+      deleted: draft?.deleted,
+      first: { screen: first.screen, screens: first.screens },
+      gone: await answer(chats.preview(chatId, app, "desk")),
+    }).toStrictEqual({
+      changed: ["screens/desk.tsx", "screens/list.tsx"],
+      deleted: ["screens/desk.tsx"],
+      first: { screen: "list", screens: ["list"] },
+      gone: "screen.not_found",
     });
   });
 
@@ -512,7 +562,7 @@ describe("previewing a chat's draft", { timeout: 120_000 }, () => {
     await expect(slow).resolves.toBe("app.preview_outdated");
   });
 
-  it("stops a preview's callbacks once their person no longer builds the App, or previews are off", async () => {
+  it("stops a preview's callbacks once their person no longer builds the App, or previews, Apps or screens are off", async () => {
     const { admin, app } = await setUp();
     const other = await signedInApi(idp, "builder");
     const role = async (member: "builder" | "user") => {
@@ -576,24 +626,32 @@ describe("previewing a chat's draft", { timeout: 120_000 }, () => {
     );
     const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
     const { FEATURES: features } = env;
-    const switchedOff = await stopsWhen(
-      async () => {
-        await Promise.resolve();
-        env.FEATURES = { ...on, app_preview: false };
-      },
-      async () => {
-        await Promise.resolve();
+    const switchedOff: Record<string, unknown> = {};
+    for (const feature of ["app_preview", "apps", "screens"]) {
+      // oxlint-disable-next-line no-await-in-loop -- one switch at a time
+      switchedOff[feature] = await stopsWhen(
+        async () => {
+          await Promise.resolve();
+          env.FEATURES = { ...on, [feature]: false };
+        },
+        async () => {
+          await Promise.resolve();
+          env.FEATURES = features;
+        }
+      ).finally(() => {
         env.FEATURES = features;
-      }
-    ).finally(() => {
-      env.FEATURES = features;
-    });
+      });
+    }
 
     // Each push was refused by core, as a screen's is once its person may
     // no longer use the App.
     expect({ unshared, switchedOff }).toStrictEqual({
       unshared: "app.not_found",
-      switchedOff: "app.not_found",
+      switchedOff: {
+        app_preview: "app.not_found",
+        apps: "app.not_found",
+        screens: "app.not_found",
+      },
     });
   });
 });

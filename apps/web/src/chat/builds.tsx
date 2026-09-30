@@ -542,7 +542,7 @@ const DraftPreview = ({
   name: string;
 }) => {
   const [picked, setPicked] = useState<string>();
-  const screens = changedScreens(draft.changed);
+  const screens = changedScreens(draft);
   const screen = previewedScreen(screens, picked);
   return (
     <section
