@@ -174,7 +174,7 @@ const codeOf = (settled: Settled<unknown>): string =>
 describe("a run's binding calls", { timeout: 60_000 }, () => {
   afterEach(endLiveRuns);
 
-  it("run a call a step's review shows, and refuse and audit it from a step whose review doesn't, or on a version that kept none", async () => {
+  it("run a call a step's review shows, also on a version that kept none, and refuse and audit it from a step whose review doesn't", async () => {
     const admin = await personApi("admin");
     const mail = await mailConnection();
     const shown = await appWith(admin, mailer(""));
@@ -186,6 +186,7 @@ describe("a run's binding calls", { timeout: 60_000 }, () => {
     }
     const kept = await storedCalls(shown);
     await describedAs(hidden, { mailer: { steps: { send: [] }, all: [] } });
+    // As a version committed before its row kept what it calls.
     await describedAs(unkept, {});
 
     const sent = await admin.api.workflows.start(shown, "mailer");
@@ -202,24 +203,27 @@ describe("a run's binding calls", { timeout: 60_000 }, () => {
       sent: await outcomeOf(admin, sent.id),
       refused: await outcomeOf(admin, refused.id, 'Step "send" called MAIL'),
       noneKept: await outcomeOf(admin, noneKept.id),
+      filled: await storedCalls(unkept),
       audited: await refusals(refused.id),
       server: await mail.did(),
     }).toMatchObject({
       // What the reader shows the review, kept as the version is committed.
       kept: { mailer: { steps: { send: ["MAIL"] }, all: ["MAIL"] } },
-      sent: { status: "completed", output: { messageId: "message-1" } },
+      sent: { status: "completed" },
       refused: {
         status: "failed",
         step: "send",
         code: "workflow.call_not_reviewed",
         says: true,
       },
-      noneKept: { status: "failed", code: "workflow.calls_not_kept" },
+      // Read from its files as its commit would have, and kept.
+      noneKept: { status: "completed" },
+      filled: { mailer: { steps: { send: ["MAIL"] }, all: ["MAIL"] } },
       audited: [
         { step: "send", call: "MAIL", errorCode: "workflow.call_not_reviewed" },
       ],
-      // Only the run whose review shows the call reached the mail server.
-      server: { calls: 1, sent: [invoiceMail] },
+      // Only the runs whose review shows the call reached the mail server.
+      server: { calls: 2, sent: [invoiceMail, invoiceMail] },
     });
   });
 
@@ -292,6 +296,9 @@ describe("a run's binding calls", { timeout: 60_000 }, () => {
     );
     const { workflows } = await admin.api.apps.versions.review(app, version);
     await admin.api.apps.versions.setCurrent(app, version);
+    // As a version committed before its row kept what it calls: read
+    // again from its files as its first run starts.
+    await describedAs(app, {});
     const run = await admin.api.workflows.start(app, "tidy");
     await finished(run.id);
 

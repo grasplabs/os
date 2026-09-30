@@ -1,21 +1,27 @@
 import { createDynamicWorkflowEntrypoint } from "@cloudflare/dynamic-workflows";
 import type { WorkflowRunner } from "@cloudflare/dynamic-workflows";
+import type { AppFiles } from "@grasp-os/shared/apps";
 import {
   appIdSchema,
   runIdSchema,
   workflowIdSchema,
 } from "@grasp-os/shared/ids";
-import type { AppId, RunId } from "@grasp-os/shared/ids";
+import type { AppId, RunId, WorkflowId } from "@grasp-os/shared/ids";
+import { errorFields, log } from "@grasp-os/shared/log";
 import type { Authority } from "@grasp-os/shared/permissions";
 import { workflowErrors } from "@grasp-os/shared/workflows";
+import type { WorkflowCalls } from "@grasp-os/shared/workflows";
+import { and, eq, sql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
 import { callApp } from "../app.ts";
 import { findVersion, versionFiles } from "../apps.ts";
 import { runBindingsFor } from "../bindings.ts";
+import { appVersions } from "../db/core/schema.ts";
 import { runExtraction } from "../knowledge/extraction.ts";
 import type { WorkContext } from "../restricted.ts";
-import { declaredParams, loadRun } from "./code.ts";
+import { declaredParams, loadRun, workflowCallsOf } from "./code.ts";
 import type { Settled, StepError } from "./code.ts";
 import {
   coreStepPrefix,
@@ -135,6 +141,59 @@ const contextOf = (app: AppId, runId: RunId): WorkContext => ({
   runId,
 });
 
+/**
+ * What the review of the run's version shows its workflow calling, which
+ * the run's calls are held to (host.ts): kept on the version's row as it
+ * is committed. A version committed before the row kept it has none: it
+ * is read now from the version's own files by the same reader a commit
+ * uses (`workflowCallsOf`), which is what that version's review showed
+ * for that code, and kept on the row, unless a run of it kept one first.
+ * A reader that fails on them fails the run (`workflow.calls_not_kept`).
+ */
+const keptCalls = async (
+  env: Env,
+  {
+    app,
+    version,
+    workflow,
+  }: { app: AppId; version: number; workflow: WorkflowId },
+  files: AppFiles
+): Promise<WorkflowCalls> => {
+  const { workflowCalls } = await findVersion(env, app, version);
+  const kept = Object.hasOwn(workflowCalls, workflow)
+    ? workflowCalls[workflow]
+    : undefined;
+  if (kept !== undefined) {
+    return kept;
+  }
+  let calls: WorkflowCalls;
+  try {
+    calls = workflowCallsOf(files, workflow);
+  } catch (error) {
+    log.error("workflow.calls_unread", {
+      app,
+      version,
+      workflow,
+      ...errorFields(error),
+    });
+    throw workflowErrors.create("workflow.calls_not_kept");
+  }
+  const path = `$."${workflow}"`;
+  await drizzle(env.DB)
+    .update(appVersions)
+    .set({
+      workflowCalls: sql`json_set(${appVersions.workflowCalls}, ${path}, json(${JSON.stringify(calls)}))`,
+    })
+    .where(
+      and(
+        eq(appVersions.appId, app),
+        eq(appVersions.version, version),
+        sql`json_type(${appVersions.workflowCalls}, ${path}) IS NULL`
+      )
+    );
+  return calls;
+};
+
 /** Runs (or resumes) one run of an App's workflow. */
 const runWorkflow = async (
   env: Env,
@@ -193,20 +252,7 @@ const runWorkflow = async (
       authority,
       contextOf(pinned.data.app, runId)
     );
-    // What the version's review shows its workflows calling, which the
-    // run's calls are held to (host.ts): kept for every workflow of a
-    // version as it is committed, so a run of one it doesn't name fails.
-    const { workflowCalls } = await findVersion(
-      env,
-      pinned.data.app,
-      pinned.data.version
-    );
-    const calls = Object.hasOwn(workflowCalls, pinned.data.workflow)
-      ? workflowCalls[pinned.data.workflow]
-      : undefined;
-    if (calls === undefined) {
-      throw workflowErrors.create("workflow.calls_not_kept");
-    }
+    const files = await versionFiles(env, pinned.data.app, pinned.data.version);
     const run: HostedRun = {
       ...pinned.data,
       runId,
@@ -214,9 +260,8 @@ const runWorkflow = async (
       collections: bindings,
       connections,
       apps,
-      calls,
+      calls: await keptCalls(env, pinned.data, files),
     };
-    const files = await versionFiles(env, run.app, run.version);
     // Read on every load, though only the run's first uses them: after
     // that the SDK replays the values its `$params` step recorded.
     const params = await paramValues(

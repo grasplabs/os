@@ -451,7 +451,9 @@ export const appVersions = sqliteTable(
      * The App's bindings each of the version's workflows calls, by
      * workflow ID (JSON, `WorkflowCalls`), written when it is committed
      * from the same reading its review shows: a run's calls are held to
-     * it (workflows/host.ts). A workflow it doesn't name calls nothing.
+     * it (workflows/host.ts). A row written before it (`{}`) is filled in
+     * by the first run of each of its workflows, read from the version's
+     * files by the same reader (workflows/dispatcher.ts).
      */
     workflowCalls: text("workflow_calls", { mode: "json" })
       .$type<Record<string, WorkflowCalls>>()

@@ -426,8 +426,10 @@ export const hasWorkflow = (files: AppFiles, id: string): boolean =>
  * held to, and what its tests and dry runs are held to, so a call a run
  * would refuse fails before the version is made current.
  */
-const workflowCallsOf = (files: AppFiles, id: WorkflowId): WorkflowCalls =>
-  reviewedCalls(files[workflowPaths(id).workflow] ?? "");
+export const workflowCallsOf = (
+  files: AppFiles,
+  id: WorkflowId
+): WorkflowCalls => reviewedCalls(files[workflowPaths(id).workflow] ?? "");
 
 /** What each workflow in a version's `files` calls, by ID (`workflowCallsOf`). */
 export const workflowCallsIn = (
