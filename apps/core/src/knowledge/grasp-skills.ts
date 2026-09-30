@@ -38,8 +38,7 @@ import type { Writer } from "./documents.ts";
 //   stakeholder interview, the board page), in apps/core/skills/, bundled
 //   with each release as text, and
 //   synced into their collection (source `grasp`) once per release, on
-//   the first request (builtins.ts), or, while the `builtins` flag is off,
-//   by the cron trigger every minute. Nobody else writes them, admins
+//   the first request (builtins.ts). Nobody else writes them, admins
 //   neither (documents.ts `checkedText`), and a purge that names one is
 //   refused: they hold no personal data, and the sync would put their
 //   text back;
@@ -52,12 +51,8 @@ import type { Writer } from "./documents.ts";
 // version number, and the second is refused as a conflict (by the
 // version's primary key, when both got past the version check) and
 // writes nothing, so a change is written once. A rollback syncs the older
-// text back, as a version of its own.
-//
-// On the cron trigger, while old and new isolates both run during a
-// rollout, each writes its own release's text if it differs, so a changed
-// skill flips every minute until the rollout ends. The install on the
-// first request doesn't: builtins.ts says why.
+// text back, as a version of its own. During a rollout the text changes
+// once, never back and forth: builtins.ts says why.
 
 /** The Grasp skills' collection, under this ID: no other has it. */
 export const graspSkillsCollectionId: CollectionId =
@@ -132,8 +127,7 @@ const requireSkills = (env: Env): void => {
  * is off. A skill that fails, or that another sync wrote from the same
  * version first, is logged, and the others are still written; the next
  * sync compares it again. Resolves whether every skill is the release's
- * (or `skills` is off). The install on the first request calls it, and the
- * cron trigger while `builtins` is off.
+ * (or `skills` is off). The install on the first request calls it.
  */
 export const syncGraspSkills = async (
   env: Env,

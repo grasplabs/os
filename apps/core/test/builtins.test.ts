@@ -21,7 +21,6 @@ import {
   syncGraspSkills,
 } from "../src/knowledge/grasp-skills.ts";
 import type { GraspSkill } from "../src/knowledge/grasp-skills.ts";
-import { runCron } from "./cron.ts";
 import { auditedDuring, routed } from "./sign-in.ts";
 
 // What ships with the release, installed once per release on the first
@@ -30,9 +29,7 @@ import { auditedDuring, routed } from "./sign-in.ts";
 // never tried again; an unchanged release writes again; callers arriving
 // together each install, and write twice or refuse each other; a partial
 // install is recorded as done, stranding what failed; switching a part's
-// flag on installs nothing because the release didn't change; and the
-// cron trigger still syncs the skills, flipping them back and forth
-// during a rollout.
+// flag on installs nothing because the release didn't change.
 //
 // The tests of a file share their storage, the singleton's included, so
 // each test that needs an install forgets the last one first.
@@ -287,19 +284,6 @@ describe("the built-ins", () => {
     await expect(
       builtins(env).ensureInstalled(await thisRelease())
     ).resolves.toBeTruthy();
-    await expect(storedSkills()).resolves.toStrictEqual(releaseSkills());
-  });
-});
-
-describe("the cron trigger", () => {
-  it("leaves the Grasp skills alone while builtins is on, and syncs them while it's off", async () => {
-    const changed = otherRelease(...firstPaths(1));
-    await syncGraspSkills(env, changed);
-
-    await runCron({ FEATURES: { ...features, builtins: true } });
-    await expect(storedSkills()).resolves.toStrictEqual(releaseSkills(changed));
-
-    await runCron();
     await expect(storedSkills()).resolves.toStrictEqual(releaseSkills());
   });
 });

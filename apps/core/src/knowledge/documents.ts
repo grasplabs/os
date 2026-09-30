@@ -288,7 +288,7 @@ export const checkedText = async (
   purge = false
 ): Promise<Prepared> => {
   // The Grasp skills are the release's (grasp-skills.ts): no save,
-  // restore, proposal or purge changes them, an admin's neither; the next
+  // restore or purge changes them, an admin's neither; the next
   // sync would only put the release's text back.
   if (collection.source === "grasp" && !graspSync) {
     throw knowledgeErrors.create("knowledge.read_only");
@@ -339,8 +339,8 @@ export interface Write {
   message: string | null;
   restoredFrom: number | null;
   /**
-   * More statements for the same batch, such as marking the proposal the
-   * version comes from approved: they commit with it or not at all.
+   * More statements for the same batch, such as a purge's rewrite of the
+   * current version: they commit with it or not at all.
    */
   also?: BatchItem<"sqlite">[];
   /** Set only by the sync of the Grasp skills, their one writer. */

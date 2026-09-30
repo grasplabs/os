@@ -57,6 +57,13 @@
       "when": 1790669298306,
       "tag": "0007_drop_playbook",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1790793391412,
+      "tag": "0008_drop_memory_proposals",
+      "breakpoints": true
     }
   ]
 }

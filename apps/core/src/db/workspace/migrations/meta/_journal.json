@@ -50,6 +50,13 @@
       "when": 1790694690494,
       "tag": "0006_chat_attachments",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1790793391689,
+      "tag": "0007_chat_owner_required",
+      "breakpoints": true
     }
   ]
 }

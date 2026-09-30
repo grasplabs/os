@@ -12,7 +12,6 @@ import {
 import type { GraspSkill } from "../src/knowledge/grasp-skills.ts";
 import { requestGranted } from "./apps.ts";
 import { actingFor, envOf, knowledgeIn, newChat } from "./contexts.ts";
-import { runCron } from "./cron.ts";
 import { mockIdp } from "./idp.ts";
 import { knowledgeRacing, readCollection } from "./knowledge.ts";
 import {
@@ -24,8 +23,9 @@ import {
   unique,
 } from "./sign-in.ts";
 
-// Skills: the Grasp skills, which ship with each release and the cron
-// trigger syncs into their collection, and the client's own. These tests
+// Skills: the Grasp skills, which ship with each release and its install
+// syncs into their collection (builtins.test.ts tests when it runs), and
+// the client's own. These tests
 // start from the ways that can fail: a release's changed skill never
 // reaches the collection, or reaches it twice when two syncs run at once,
 // or a sync writes when nothing changed; someone, an admin too, changes a
@@ -91,9 +91,9 @@ describe("the Grasp skills", setUpTime, () => {
     );
   });
 
-  it("are this release's once the cron trigger runs, and a run with nothing changed writes nothing", async () => {
+  it("are this release's once synced, and a sync with nothing changed writes nothing", async () => {
     const admin = await personOf("admin");
-    await runCron();
+    await syncGraspSkills(env);
 
     const documents = await graspDocuments(admin);
     expect(documents.map(({ path }) => path)).toStrictEqual(
@@ -119,7 +119,7 @@ describe("the Grasp skills", setUpTime, () => {
     );
 
     const events = await auditedDuring(async () => {
-      await runCron();
+      await syncGraspSkills(env);
     });
     await expect(graspDocuments(admin)).resolves.toStrictEqual(documents);
     expect(knowledgeActions(events)).toStrictEqual([]);

@@ -32,8 +32,8 @@ import { featureErrors } from "@grasp-os/shared/errors";
 // `model_settings` admins reading those rules and the month's spend, and
 // `improvement_signals` the daily signals and reading them, and
 // `knowledge_signals` Knowledge's usage signals and reading them. `builtins`
-// moves installing what ships with the release (builtins.ts) from the
-// cron trigger to the first request.
+// installing what ships with the release (builtins.ts) on the first
+// request.
 //
 // `workflows` and `decisions` never fail a run. Before each step, sleep
 // and wait, while `workflows` is off (or `decisions`, before a step that
@@ -163,13 +163,9 @@ export type Feature =
   /**
    * What ships with the release, installed once per release on the first
    * request (builtins.ts): the built-in blueprints, while `apps` and
-   * `app_blueprints` are on too, and the Grasp skills, instead of synced
-   * by the cron trigger every minute. Switched off, nothing is installed
-   * and the cron trigger syncs the skills as before; the built-in
-   * blueprints already installed stay, as any App's blueprint does.
-   * Switch it on only once a release that has it is fully
-   * rolled out: a release from before it still syncs its own skills on
-   * the cron trigger, which the install would not undo.
+   * `app_blueprints` are on too, and the Grasp skills. Its kill switch:
+   * while off, nothing is installed; what was installed before stays, as
+   * any App's blueprint and any document does.
    */
   | "builtins"
   /**

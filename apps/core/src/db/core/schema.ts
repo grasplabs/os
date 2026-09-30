@@ -21,7 +21,6 @@ import type {
  */
 import { sql } from "drizzle-orm";
 import {
-  check,
   index,
   integer,
   primaryKey,
@@ -911,22 +910,6 @@ export const appStatisticSteps = sqliteTable(
       ],
     }),
   ]
-);
-
-/**
- * The version of core the cron last saw running, one row, `id` 1, as the
- * first release of src/platform-updates.ts kept it. No longer written:
- * `platform_versions` replaces it. Drop it in a later release, once no
- * version that writes it can be rolled back to.
- */
-export const platformVersion = sqliteTable(
-  "platform_version",
-  {
-    id: integer().primaryKey(),
-    versionId: text("version_id").notNull(),
-    recordedAt: timestamp("recorded_at").notNull(),
-  },
-  (table) => [check("platform_version_one_row", sql`${table.id} = 1`)]
 );
 
 /**

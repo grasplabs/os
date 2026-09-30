@@ -8,7 +8,6 @@ import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { proposeMemory } from "../src/knowledge/memory-proposals.ts";
 import { forContext, saveUserMemory } from "../src/knowledge/memory.ts";
 import { actingFor, newChat } from "./contexts.ts";
 import { mockIdp } from "./idp.ts";
@@ -25,8 +24,8 @@ import {
 
 // Purging personal data from Knowledge. These tests start from the ways a
 // purge can fail or be abused: the text survives somewhere (an earlier
-// version, a section, a title, the search index's pages, a memory
-// proposal, memory cached by version); the purge record in the audit log,
+// version, a section, a title, the search index's pages, memory cached
+// by version); the purge record in the audit log,
 // which can't be purged, carries the text it removed; a purge reaches
 // documents it wasn't aimed at; someone other than the client's admins
 // purges, or purges without confirming, or confirms a purge other than the
@@ -161,7 +160,7 @@ const saveOver = async (
 };
 
 describe("a personal purge", setUpTime, () => {
-  it("removes the person's USER.md, every version, and their agents' proposals, from everywhere", async () => {
+  it("removes the person's USER.md and every version, from everywhere", async () => {
     const admin = await personOf("admin");
     const leaver = await personOf("user");
     const stays = await personOf("user");
@@ -186,10 +185,6 @@ describe("a personal purge", setUpTime, () => {
     });
     const memory = await admin.api.memory.collections();
     await saveOver(admin, memory.memory ?? "", "MEMORY.md", "# Company");
-    await proposeMemory(env, asLeaver, work, {
-      file: "MEMORY.md",
-      text: `# Company\n${secret} runs payroll.`,
-    });
     // Cached, keyed by the USER.md's version.
     const before = await forContext(env, asLeaver, work, own);
     const { personal } = await leaver.api.memory.collections();
@@ -226,7 +221,6 @@ describe("a personal purge", setUpTime, () => {
       plan: {
         documents: 1,
         versions: 2,
-        proposals: 1,
         inLongerWords: 0,
         originals: 0,
         token: "string",
@@ -236,7 +230,6 @@ describe("a personal purge", setUpTime, () => {
         purgeId: "string",
         documents: 1,
         versions: 2,
-        proposals: 1,
       },
       before: true,
       after: false,
@@ -247,7 +240,6 @@ describe("a personal purge", setUpTime, () => {
     // The one who stays still has the name in their own USER.md; the
     // leaver's text is gone from every table, the index's pages too.
     expect(heldBefore).toStrictEqual([
-      "memory_proposals.text",
       "search_trigrams.text",
       "search_trigrams_content.c3",
       "search_words.text",
@@ -268,12 +260,6 @@ describe("a personal purge", setUpTime, () => {
         .filter(({ name }) => name === "USER.md")
         .map(({ documentId }) => documentId)
     );
-    const { results: leftProposals } = await env.KNOWLEDGE.prepare(
-      "SELECT id FROM memory_proposals WHERE on_behalf_of = ?"
-    )
-      .bind(leaver.userId)
-      .all();
-    expect(leftProposals).toStrictEqual([]);
     expect({
       events: events.map(({ action, actor, target, detail }) => ({
         action,
@@ -294,7 +280,6 @@ describe("a personal purge", setUpTime, () => {
             userId: leaver.userId,
             documents: 1,
             versions: 2,
-            proposals: 1,
           },
         },
         {
@@ -308,7 +293,6 @@ describe("a personal purge", setUpTime, () => {
             userId: leaver.userId,
             documents: 1,
             versions: 2,
-            proposals: 1,
           },
         },
       ],
@@ -346,7 +330,6 @@ describe("a personal purge", setUpTime, () => {
         purgeId: "string",
         documents: 0,
         versions: 0,
-        proposals: 0,
       },
       held: [],
     });
@@ -399,11 +382,6 @@ describe("a purge of content", setUpTime, () => {
     const agent = newAgent();
     const work = await newChat(agent);
     const asAgent = actingFor(agent, admin.userId);
-    const proposal = await proposeMemory(env, asAgent, work, {
-      file: "MEMORY.md",
-      text: `# Company\n${name} runs payroll and HR.`,
-      message: `${name} does HR too, as ${name}s did`,
-    });
     const before = await forContext(env, asAgent, work, { type: "own" });
 
     const input: PurgeInput = {
@@ -419,11 +397,6 @@ describe("a purge of content", setUpTime, () => {
 
     const after = await forContext(env, asAgent, work, { type: "own" });
     const current = await owner.api.knowledge.getDocument(leave.id);
-    const proposalRow = await env.KNOWLEDGE.prepare(
-      "SELECT text, message, status, base_version AS baseVersion FROM memory_proposals WHERE id = ?"
-    )
-      .bind(proposal.id)
-      .first();
     const hits = await owner.api.knowledge.search(name);
     const backlinks = await owner.api.knowledge.backlinks(other.id);
     const history = await owner.api.knowledge.history(leave.id);
@@ -432,7 +405,6 @@ describe("a purge of content", setUpTime, () => {
       plan: {
         documents: outcomeOf?.plan.documents,
         versions: outcomeOf?.plan.versions,
-        proposals: outcomeOf?.plan.proposals,
         inLongerWords: outcomeOf?.plan.inLongerWords,
       },
       result: {
@@ -447,20 +419,17 @@ describe("a purge of content", setUpTime, () => {
       company: companyTexts.filter(
         (text) => text.includes(name) || text.includes("(removed)")
       ),
-      proposal: proposalRow,
       memoryBefore: before.text.includes(name),
       memoryAfter: after.text.includes(name),
       memoryKeyChanged: after.key !== before.key,
       hits: hits.hits.map(({ documentId }) => documentId),
       backlinks: backlinks.backlinks.map(({ documentId }) => documentId),
     }).toStrictEqual({
-      // "…s did", left in the proposal's message.
-      plan: { documents: 2, versions: 4, proposals: 1, inLongerWords: 1 },
+      plan: { documents: 2, versions: 4, inLongerWords: 0 },
       result: {
         purgeId: "string",
         documents: 2,
         versions: 4,
-        proposals: 1,
       },
       leave: [
         "# Leave\nAsk (removed) ((removed)) about it.",
@@ -477,13 +446,6 @@ describe("a purge of content", setUpTime, () => {
         "# Company\n(removed) runs payroll.",
         "# Company\n(removed) runs payroll.",
       ],
-      // Still waiting, on the new version: approving it still works.
-      proposal: {
-        text: "# Company\n(removed) runs payroll and HR.",
-        message: `(removed) does HR too, as ${name}s did`,
-        status: "pending",
-        baseVersion: companyTexts.length,
-      },
       memoryBefore: true,
       memoryAfter: false,
       memoryKeyChanged: true,
@@ -512,8 +474,7 @@ describe("a purge of content", setUpTime, () => {
             terms: 2,
             documents: 2,
             versions: 4,
-            proposals: 1,
-            inLongerWords: 1,
+            inLongerWords: 0,
           },
         },
         {
@@ -530,12 +491,6 @@ describe("a purge of content", setUpTime, () => {
       ],
       carriesText: false,
     });
-    // The proposal moved to the new version, so approving it works.
-    await admin.api.memory.approve(proposal.id);
-    const approved = await admin.api.knowledge.getDocument(company.id);
-    expect(approved.version.text).toBe(
-      "# Company\n(removed) runs payroll and HR."
-    );
   });
 
   it("drops the terms from the search index and its pages", async () => {
@@ -761,11 +716,10 @@ describe("a purge of content", setUpTime, () => {
       again: {
         documents: again.documents,
         versions: again.versions,
-        proposals: again.proposals,
       },
     }).toStrictEqual({
       text: "# Log\n(removed)(removed) left.",
-      again: { documents: 0, versions: 0, proposals: 0 },
+      again: { documents: 0, versions: 0 },
     });
   });
 
@@ -985,7 +939,7 @@ describe("a purge of content", setUpTime, () => {
       versions: saved + 1,
       holding: 0,
       last: `# Log\n(removed) did thing ${saved}.`,
-      again: { purgeId: "string", documents: 0, versions: 0, proposals: 0 },
+      again: { purgeId: "string", documents: 0, versions: 0 },
       unchanged: texts,
     });
   });
@@ -1081,74 +1035,6 @@ describe("a purge of content", setUpTime, () => {
         "# Note\n(removed) two.",
         "# Note\n(removed) 3.",
         "# Note\n(removed) 3.",
-      ],
-    });
-  });
-
-  it("fails for a proposal made after it read them, and finishes when run again", async () => {
-    const admin = await personOf("admin");
-    const agent = newAgent();
-    const asAgent = actingFor(agent, admin.userId);
-    const work = await newChat(agent);
-    const name = `Jonker${unique()}`;
-    const { memory } = await admin.api.memory.collections();
-    const path = `agents/${agent.agentId}/AGENTS.md`;
-    await saveOver(admin, memory ?? "", path, `# Agent\nAsk ${name} first.`);
-    const file = await saveOver(
-      admin,
-      memory ?? "",
-      path,
-      `# Agent\nAsk ${name} second.`
-    );
-    const firstHolds = async (): Promise<boolean> => {
-      const [first] = await versionTexts(file.id);
-      return first?.includes(name) ?? false;
-    };
-    // Knowledge as the purge's request sees it: once it has rewritten the
-    // earlier version, after reading the proposals, the agent proposes a
-    // change from the current version, with the name in it.
-    let proposed = "";
-    const racing = await apiWith(admin, {
-      afterBatch: async () => {
-        if (proposed === "" && !(await firstHolds())) {
-          const proposal = await proposeMemory(env, asAgent, work, {
-            file: "agent",
-            text: `# Agent\nAsk ${name} third.`,
-          });
-          proposed = proposal.id;
-        }
-      },
-    });
-    const input: PurgeInput = {
-      type: "content",
-      documentIds: [file.id],
-      terms: [name],
-      reason: "other",
-    };
-    const { token } = await admin.api.knowledge.preparePurge(input);
-    const first = await outcome(racing.knowledge.purge(input, token));
-    const afterFirst = await versionTexts(file.id);
-    await purged(admin, input);
-    const proposal = await env.KNOWLEDGE.prepare(
-      "SELECT text, base_version AS baseVersion FROM memory_proposals WHERE id = ?"
-    )
-      .bind(proposed)
-      .first();
-    expect({
-      first,
-      afterFirst: afterFirst.map((text) => text.includes(name)),
-      proposal,
-      texts: await versionTexts(file.id),
-    }).toStrictEqual({
-      first: "knowledge.conflict",
-      // Only the earlier version was rewritten; the batch that saves the
-      // next one failed whole.
-      afterFirst: [false, true],
-      proposal: { text: "# Agent\nAsk (removed) third.", baseVersion: 3 },
-      texts: [
-        "# Agent\nAsk (removed) first.",
-        "# Agent\nAsk (removed) second.",
-        "# Agent\nAsk (removed) second.",
       ],
     });
   });

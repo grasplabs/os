@@ -530,7 +530,7 @@ export class Workspace extends DurableObject<Env> {
         },
       });
     }
-    if (restricted && personId !== null && agentId !== null) {
+    if (restricted) {
       // As restricted.ts records a chat entering restricted mode.
       this.#outboxEntry({
         actor: delegateActorOf(chatAuthority({ agentId, personId })),
@@ -628,7 +628,7 @@ export class Workspace extends DurableObject<Env> {
    */
   chatState(
     chatId: ChatId
-  ): { agentId: string | null; restricted: boolean } | undefined {
+  ): { agentId: string; restricted: boolean } | undefined {
     return this.#db
       .select({ agentId: chats.agentId, restricted: chats.restricted })
       .from(chats)
@@ -690,9 +690,6 @@ export class Workspace extends DurableObject<Env> {
     // The agent acts for the chat's own person, as this object stored it,
     // never for whoever asks, and only while they are still a member.
     const { personId, agentId } = chat;
-    if (personId === null || agentId === null) {
-      throw agentErrors.create("agent.no_person");
-    }
     // Being deleted: its writes are being rejected, and it takes no more.
     if (this.#deleting.has(chat.id)) {
       throw agentErrors.create("agent.chat_not_found");
@@ -1713,7 +1710,7 @@ export class Workspace extends DurableObject<Env> {
    */
   #ownChat(chatId: unknown, personId: string): Chat {
     const chat = this.#chat(chatId);
-    if (chat.personId === null || chat.personId !== personId) {
+    if (chat.personId !== personId) {
       throw agentErrors.create("agent.chat_not_found");
     }
     return chat;

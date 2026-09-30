@@ -69,6 +69,85 @@ describe("Workspace schema", () => {
     expect(chat).toMatchObject({ title: "Plans" });
   });
 
+  it("keeps chats that have a person and an agent, and drops those without, with their rows, when chats take both for good", async () => {
+    const stub = newWorkspace();
+    // The schema as it was before chats had to have both.
+    const before = migrations.journal.entries.findIndex(
+      ({ tag }) => tag === "0007_chat_owner_required"
+    );
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.deleteAll();
+      migrateOnWake(state, {
+        journal: { entries: migrations.journal.entries.slice(0, before) },
+        migrations: migrations.migrations,
+      });
+      for (const statement of [
+        "INSERT INTO chats (id, title, created_at, restricted, person_id, agent_id) VALUES ('owned', 'Owned', 1, 1, 'person-1', 'agent-1'), ('nobodys', 'Nobody', 2, 0, NULL, NULL), ('no-agent', 'No agent', 3, 0, 'person-1', NULL)",
+        "INSERT INTO chat_messages (chat_id, message, created_at) VALUES ('owned', '{\"n\":1}', 1), ('nobodys', '{}', 2), ('owned', '{\"n\":2}', 3), ('no-agent', '{}', 4)",
+        "INSERT INTO chat_sources (chat_id, source_id, created_at) VALUES ('owned', 'collection-1', 1), ('nobodys', 'collection-1', 1), ('no-agent', 'collection-2', 1)",
+        "INSERT INTO chat_drafts (chat_id, app_id, base, revision, updated_at) VALUES ('owned', 'app-1', NULL, 1, 1), ('no-agent', 'app-1', NULL, 1, 1)",
+        "INSERT INTO chat_draft_files (chat_id, app_id, path, content) VALUES ('owned', 'app-1', 'index.ts', 'a'), ('no-agent', 'app-1', 'index.ts', 'b')",
+        "INSERT INTO chat_attachments (chat_id, run_id, report, created_at) VALUES ('owned', 'run-1', '{}', 1), ('nobodys', 'run-2', '{}', 1)",
+      ]) {
+        state.storage.sql.exec(statement);
+      }
+    });
+    await evictDurableObject(stub);
+
+    // Waking up on this release's code applies the migration.
+    const added = await stub.createChat("After", "person-1", "agent-1");
+    await runInDurableObject(stub, (_instance, state) => {
+      const rows = (query: string, ...bindings: string[]) =>
+        state.storage.sql.exec(query, ...bindings).toArray();
+      expect({
+        chats: rows(
+          "SELECT id, title, restricted, person_id AS personId, agent_id AS agentId FROM chats WHERE id <> ? ORDER BY id",
+          added.id
+        ),
+        messages: rows(
+          "SELECT chat_id AS chatId, message FROM chat_messages ORDER BY id"
+        ),
+        sources: rows("SELECT chat_id AS chatId FROM chat_sources"),
+        drafts: rows("SELECT chat_id AS chatId FROM chat_drafts"),
+        files: rows("SELECT chat_id AS chatId FROM chat_draft_files"),
+        attachments: rows("SELECT chat_id AS chatId FROM chat_attachments"),
+      }).toStrictEqual({
+        chats: [
+          {
+            id: "owned",
+            title: "Owned",
+            restricted: 1,
+            personId: "person-1",
+            agentId: "agent-1",
+          },
+        ],
+        messages: [
+          { chatId: "owned", message: '{"n":1}' },
+          { chatId: "owned", message: '{"n":2}' },
+        ],
+        sources: [{ chatId: "owned" }],
+        drafts: [{ chatId: "owned" }],
+        files: [{ chatId: "owned" }],
+        attachments: [{ chatId: "owned" }],
+      });
+      // Its rows still refer to a chat that exists, and must.
+      expect(() => {
+        state.storage.transactionSync(() => {
+          state.storage.sql.exec(
+            "INSERT INTO chat_messages (chat_id, message, created_at) VALUES ('nobodys', '{}', 5)"
+          );
+        });
+      }).toThrow(/FOREIGN KEY/u);
+      expect(() => {
+        state.storage.transactionSync(() => {
+          state.storage.sql.exec(
+            "INSERT INTO chats (id, title, created_at, person_id) VALUES ('half', 'Half', 6, 'person-1')"
+          );
+        });
+      }).toThrow(/NOT NULL/u);
+    });
+  });
+
   it("keeps working when the code is rolled back after an additive migration", async () => {
     const stub = newWorkspace();
     const before = await stub.createChat(
