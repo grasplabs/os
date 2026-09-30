@@ -41,7 +41,6 @@ const features = {
   knowledge: true,
   skills: true,
   apps: true,
-  app_sharing: true,
   app_blueprints: true,
   // The collections built-in blueprints declare are installed with it.
   record_types: true,

@@ -169,7 +169,7 @@ describe("feature flags", () => {
     );
   });
 
-  it("stop sharing Apps with its own flag, and with the Apps kill switch", async () => {
+  it("stop sharing Apps with the Apps kill switch", async () => {
     const admin = await signedInWithRole(idp, "admin");
     const sharingWith = async (features: Record<string, boolean>) => {
       const coreEnv: Env = { ...env, FEATURES: features };
@@ -183,13 +183,8 @@ describe("feature flags", () => {
       ]);
     };
     await expect(
-      Promise.all([
-        sharingWith({ apps: true }),
-        sharingWith({ app_sharing: true }),
-        sharingWith({ apps: true, app_sharing: true }),
-      ])
+      Promise.all([sharingWith({}), sharingWith({ apps: true })])
     ).resolves.toStrictEqual([
-      Array.from({ length: 3 }, () => "feature.disabled"),
       Array.from({ length: 3 }, () => "feature.disabled"),
       // Past the flags: this App doesn't exist.
       Array.from({ length: 3 }, () => "app.not_found"),
@@ -217,7 +212,7 @@ describe("feature flags", () => {
     ]);
   });
 
-  it("stop blueprints with their own flag, the Apps kill switch, and sharing's", async () => {
+  it("stop blueprints with their own flag, and with the Apps kill switch", async () => {
     const admin = await signedInWithRole(idp, "admin");
     const blueprintsWith = async (features: Record<string, boolean>) => {
       const coreEnv: Env = { ...env, FEATURES: features };
@@ -232,14 +227,11 @@ describe("feature flags", () => {
     };
     await expect(
       Promise.all([
-        blueprintsWith({ apps: true, app_sharing: true }),
-        blueprintsWith({ app_sharing: true, app_blueprints: true }),
-        // Whose access is App roles, which sharing turns on.
+        blueprintsWith({ apps: true }),
+        blueprintsWith({ app_blueprints: true }),
         blueprintsWith({ apps: true, app_blueprints: true }),
-        blueprintsWith({ apps: true, app_sharing: true, app_blueprints: true }),
       ])
     ).resolves.toStrictEqual([
-      Array.from({ length: 4 }, () => "feature.disabled"),
       Array.from({ length: 4 }, () => "feature.disabled"),
       Array.from({ length: 4 }, () => "feature.disabled"),
       // Past the flags: this App doesn't exist.

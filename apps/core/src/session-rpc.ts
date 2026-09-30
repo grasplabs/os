@@ -69,13 +69,11 @@ export class SessionRpc extends RpcTarget implements SessionApi {
         }
         return await check();
       };
-    // Sharing Apps and blueprints: the Apps kill switch stops them too, and
-    // blueprints, whose access is App roles, need sharing on.
+    // Blueprints are Apps' versions: the Apps kill switch stops them too.
     this.#apps = new AppsRpc(
       env,
       checkWith("apps"),
-      checkWith("apps", "app_sharing"),
-      checkWith("apps", "app_sharing", "app_blueprints")
+      checkWith("apps", "app_blueprints")
     );
     this.#knowledge = new KnowledgeRpc(env, checkWith("knowledge"));
     // Usage signals are about Knowledge: that kill switch stops them too.

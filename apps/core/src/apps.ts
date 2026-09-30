@@ -23,11 +23,10 @@ import { sha256Hex } from "@grasp-os/shared/encoding";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
 import { canonicalJson } from "@grasp-os/shared/json";
-import { requireBuilder, roleErrors } from "@grasp-os/shared/roles";
+import { requireBuilder } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { screenPath } from "@grasp-os/shared/screens";
 import { and, asc, desc, eq, isNull, lt, sql } from "drizzle-orm";
-import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
@@ -43,7 +42,6 @@ import {
   storedEvent,
 } from "./audit-outbox.ts";
 import type { Acting, Member } from "./auth/identity.ts";
-import { builtinOwner } from "./builtin-app-id.ts";
 import { apps, appVersions } from "./db/core/schema.ts";
 import { isUniqueViolation } from "./db/d1.ts";
 import { featureEnabled, requireFeature } from "./features.ts";
@@ -168,11 +166,8 @@ export const findApp = async (env: Env, input: unknown): Promise<App> => {
 
 /**
  * The App `input` names, for `by` with at least `needed` in it
- * (app-access.ts). While `app_sharing` is off, the rule from before Apps
- * had roles: admins and builders build every App, and users none. A
- * built-in's App is `user` at most for everyone, admins included, whether
- * `app_sharing` is on or off: `role.forbidden` for anything that needs
- * `builder`.
+ * (app-access.ts). A built-in's App is `user` at most for everyone,
+ * admins included: `role.forbidden` for anything that needs `builder`.
  */
 export const appFor = async (
   env: Env,
@@ -180,14 +175,6 @@ export const appFor = async (
   input: unknown,
   needed: AppRole
 ): Promise<App> => {
-  if (!featureEnabled(env, "app_sharing")) {
-    requireBuilder(by);
-    const app = await findApp(env, input);
-    if (app.owner === builtinOwner && needed === "builder") {
-      throw roleErrors.create("role.forbidden");
-    }
-    return app;
-  }
   const app = await findApp(env, input);
   await requireAppRole(env, by, app, needed);
   return app;
@@ -427,24 +414,12 @@ export const createApp = async (
   return app;
 };
 
-/**
- * The Apps `by` has a role in (app-access.ts), as a condition on `apps`.
- * As with `appFor`, while `app_sharing` is off: every App for admins and
- * builders, and users are refused. Never a pending App (`findApp`).
- */
-export const appsListedFor = (env: Env, by: Member): SQL => {
-  if (!featureEnabled(env, "app_sharing")) {
-    requireBuilder(by);
-  }
-  return appsFoundBy(env, by);
-};
-
 /** The Apps `by` has a role in (app-access.ts), oldest first. */
 export const listApps = async (env: Env, by: Member): Promise<App[]> => {
   const rows = await drizzle(env.DB)
     .select()
     .from(apps)
-    .where(appsListedFor(env, by))
+    .where(appsFoundBy(env, by))
     .orderBy(asc(apps.createdAt), asc(apps.id));
   return rows.map(toApp);
 };

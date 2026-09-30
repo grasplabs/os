@@ -12,7 +12,6 @@ import { sourcesOf, sourcesOfApps, unreadableBy } from "./app-provenance.ts";
 import { builtinOwner } from "./builtin-app-id.ts";
 import { apps, appMembers, teamMembers } from "./db/core/schema.ts";
 import { inList } from "./db/d1.ts";
-import { featureEnabled } from "./features.ts";
 
 // Who may do what in an App (App roles). An App is open to:
 //
@@ -43,8 +42,7 @@ import { featureEnabled } from "./features.ts";
 // builder has the `user` role in them, and nobody more, admins included,
 // so everyone who builds finds them and creates Apps from them, and
 // nobody changes, runs, shares or asks permissions for them. Users have
-// no role in them. That holds whether `app_sharing` is on or off
-// (apps.ts `appFor`).
+// no role in them.
 
 /** Who asks, as far as their role in an App goes. */
 export type Person = Pick<Identity, "userId" | "role" | "teams">;
@@ -199,15 +197,10 @@ export const appsOpenTo = (env: Env, by: Person): SQL | undefined => {
 /**
  * The Apps `by` finds, as a condition on `apps`: those in use (never one
  * created from a blueprint that is still pending, app-blueprints.ts) that
- * they have a role in (`appsOpenTo`). While `app_sharing` is off, the rule
- * from before Apps had roles: every App for admins and builders, and none
- * for users.
+ * they have a role in (`appsOpenTo`).
  */
 export const appsFoundBy = (env: Env, by: Person): SQL => {
   const inUse = isNull(apps.pendingSince);
-  if (!featureEnabled(env, "app_sharing")) {
-    return canBuild(by.role) ? inUse : sql`0`;
-  }
   return and(inUse, appsOpenTo(env, by)) ?? inUse;
 };
 

@@ -9,7 +9,6 @@ import type {
 import { RpcTarget } from "capnweb";
 
 import { appFor } from "./apps.ts";
-import { featureEnabled } from "./features.ts";
 import { permissionsOpenTo } from "./permissions-open.ts";
 import {
   grantPermission,
@@ -42,12 +41,7 @@ export class PermissionsRpc extends RpcTarget implements PermissionsApi {
           this.#env,
           person,
           request,
-          async (app, role) => {
-            // While sharing is off, requestPermission's own checks, as before.
-            if (featureEnabled(this.#env, "app_sharing")) {
-              await appFor(this.#env, person, app, role);
-            }
-          }
+          async (app, role) => await appFor(this.#env, person, app, role)
         )
     );
   }

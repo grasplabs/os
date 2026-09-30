@@ -45,8 +45,8 @@ import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { alias } from "drizzle-orm/sqlite-core";
 import { z } from "zod";
 
-import { appsReadableBy } from "../app-access.ts";
-import { appFor, appsListedFor, versionFiles } from "../apps.ts";
+import { appsFoundBy, appsReadableBy } from "../app-access.ts";
+import { appFor, versionFiles } from "../apps.ts";
 import type { Member } from "../auth/identity.ts";
 import { builtinOwner } from "../builtin-app-id.ts";
 import {
@@ -108,8 +108,8 @@ interface ListedApp {
 
 /**
  * The Apps `by` can open now, by name, the built-ins' left out: those they
- * have a role in (`appsListedFor`, which refuses users while `app_sharing`
- * is off) and whose data they can read (`appsReadableBy`).
+ * have a role in (`appsFoundBy`) and whose data they can read
+ * (`appsReadableBy`).
  */
 const visibleApps = async (env: Env, by: Member): Promise<ListedApp[]> => {
   const rows = await drizzle(env.DB)
@@ -130,7 +130,7 @@ const visibleApps = async (env: Env, by: Member): Promise<ListedApp[]> => {
         eq(appVersions.version, apps.currentVersion)
       )
     )
-    .where(and(appsListedFor(env, by), sql`${apps.ownerId} <> ${builtinOwner}`))
+    .where(and(appsFoundBy(env, by), sql`${apps.ownerId} <> ${builtinOwner}`))
     .orderBy(asc(apps.name), asc(apps.id));
   const readable = await appsReadableBy(
     env,

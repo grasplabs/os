@@ -37,7 +37,7 @@ import {
 } from "./apps.ts";
 import type { Acting, Member } from "./auth/identity.ts";
 import { workspace } from "./durable-objects.ts";
-import { featureEnabled, previewsEnabled, requireFeature } from "./features.ts";
+import { previewsEnabled, requireFeature } from "./features.ts";
 import { appsCollectionEnabled } from "./knowledge/access.ts";
 import { appsCollectionId } from "./knowledge/app-entries.ts";
 import { requestPermission } from "./permissions.ts";
@@ -154,15 +154,6 @@ const buildsApps =
         object.collectionId === appsCollectionId &&
         actions.includes("write")
     );
-
-/**
- * Refuses blueprints while they are off: as for people, whose blueprints
- * need App sharing on too, whose roles decide who creates from one.
- */
-const requireBlueprints = (env: Env): void => {
-  requireFeature(env, "app_sharing");
-  requireFeature(env, "app_blueprints");
-};
 
 /** The values a dry run sets, by parameter name, over each test's own. */
 const dryRunParamsSchema = z
@@ -507,7 +498,7 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
     return await this.#build(
       "build.blueprints",
       async (by) => {
-        requireBlueprints(this.env);
+        requireFeature(this.env, "app_blueprints");
         return await listBlueprints(this.env, by);
       },
       (listed) => ({ blueprints: listed.length })
@@ -530,7 +521,7 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
     return await this.#build(
       "build.createFromBlueprint",
       async (by) => {
-        requireBlueprints(this.env);
+        requireFeature(this.env, "app_blueprints");
         return await this.#creating(
           async () =>
             await createFromBlueprint(this.env, by, app, version, input)
@@ -824,11 +815,7 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
           typeof request === "object" && request !== null
             ? { ...request, subject }
             : request,
-          async (named, role) => {
-            if (featureEnabled(this.env, "app_sharing")) {
-              await appFor(this.env, by, named, role);
-            }
-          }
+          async (named, role) => await appFor(this.env, by, named, role)
         );
       },
       (requested) => ({
