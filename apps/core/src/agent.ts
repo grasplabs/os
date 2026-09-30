@@ -298,18 +298,39 @@ export const isMessage = (
 ): message is Message => messageRoles.has(message.role);
 
 /**
- * Most characters of a chat's earlier turns sent with each request, as
- * JSON: about 75,000 tokens, well within the models' windows, with room
- * for the turn under way.
+ * The share of what a request may send (`AgentModel.inputTokens`) that a
+ * chat's turns take. The rest is for what isn't counted, the instructions
+ * and the API declarations, and for the estimate being off.
  */
-export const historyChars = 300_000;
+const historyShare = 0.85;
+
+/**
+ * Characters of a transcript's JSON to a token, for sizing without a
+ * tokenizer: on the low side (prose is nearer 4), so that code and data,
+ * which take more tokens, still fit.
+ */
+const charsPerToken = 3;
+
+/** {@link historyChars} of a model whose window the catalog doesn't give. */
+const unknownWindowChars = 300_000;
+
+/**
+ * Most characters of a chat's turns sent with each request, as JSON: what
+ * fits in {@link historyShare} of the tokens the model takes, so a model
+ * with a large window reads more of a long chat and one with a small
+ * window is never sent more than it can take.
+ */
+export const historyChars = (inputTokens?: number): number =>
+  inputTokens === undefined
+    ? unknownWindowChars
+    : Math.floor(inputTokens * historyShare * charsPerToken);
 
 /** Where a request leaves a chat's earlier turns out. */
 const leftOut =
   "Earlier messages of this chat are left out: the chat is longer than what each request sends. Say so if a question needs them.";
 
 /**
- * The turn under way made to fit in {@link historyChars} where it can: its
+ * The turn under way made to fit in `budget` characters where it can: its
  * oldest code results, but never its latest, give way to a note of how long
  * they were, oldest first, until it fits. Each result keeps its place and
  * its call's ID, so every call still has its result.
@@ -318,7 +339,8 @@ const fitTurnUnderWay = (
   messages: Message[],
   turns: readonly number[],
   turn: number,
-  size: number
+  size: number,
+  budget: number
 ): number => {
   const results = [...messages.keys()].filter(
     (index) => turns[index] === turn && messages[index]?.role === "toolResult"
@@ -326,7 +348,7 @@ const fitTurnUnderWay = (
   let left = size;
   for (const index of results.slice(0, -1)) {
     const result = messages[index];
-    if (left <= historyChars || result?.role !== "toolResult") {
+    if (left <= budget || result?.role !== "toolResult") {
       break;
     }
     const before = JSON.stringify(result).length;
@@ -372,23 +394,32 @@ const measureTurns = (
 
 /**
  * What a request sends of a long chat: the system messages (instructions
- * and API declarations), the newest turns that fit in {@link historyChars}
- * and always the turn under way (its oldest code results shortened when it
- * alone is over), with a note where earlier turns were left out. A turn is
- * a question and everything after it up to the next, so a tool call is
- * never parted from its result.
+ * and API declarations), the newest turns that fit in `budget` characters
+ * (the model's {@link historyChars}) and always the turn under way (its
+ * oldest code results shortened when it alone is over), with a note where
+ * earlier turns were left out. A turn is a question and everything after
+ * it up to the next, so a tool call is never parted from its result.
  */
-export const recentHistory = (history: readonly Message[]): Message[] => {
+export const recentHistory = (
+  history: readonly Message[],
+  budget: number
+): Message[] => {
   const messages = [...history];
   const { turns, sizes } = measureTurns(messages);
   const turn = sizes.length - 1;
-  if (turn >= 0 && (sizes[turn] ?? 0) > historyChars) {
-    sizes[turn] = fitTurnUnderWay(messages, turns, turn, sizes[turn] ?? 0);
+  if (turn >= 0 && (sizes[turn] ?? 0) > budget) {
+    sizes[turn] = fitTurnUnderWay(
+      messages,
+      turns,
+      turn,
+      sizes[turn] ?? 0,
+      budget
+    );
   }
   // The turn under way, then earlier ones while they fit.
   let first = turn;
   let used = sizes[turn] ?? 0;
-  while (first > 0 && used + (sizes[first - 1] ?? 0) <= historyChars) {
+  while (first > 0 && used + (sizes[first - 1] ?? 0) <= budget) {
     first -= 1;
     used += sizes[first] ?? 0;
   }
@@ -500,6 +531,7 @@ export const runTurn = async ({
     { role: "user", content: question, timestamp: Date.now() },
   ];
   const progress: Progress = { steps: 0, runs: 0 };
+  const budget = historyChars(model.inputTokens);
   await runAgentLoop(
     prompts,
     {
@@ -509,7 +541,8 @@ export const runTurn = async ({
     {
       model: model.model,
       // The transcript holds only pi's own messages.
-      convertToLlm: (messages) => recentHistory(messages.filter(isMessage)),
+      convertToLlm: (messages) =>
+        recentHistory(messages.filter(isMessage), budget),
       toolExecution: "sequential",
       // Checked again before every model request.
       prepareRequest: async () => {

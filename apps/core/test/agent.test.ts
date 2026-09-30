@@ -37,6 +37,21 @@ import { signedInWithRole } from "./sign-in.ts";
 
 const idp = mockIdp();
 
+/**
+ * Two models of different context windows, as pi's catalog gives them: the
+ * tests' own, of 1,000,000 tokens, and one of 200,000. Each request keeps
+ * 16,384 of them for the answer.
+ */
+const smallModel = "anthropic/claude-haiku-4-5";
+const answerTokens = 16_384;
+const inputTokens = {
+  large: 1_000_000 - answerTokens,
+  small: 200_000 - answerTokens,
+};
+
+/** A deployment that allows both models. */
+const bothModels = { ...gatewayConfig, models: [model, smallModel] };
+
 /** A new chat for a person no other test uses, answered by `replies`. */
 const newChat = async (...replies: GatewayReply[]) => {
   // A member of the organization, whom no other test uses.
@@ -666,9 +681,10 @@ describe("chat agent turns", () => {
     expect(gateway.requests).toStrictEqual([]);
   });
 
-  it("shortens a long turn's oldest code results to fit, keeping its latest and every call's result", async () => {
-    const { stub, chat, gateway, ask } = await newChat(
-      // 30 code runs of a result the model reads cut to 32 KiB each.
+  it("shortens a long turn's oldest code results to fit the model's window, keeping its latest and every call's result", async () => {
+    const { stub, chat, gateway } = await newChat(
+      // 30 code runs of a result the model reads cut to 32 KiB each: more
+      // than the small model takes.
       ...Array.from({ length: maxRunsPerTurn / maxRunsPerResponse }, () =>
         codeStep(
           "export default async () => 'r'.repeat(40_000);",
@@ -677,10 +693,11 @@ describe("chat agent turns", () => {
       ),
       says("Done.")
     );
+    await pointAtGateway(stub, gateway, { config: bothModels });
 
-    await expect(ask("Run it all.")).resolves.toMatchObject({
-      outcome: "answered",
-    });
+    await expect(
+      stub.ask(chat.id, { text: "Run it all.", model: smallModel })
+    ).resolves.toMatchObject({ outcome: "answered" });
 
     // What the last request sent, in Anthropic's wire format.
     const blockSchema = z.looseObject({
@@ -712,7 +729,8 @@ describe("chat agent turns", () => {
     const latest = results.at(-1);
     expect({
       calls: calls.length,
-      withinWindow: JSON.stringify(last).length < historyChars + 50_000,
+      withinWindow:
+        JSON.stringify(last).length < historyChars(inputTokens.small) + 50_000,
       // Every call still has its result, in the same order.
       pairs: results.map(({ tool_use_id: id }) => id),
       someShortened: shortened.length > 0,
@@ -731,12 +749,14 @@ describe("chat agent turns", () => {
     });
   });
 
-  it("sends only a long chat's recent turns, and stops a chat that is too long", async () => {
+  it("sends as much of a long chat as the model's window takes, and stops a chat that is too long", async () => {
     const { stub, chat, gateway, ask } = await newChat(
       codeStep("export default async () => 'early' + '-result';"),
       says("Noted."),
-      says("Still here.")
+      says("Still here."),
+      says("All here.")
     );
+    await pointAtGateway(stub, gateway, { config: bothModels });
     await ask("Remember this.");
     // A long chat since: questions of 30,000 characters, each answered.
     const answer = JSON.stringify({
@@ -775,30 +795,64 @@ describe("chat agent turns", () => {
         }
       });
     };
+    // 1.2 million characters: more than the small model takes, and well
+    // within the large one's window.
     await addTurns(40);
+    /** What the request for `question` sent of the chat, to `to`. */
+    const sentTo = async (to: string, question: string, answered: string) => {
+      await expect(
+        stub.ask(chat.id, { text: question, model: to })
+      ).resolves.toMatchObject({ outcome: "answered", answer: answered });
+      const sent = JSON.stringify(gateway.requests.at(-1)?.body);
+      return {
+        // The first turn: its question, and what its code returned.
+        early: [sent.includes("Remember this."), sent.includes("early-result")],
+        note: sent.includes("Earlier messages of this chat are left out"),
+        question: sent.includes(question),
+        // The instructions always go along.
+        instructions: sent.includes("You are the Grasp assistant"),
+        chars: sent.length,
+      };
+    };
 
-    await expect(ask("And now?")).resolves.toMatchObject({
-      outcome: "answered",
-      answer: "Still here.",
-    });
-    const sent = JSON.stringify(gateway.requests.at(-1)?.body);
+    const small = await sentTo(smallModel, "And now?", "Still here.");
+    const large = await sentTo(model, "And again?", "All here.");
+
     expect({
-      early: sent.includes("Remember this.") || sent.includes("early-result"),
-      note: sent.includes("Earlier messages of this chat are left out"),
-      question: sent.includes("And now?"),
-      // The instructions always go along.
-      instructions: sent.includes("You are the Grasp assistant"),
-      withinWindow: sent.length < historyChars + 50_000,
+      small: { ...small, chars: undefined },
+      smallWithinWindow: small.chars < historyChars(inputTokens.small) + 50_000,
+      large: { ...large, chars: undefined },
+      largeWithinWindow: large.chars < historyChars(inputTokens.large) + 50_000,
     }).toStrictEqual({
-      early: false,
-      note: true,
-      question: true,
-      instructions: true,
-      withinWindow: true,
+      small: {
+        early: [false, false],
+        note: true,
+        question: true,
+        instructions: true,
+        chars: undefined,
+      },
+      smallWithinWindow: true,
+      // The same chat, whole: the first turn and all since.
+      large: {
+        early: [true, true],
+        note: false,
+        question: true,
+        instructions: true,
+        chars: undefined,
+      },
+      largeWithinWindow: true,
     });
 
     await addTurns(100);
     await expect(codeOf(ask("More?"))).resolves.toBe("agent.chat_full");
+  });
+
+  it("sizes a chat to a fixed number of characters when the model's window is unknown", () => {
+    expect([
+      historyChars(),
+      historyChars(0),
+      historyChars(inputTokens.small) < historyChars(inputTokens.large),
+    ]).toStrictEqual([300_000, 0, true]);
   });
 
   it.each([
