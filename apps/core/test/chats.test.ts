@@ -380,12 +380,14 @@ describe("chats", () => {
   it("tell their agent, on its next turn, how each write it had held ended: confirmed, declined or failed", async () => {
     const ann = await person();
     const admin = await signedInApi(idp, "admin");
-    // Three writes, each on a mail connection of its own; the third one's
-    // server refuses the mail once it is confirmed.
+    // Four writes, each on a mail connection of its own; the third one's
+    // server refuses the mail once it is confirmed, and connect fails
+    // unexpectedly on the fourth once it took it.
     const mails = {
       OUTCOME_SENT: await mailConnection(),
       OUTCOME_DECLINED: await mailConnection(),
       OUTCOME_FAILED: await mailConnection(["invalid"]),
+      OUTCOME_BROKEN: await mailConnection(),
     };
     for (const [binding, { id }] of Object.entries(mails)) {
       // oxlint-disable-next-line no-await-in-loop -- one grant after the other
@@ -420,6 +422,15 @@ describe("chats", () => {
     const sent = heldOn(mails.OUTCOME_SENT);
     const declined = heldOn(mails.OUTCOME_DECLINED);
     const failed = heldOn(mails.OUTCOME_FAILED);
+    const broken = heldOn(mails.OUTCOME_BROKEN);
+    // Connect finds a stored answer to the fourth write's call it can't
+    // read, once it has taken the write: a plain error, not one of its own.
+    await connectDb()
+      .prepare(
+        "INSERT OR REPLACE INTO idempotent_calls (subject_type, subject_id, on_behalf_of, connection_id, action, idempotency_key, input_hash, state, output, provenance, created_at, resource) SELECT subject_type, subject_id, on_behalf_of, connection_id, action, idempotency_key, input_hash, 'done', 'null', 'not JSON', ?, NULL FROM pending_actions WHERE id = ?"
+      )
+      .bind(Date.now(), broken.id)
+      .run();
 
     const decided = {
       // Refused, for another input than the one shown: it waits on, and
@@ -433,6 +444,9 @@ describe("chats", () => {
       declined: await outcome(ann.api.pendingActions.decline(declined.id)),
       failed: await outcome(
         ann.api.pendingActions.confirm(failed.id, failed.inputHash)
+      ),
+      broken: await outcome(
+        ann.api.pendingActions.confirm(broken.id, broken.inputHash)
       ),
     };
     // No turn started by itself; the next question's request holds each
@@ -454,9 +468,10 @@ describe("chats", () => {
         `(pending ID ${sent.id}), was decided. The person confirmed it and it was carried out. Don't ask for it again.`,
         `(pending ID ${declined.id}), was decided. The person declined it: it was not carried out and won't be.`,
         `(pending ID ${failed.id}), was decided. The person confirmed it, but carrying it out failed`,
+        `(pending ID ${broken.id}), was decided. The person confirmed it, but carrying it out failed`,
       ].map((text) => asked.includes(text)),
       // Each names the call that reads how it ended (quoted, in JSON).
-      readWith: [sent, declined, failed].map(({ id }) =>
+      readWith: [sent, declined, failed, broken].map(({ id }) =>
         asked.includes(`env.connections.outcome(\\"${id}\\")`)
       ),
       outcomes: asked.split("was decided.").length - 1,
@@ -465,6 +480,7 @@ describe("chats", () => {
       mail: [
         await mails.OUTCOME_SENT.did(),
         await mails.OUTCOME_DECLINED.did(),
+        await mails.OUTCOME_BROKEN.did(),
       ],
     }).toStrictEqual({
       decided: {
@@ -472,14 +488,16 @@ describe("chats", () => {
         sent: "ok",
         declined: "ok",
         failed: "connect.action_failed",
+        broken: "connect.action_failed",
       },
       requests: 1,
-      told: [true, true, true],
-      readWith: [true, true, true],
-      outcomes: 3,
+      told: [true, true, true, true],
+      readWith: [true, true, true, true],
+      outcomes: 4,
       shown: 0,
       mail: [
         { calls: 1, sent: [{ to: "ben@acme.test", subject: "OUTCOME_SENT" }] },
+        { calls: 0, sent: [] },
         { calls: 0, sent: [] },
       ],
     });

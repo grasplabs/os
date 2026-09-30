@@ -1,7 +1,8 @@
 import { z } from "zod";
 
 import type { OutboxedAuditEvent, OutboxRejected } from "./audit.ts";
-import { defineErrorFamily } from "./errors.ts";
+import { defineErrorFamily, isExpectedError } from "./errors.ts";
+import type { CodedError } from "./errors.ts";
 import {
   chatIdSchema,
   connectionIdSchema,
@@ -952,19 +953,17 @@ export const connectErrors = defineErrorFamily({
  * action (`confirmAction`), so it no longer waits and it failed: marked in
  * its details, which cross RPC with it. A refusal before connect took it,
  * which leaves it waiting, never is. Only a confirmation that took the
- * action tells anyone it failed, so a refused one racing it can't.
+ * action tells anyone it failed, so a refused one racing it can't. An
+ * unexpected error goes as `connect.action_failed`, marked too, so every
+ * failure after the take reaches core marked; its internals stay with
+ * connect, which logs them.
  */
-export const markTaken = (error: unknown): unknown => {
-  if (typeof error === "object" && error !== null && "code" in error) {
-    const details: unknown = Reflect.get(error, "details");
-    Object.assign(error, {
-      details: {
-        ...(typeof details === "object" && details !== null ? details : {}),
-        taken: true,
-      },
-    });
-  }
-  return error;
+export const markTaken = (error: unknown): CodedError => {
+  const coded = isExpectedError(error)
+    ? error
+    : connectErrors.create("connect.action_failed");
+  coded.details = { ...coded.details, taken: true };
+  return coded;
 };
 
 /** Whether `error` is one `markTaken` marked. */

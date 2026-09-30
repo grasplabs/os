@@ -31,6 +31,7 @@ import type {
   StartConnection,
   StartToolkitConnection,
 } from "@grasp-os/shared/connect";
+import { isExpectedError } from "@grasp-os/shared/errors";
 import { errorFields, log } from "@grasp-os/shared/log";
 import { WorkerEntrypoint } from "cloudflare:workers";
 
@@ -449,7 +450,11 @@ export default class Connect
     try {
       return await this.#carryOutAudited(call, claims, held);
     } catch (error) {
-      // Taken, and failed: said so, so core tells the action's chat.
+      // Taken, and failed: said so, so core tells the action's chat. What
+      // went unexpectedly wrong is logged here, and goes as a failure.
+      if (!isExpectedError(error)) {
+        log.error("connect.confirmed_action_failed", errorFields(error));
+      }
       throw markTaken(error);
     }
   }
