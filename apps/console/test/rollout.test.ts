@@ -1251,6 +1251,21 @@ const cancelled = (
   runner: null,
 });
 
+/**
+ * Makes the next upload of `script` in `account` a refusal no retry
+ * fixes: a rollout that made the Workers before it live stops there, its
+ * client left between two releases.
+ */
+const refuseNextUploadOf = (account: AccountState, script: string): void => {
+  cloudflare.failNext(
+    (call) =>
+      call.method === "POST" &&
+      call.path ===
+        `/accounts/${account.id}/workers/scripts/${script}/versions`,
+    400
+  );
+};
+
 /** The Microsoft OAuth app's secret after a rotation in 1Password. */
 const rotatedMicrosoft = "microsoft-secret-rotated-4b7e1c";
 
@@ -2733,15 +2748,8 @@ describe("controlling a rollout", () => {
     const [connect, core] = await workersOf(internal.clientId);
     const connectScript = connect?.scriptName ?? "";
     const release = await importedRelease("feat(core): fails part way");
-    // Connect goes live on the release; core's upload is refused, which no
-    // retry fixes: the client is left between the two releases.
-    cloudflare.failNext(
-      (call) =>
-        call.method === "POST" &&
-        call.path ===
-          `/accounts/${internal.account.id}/workers/scripts/${core?.scriptName ?? ""}/versions`,
-      400
-    );
+    // Connect goes live on the release; core's upload is refused.
+    refuseNextUploadOf(internal.account, core?.scriptName ?? "");
     await using run = await followRollouts();
     await using rollbacks = await followRollbacks();
     const failed = await rollOut(release, { scope: "ring", ring: 0 });
@@ -2789,6 +2797,55 @@ describe("controlling a rollout", () => {
       },
       live: previous,
       recorded: previous,
+      releases: [before, before],
+      targets: {
+        [internal.clientId]: { ring: 0, status: "rolled_back", error: null },
+      },
+    });
+  });
+
+  it("keeps what a rollback puts back when the claim of a rollout started again runs twice, its deploy started by the first try", async () => {
+    const before = await importedRelease("feat(core): the release before");
+    const internal = await activeClient(0, before);
+    const previous = await recordedVersionsOf(internal.clientId);
+    const [, core] = await workersOf(internal.clientId);
+    const release = await importedRelease("feat(core): claimed twice");
+    refuseNextUploadOf(internal.account, core?.scriptName ?? "");
+    await using run = await followRollouts();
+    await using rollbacks = await followRollbacks();
+    await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("errored");
+    // The console's database takes the claim's last write, the deploy it
+    // just started, only the second time: the step runs again, the
+    // client's latest deploy now one no target has.
+    const prepare = env.DB.prepare.bind(env.DB);
+    let claims = 0;
+    const flaky = vi.spyOn(env.DB, "prepare").mockImplementation((query) => {
+      if (query.includes('set "deploy_id"')) {
+        claims += 1;
+        if (claims === 1) {
+          throw new Error("D1 took no write");
+        }
+      }
+      return prepare(query);
+    });
+
+    const again = await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+    flaky.mockRestore();
+    const onRelease = await releasesOf(internal.clientId);
+    await rollbacks.rollBack(again, internal.clientId);
+
+    expect({
+      claims,
+      onRelease,
+      live: await liveVersionsOf(internal.clientId, internal.account),
+      releases: await releasesOf(internal.clientId),
+      targets: await targetsOf(again),
+    }).toStrictEqual({
+      claims: 2,
+      onRelease: [release, release],
+      live: previous,
       releases: [before, before],
       targets: {
         [internal.clientId]: { ring: 0, status: "rolled_back", error: null },
