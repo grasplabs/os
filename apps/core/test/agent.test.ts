@@ -891,6 +891,40 @@ describe("chat agent after a restart", () => {
     expect(said).toStrictEqual([false, false, false]);
   });
 
+  it("says nothing when the restart came before the turn's question was kept, or after its answer was", async () => {
+    const { id, stub, chat, ask } = await newChat(says("Done."));
+    await ask("Do it.");
+    // The mark of a turn taken when the chat's last message had ID
+    // `before`, left as the object leaves it when it dies before the turn
+    // clears it.
+    const markedAt = async (before: number) => {
+      await runInDurableObject(workspace(env, id), (_instance, state) => {
+        state.storage.kv.put(`turn:${chat.id}`, before);
+      });
+    };
+    const lastId = await runInDurableObject(
+      stub,
+      (_instance, state) =>
+        state.storage.sql
+          .exec<{ last: number }>("SELECT max(id) AS last FROM chat_messages")
+          .one().last
+    );
+
+    // A second turn died before its question reached the chat: nothing of
+    // it was stored.
+    await markedAt(lastId);
+    const beforeQuestion = await saidIn(await restart(id), chat.id);
+    // The first turn died after its answer was stored, before it cleared
+    // its mark.
+    await markedAt(0);
+    const afterAnswer = await saidIn(await restart(id), chat.id);
+
+    expect({ beforeQuestion, afterAnswer }).toStrictEqual({
+      beforeQuestion: ["Done."],
+      afterAnswer: ["Done."],
+    });
+  });
+
   it("continues the conversation with everything before it", async () => {
     const { stub, chat, ask } = await newChat(
       codeStep("export default async (env) => (await env.chat.info()).chatId;"),

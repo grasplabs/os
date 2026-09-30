@@ -217,7 +217,9 @@ const stopReason = (chatId: ChatId, error: unknown): string => {
 /**
  * Marks a chat's turn as under way in the object's storage, as
  * `turn:<chat>`: what memory forgets when the object restarts (a deploy,
- * say), so the next wake can say the turn was cut short.
+ * say), so the next wake can say the turn was cut short. The mark holds
+ * the ID of the chat's last message when the turn was taken (0: none), so
+ * the wake knows what the turn itself stored.
  */
 const turnKeyPrefix = "turn:";
 
@@ -342,22 +344,38 @@ export class Workspace extends DurableObject<Env> {
   /**
    * Tells each chat whose turn the last restart cut short that it was
    * (`interruptedMessage`), and clears its mark: no turn runs yet when the
-   * object wakes, so every mark left is of one that never ended. Nothing is
-   * resumed. In one transaction, so a wake that dies here says it once.
+   * object wakes, so every mark left is of one that never ended. Only a
+   * turn that left work half done is told of: one that stored nothing yet
+   * (its question never reached the chat, and the ask failed for its
+   * person) or whose last message is the agent's finished response (the
+   * restart came before the mark was cleared) has nothing to go on from.
+   * Nothing is resumed. In one transaction, so a wake that dies here says
+   * it once.
    */
   #closeInterruptedTurns(): void {
     const { kv } = this.ctx.storage;
     this.ctx.storage.transactionSync(() => {
       // Read whole first: the marks are deleted while going through them.
-      const marks = Array.from(
-        kv.list({ prefix: turnKeyPrefix }),
-        ([key]) => key
-      );
-      for (const key of marks) {
+      const marks = [...kv.list<number>({ prefix: turnKeyPrefix })];
+      for (const [key, before] of marks) {
         const chatId = chatIdSchema.parse(key.slice(turnKeyPrefix.length));
-        // Cut short before its question was kept, there is nothing to go
-        // on from, and the chat's first turn must still start it.
-        if (this.#storedChars(chatId) > 0) {
+        const last = this.#db
+          .select({ message: chatMessages.message })
+          .from(chatMessages)
+          .where(
+            and(eq(chatMessages.chatId, chatId), gt(chatMessages.id, before))
+          )
+          .orderBy(desc(chatMessages.id))
+          .limit(1)
+          .get();
+        const stored =
+          last === undefined
+            ? undefined
+            : storedMessageSchema.parse(JSON.parse(last.message));
+        // A response that asks for code to run isn't the turn's last.
+        const finished =
+          stored?.role === "assistant" && stored.stopReason !== "toolUse";
+        if (stored !== undefined && !finished) {
           this.#keep(chatId, interruptedMessage());
         }
         kv.delete(key);
@@ -665,7 +683,10 @@ export class Workspace extends DurableObject<Env> {
     const cancel = new AbortController();
     this.#turns.set(chat.id, cancel);
     // Marked in storage as long as it is in `#turns`, however it ends.
-    this.ctx.storage.kv.put(`${turnKeyPrefix}${chat.id}`, true);
+    this.ctx.storage.kv.put(
+      `${turnKeyPrefix}${chat.id}`,
+      this.#lastMessageId(chat.id)
+    );
     try {
       if (!(await memberRole(this.env.DB, personId))) {
         throw permissionErrors.create("permission.person_inactive");
@@ -1685,6 +1706,17 @@ export class Workspace extends DurableObject<Env> {
       throw agentErrors.create("agent.chat_not_found");
     }
     return chat;
+  }
+
+  /** The ID of the chat's last stored message; 0 while it has none. */
+  #lastMessageId(chatId: ChatId): number {
+    const [row] = this.ctx.storage.sql
+      .exec<{ last: number }>(
+        "SELECT coalesce(max(id), 0) AS last FROM chat_messages WHERE chat_id = ?",
+        chatId
+      )
+      .toArray();
+    return row?.last ?? 0;
   }
 
   #storedChars(chatId: ChatId): number {
