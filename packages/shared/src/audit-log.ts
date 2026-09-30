@@ -59,7 +59,7 @@ const typeRules: readonly {
   { action: "connection.needs_reauth", type: "config" },
   // Connect reading what changed at a connection for workflows' event
   // triggers, dropping an event it couldn't deliver, and starting or
-  // stopping listening there, or being refused it.
+  // stopping listening there, being refused it, or failing to read it.
   { action: "connection.events.read", type: "read" },
   // An event dropped after its last try: a workflow it would have started
   // didn't start.
