@@ -205,6 +205,26 @@ export default workflowTests(definition, [{ name: "runs", mocks: { sum: 2, mail:
 });
 
 /**
+ * A workflow whose tests pass, and whose step calls the App's server by a
+ * name the step list can't follow: its function's own `arguments`.
+ */
+const tidy = {
+  "workflows/tidy.ts": `import { workflow, z } from "@grasp-os/sdk/workflow";
+
+export default workflow("tidy", { params: {}, input: z.unknown() }, async function (step, { input }) {
+  const bindings = arguments[1].env;
+  return await step.do("tidy-up", { description: "Tidy" }, async () => await bindings.APP.call("sendAll", input));
+});
+`,
+  "workflows/tidy.workflow-tests.ts": `import { workflowTests } from "@grasp-os/sdk/testing";
+
+import definition from "./tidy.ts";
+
+export default workflowTests(definition, [{ name: "runs", mocks: { "tidy-up": 1 }, expect: { output: 1 } }]);
+`,
+};
+
+/**
  * The weekly workflow, run by `triggers`; with `nested`, its step called
  * from a function of its own, which the step list can't read.
  */
@@ -940,7 +960,16 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
         const app = await env.build.create({ name: ${JSON.stringify(appName)} });
         await env.build.write(app.id, ${JSON.stringify({ "screens/desk.tsx": restyled })});
         const proposal = await env.build.propose(app.id, "A desk");
-        return { version: proposal.version, passed: proposal.check.passed, review: proposal.review, reviewUnavailable: proposal.reviewUnavailable };
+        // It builds and its tests pass, but what its step calls can't be read.
+        await env.build.write(app.id, ${JSON.stringify({ "screens/desk.tsx": fixed, ...tidy })});
+        const unread = await env.build.propose(app.id, "A desk that tidies up");
+        return {
+          version: proposal.version,
+          passed: proposal.check.passed,
+          review: proposal.review,
+          reviewUnavailable: proposal.reviewUnavailable,
+          unread: { version: unread.version, passed: unread.check.passed, workflows: unread.check.workflows, tests: unread.check.tests.status },
+        };
       };`),
       says("It doesn't pass yet."),
     ]);
@@ -954,6 +983,24 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
       passed: false,
       review: null,
       reviewUnavailable: false,
+      unread: {
+        version: null,
+        passed: false,
+        workflows: {
+          status: "failed",
+          diagnostics: [
+            {
+              file: "workflows/tidy.ts",
+              line: null,
+              rule: "bindings",
+              severity: "error",
+              message:
+                "Line 3: Write the workflow's function inline, as an arrow function: the third argument of `workflow`",
+            },
+          ],
+        },
+        tests: "not_run",
+      },
     });
     const app = await createdApp(person.api);
     expect({

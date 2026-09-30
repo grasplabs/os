@@ -1,7 +1,7 @@
 /* oxlint-disable require-await -- fakes of async interfaces answer right away */
 import { describe, expect, it } from "vite-plus/test";
 
-import { describeWorkflow } from "../src/describe.ts";
+import { checkWorkflowBindings, describeWorkflow } from "../src/describe.ts";
 import { createTestEngine } from "../src/testing.ts";
 import { outlineOf } from "./outline.ts";
 import { payoutWorkflow } from "./payout-workflow.ts";
@@ -13,7 +13,7 @@ const workflowSource = (
   body: string,
   signature = "step, { params, input, state }"
 ) => `
-import { workflow } from "@grasp-os/sdk/workflow";
+import { appExports, appServer, workflow } from "@grasp-os/sdk/workflow";
 
 export default workflow("sample", { params: {} }, async (${signature}) => {
 ${body}
@@ -24,6 +24,10 @@ ${body}
 // written, they differ.
 const mail = (to: string): string =>
   `await step.do("mail", { description: "Mail" }, async () => await env.MAIL.call("mail.send", ${JSON.stringify(to)}));`;
+
+/** A step whose function runs `code`. */
+const inStep = (code: string): string =>
+  `await step.do("tidy-up", { description: "Tidy" }, async () => { ${code} });`;
 
 describe(describeWorkflow, () => {
   it("shows a step in a loop once, nested under the loop", () => {
@@ -145,6 +149,21 @@ describe(describeWorkflow, () => {
         "Destructure the workflow function's context"
       );
     }
+    // Code in the parameter list would run with the context in reach.
+    for (const signature of [
+      "step, { input }, ...rest",
+      "step, { env, input = env }",
+      "step, { env, input: { [env.APP.call('sendAll')]: sent } }",
+    ]) {
+      expect(() => describeWorkflow(workflowSource(body, signature))).toThrow(
+        "without default values or computed names"
+      );
+    }
+    expect(
+      describeWorkflow(
+        workflowSource(body, "step, { runId, input: { id }, readAttachment }")
+      ).steps
+    ).toHaveLength(1);
   });
 
   it("keeps a condition that reads a parameter, even without steps under it", () => {
@@ -249,7 +268,8 @@ describe(describeWorkflow, () => {
       [
         `const total = await step.do("read", { description: "Read" }, async () => 1);`,
         `await step.do("book", { description: "Book", input: total }, async () => await bindings.APP.call("book", total));`,
-        `await step.do("mail", { description: "Mail" }, async () => [await bindings.MAIL.call("mail.send", {}), await use(bindings)]);`,
+        `await step.do("mail", { description: "Mail" }, async () => [await bindings.MAIL.call("mail.send", {}), await appExports<Crm>(bindings.CRM).find({})]);`,
+        `await step.do("keep", { description: "Keep" }, async () => await appServer<App>(bindings).keep(total));`,
       ].join("\n"),
       "step, { input, env: bindings }"
     );
@@ -261,7 +281,8 @@ describe(describeWorkflow, () => {
     ).toStrictEqual([
       { name: "read", env: undefined },
       { name: "book", env: ["APP"] },
-      { name: "mail", env: ["MAIL", "env"] },
+      { name: "mail", env: ["MAIL", "CRM"] },
+      { name: "keep", env: ["APP"] },
     ]);
     expect(() =>
       describeWorkflow(
@@ -273,7 +294,7 @@ describe(describeWorkflow, () => {
     ).toThrow("Call the App's bindings as `env.NAME`");
   });
 
-  it("says every step may call the App's bindings when a helper or alias reads them", () => {
+  it("says every step may call the App's bindings when a helper outside the steps calls them", () => {
     const envOf = (body: string): unknown[] =>
       describeWorkflow(workflowSource(body, "step, { input, env }")).steps.map(
         (node) => (node.type === "step" ? node.env : node.type)
@@ -283,18 +304,107 @@ describe(describeWorkflow, () => {
       `await step.do("book", { description: "Book" }, async () => await book());`,
     ].join("\n");
 
-    // A helper that reads env, called from a step.
     expect(
       envOf(
         `const book = async () => await env.APP.call("book", input);\n${steps}`
       )
     ).toStrictEqual([["env"], ["env"]]);
-    // An alias of env.
+    // The App's server, as the SDK's stub of it.
     expect(
       envOf(
-        `const bindings = env;\nconst book = async () => await bindings.APP.call("book");\n${steps}`
+        `const app = appServer<App>(env);\nconst book = async () => await app.book(input);\n${steps}`
       )
     ).toStrictEqual([["env"], ["env"]]);
+  });
+
+  it("rejects every way to reach the App's bindings that the step list couldn't name", () => {
+    const cases: [string, string][] = [
+      // The bindings under another name.
+      [`const bindings = env;`, "don't keep `env`"],
+      [`const { APP } = env;`, "don't keep `env`"],
+      [`const app = env.APP;`, "don't keep `env`"],
+      [`const call = env.APP.call;`, "don't keep `env`"],
+      [inStep(`await env.APP.call.bind(env.APP)("sendAll");`), "don't keep"],
+      [inStep(`await (0, env.APP.call)("sendAll");`), "don't keep `env`"],
+      [inStep(`await env.valueOf().APP.call("sendAll");`), "don't keep `env`"],
+      // Handed to other code, or copied.
+      [inStep(`await helper(env);`), "don't keep `env`"],
+      [inStep(`await helper(env.APP);`), "don't keep `env`"],
+      [inStep(`await helper({ env });`), "don't keep `env`"],
+      [inStep(`await helper({ ...env });`), "don't keep `env`"],
+      [inStep(`await helper([env][0]);`), "don't keep `env`"],
+      [inStep(`await appServer(env, 1).sendAll();`), "don't keep `env`"],
+      // A name only known when it runs.
+      [inStep(`await env["APP"].call("sendAll");`), "don't keep `env`"],
+      [inStep(`await env[input.name].call("sendAll");`), "don't keep `env`"],
+      [inStep(`await env.APP[input.method]("sendAll");`), "don't keep `env`"],
+      [inStep(`await env?.APP.call("sendAll");`), "don't keep `env`"],
+      // The SDK's stubs, which take `env`, under another name.
+      [`const stub = appServer;`, "Only call `appServer`"],
+      [
+        `const appServer = (bindings) => bindings; const all = appServer(env);`,
+        "Only call `appServer`",
+      ],
+      [inStep(`await helper(appExports);`), "Only call `appExports`"],
+      // The context by another way than its parameter.
+      [inStep(`await this.env.APP.call("sendAll");`), "Don't use `this`"],
+      [
+        inStep(`await arguments[1].env.APP.call("sendAll");`),
+        "Don't use `arguments`",
+      ],
+      [inStep(`await eval("env").APP.call("sendAll");`), "Don't use `eval`"],
+    ];
+
+    for (const [body, message] of cases) {
+      expect(() =>
+        describeWorkflow(workflowSource(body, "step, { input, env }"))
+      ).toThrow(message);
+    }
+  });
+
+  it("reads only an arrow function, exported as the file's default, as the workflow", () => {
+    const sdk = `import { workflow } from "@grasp-os/sdk/workflow";`;
+    const sendAll = `{ const bindings = arguments[1].env; await step.do("tidy-up", { description: "Tidy" }, async () => { await bindings.APP.call("sendAll"); }); }`;
+    const decoy = `workflow("tidy", { params: {} }, async (step) => { await step.sleep("rest", { description: "Rest", duration: 1000 }); })`;
+
+    // A function with `arguments` of its own reads the context unnamed.
+    expect(() =>
+      describeWorkflow(
+        `${sdk}\nexport default workflow("tidy", { params: {} }, async function (step, { params }) ${sendAll});`
+      )
+    ).toThrow("as an arrow function");
+    // Another workflow runs in place of the one that's read.
+    for (const exported of [
+      `import other from "./lib/other.ts";\nconst decoy = ${decoy};\nexport default other;`,
+      `import { other } from "./lib/other.ts";\nconst decoy = ${decoy};\nexport { other as default };`,
+      `const decoy = ${decoy};\nexport { default } from "./lib/other.ts";`,
+      `const decoy = ${decoy};\nexport * as default from "./lib/other.ts";`,
+      `export default [${decoy}][0];`,
+    ]) {
+      expect(() => describeWorkflow(`${sdk}\n${exported}`)).toThrow(
+        "Export the workflow as the file's default"
+      );
+    }
+    expect(
+      describeWorkflow(`${sdk}\nexport default ${decoy};`).steps
+    ).toHaveLength(1);
+  });
+
+  it("checks how the bindings are called apart from how the steps are laid out", () => {
+    const nested = workflowSource(
+      `const run = async () => { ${inStep(`await env.APP.call("tidy");`)} };\nawait run();`,
+      "step, { env }"
+    );
+    const aliased = workflowSource(`const bindings = env;`, "step, { env }");
+
+    // Steps that can't be read show as unread; their calls are all named.
+    expect(() => describeWorkflow(nested)).toThrow("nested function");
+    expect(() => {
+      checkWorkflowBindings(nested);
+    }).not.toThrow();
+    expect(() => {
+      checkWorkflowBindings(aliased);
+    }).toThrow("don't keep `env`");
   });
 
   it("keeps each step's call as written, so any change to its code shows", () => {
@@ -322,6 +432,12 @@ import { workflow } from "@grasp-os/sdk/workflow";
 const run = async () => null;
 export default workflow("x", { params: {} }, run);`)
     ).toThrow("Write the workflow's function inline");
+    // The SDK's `workflow` by way of another module isn't one it can read.
+    expect(() =>
+      describeWorkflow(`
+import { workflow } from "./lib/sdk.ts";
+export default workflow("x", { params: {} }, async () => null);`)
+    ).toThrow("Expected one call to `workflow`");
   });
 
   it("reports errors as invalid definitions with the line", () => {

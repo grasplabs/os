@@ -1,3 +1,5 @@
+import { workflowPaths } from "@grasp-os/compiler";
+import { checkWorkflowBindings } from "@grasp-os/sdk/describe";
 import { appErrors } from "@grasp-os/shared/apps";
 import type {
   App,
@@ -8,6 +10,7 @@ import type {
 } from "@grasp-os/shared/apps";
 import { delegateActorOf } from "@grasp-os/shared/audit";
 import type { AuditDetailValue } from "@grasp-os/shared/audit";
+import { messageOf } from "@grasp-os/shared/errors";
 import { workflowIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
@@ -42,6 +45,7 @@ import { keepTests, reviewVersion } from "./version-review.ts";
 import {
   dryRunTests,
   hasWorkflow,
+  workflowIdsIn,
   workflowTestFailures,
 } from "./workflows/code.ts";
 import type { DryRuns } from "./workflows/code.ts";
@@ -57,7 +61,10 @@ import type { CheckOutcome, Draft } from "./workspace.ts";
 // can't overwrite each other. It checks a draft as a save does (screens,
 // server code and workflows: type errors, @shadcn/lint and build errors)
 // and runs its workflows' tests, and dry-runs them with the values it
-// gives. A check also reads what the preview of the draft in the person's
+// gives. A workflow must call the App's bindings where its step list can
+// name each call (`checkWorkflowBindings`): the review of what the agent
+// proposes says what each step calls, so a call it couldn't name fails the
+// check like a build error. A check also reads what the preview of the draft in the person's
 // side panel reported (preview-reports.ts): runtime errors fail it as
 // build errors do, so the repair loop fixes them within the same limits. Tests and dry runs run in isolates with an empty env: nothing
 // they do leaves them. Once a draft passes, the agent proposes it: it
@@ -244,6 +251,40 @@ const reported = (build: SavedBuild): SavedBuild => ({
   diagnostics: build.diagnostics.slice(0, maxReported),
 });
 
+/**
+ * A draft's workflows build, failed when one of them could call the App's
+ * bindings by a way its step list can't name (`checkWorkflowBindings`),
+ * with how to write each instead.
+ */
+const withBindingsRead = (
+  workflows: SavedBuild,
+  files: Record<string, string>
+): SavedBuild => {
+  if (workflows.status !== "ok") {
+    return workflows;
+  }
+  const diagnostics = workflowIdsIn(files).flatMap((id) => {
+    const file = workflowPaths(id).workflow;
+    try {
+      checkWorkflowBindings(files[file] ?? "");
+      return [];
+    } catch (error) {
+      return [
+        {
+          file,
+          line: null,
+          rule: "bindings",
+          severity: "error" as const,
+          message: messageOf(error),
+        },
+      ];
+    }
+  });
+  return diagnostics.length === 0
+    ? workflows
+    : { status: "failed", diagnostics };
+};
+
 /** The tests of a draft's workflows, once they build. */
 const testsOf = async (
   env: Env,
@@ -343,11 +384,15 @@ const checkFiles = async (
   { base, revision }: Pick<Draft, "base" | "revision">,
   files: Record<string, string>
 ): Promise<Omit<DraftCheck, "failedInARow" | "maxFailedChecks">> => {
-  const builds = await buildOnSave(
+  const saved = await buildOnSave(
     env,
     { app, version: base ?? 0, files },
     buildWaitMs(env)
   );
+  const builds = {
+    ...saved,
+    workflows: withBindingsRead(saved.workflows, files),
+  };
   const tests = await testsOf(env, base, files, builds.workflows);
   const all = [builds.screens, builds.server, builds.workflows];
   const failed =
@@ -896,7 +941,11 @@ const buildDeclaration = (previews: boolean): string => {
  * variants and sizes and the theme's tokens: no raw colours, arbitrary
  * values or restyled components (the lint names what to use instead).
  * Server methods are in \`app/server.ts\`. A workflow is
- * \`workflows/<id>.ts\` with its tests in \`workflows/<id>.workflow-tests.ts\`.
+ * \`workflows/<id>.ts\` with its tests in \`workflows/<id>.workflow-tests.ts\`:
+ * \`export default workflow(id, config, async (step, { input, params, env }) => …)\`,
+ * calling the App's bindings only as \`env.NAME.method(…)\`,
+ * \`appServer(env)\` or \`appExports(env.NAME)\`, so its review names what
+ * each step calls (a check refuses any other use of \`env\`).
  */
 build: {
   /** Creates an App owned by the person, with no files yet: at most ${maxCreatesPerTurn} a question. */

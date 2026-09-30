@@ -65,6 +65,13 @@ export type BindingMethod = (...args: Json[]) => Promise<unknown>;
  * key on its caller (`caller.idempotencyKey`), the only one its own
  * connection calls take.
  *
+ * Write each call where it happens, as `env.NAME.method(…)`,
+ * `appServer(env)` or `appExports(env.NAME)`, so the workflow's step list
+ * names every binding a step calls. `env` or a binding kept in a variable,
+ * passed to a function, spread or read by a computed name can't be read
+ * (`checkWorkflowBindings` in `@grasp-os/sdk/describe`): the steps then
+ * show as unread, and a check of an agent's draft fails.
+ *
  * Once the run's App has read restricted data, each side effect waits for
  * the person the run acts for to confirm it (where the deployment has held
  * actions on; elsewhere it is refused), and the run waits with it, using
