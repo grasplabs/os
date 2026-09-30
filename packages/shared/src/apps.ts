@@ -575,8 +575,6 @@ export const appErrors = defineErrorFamily({
     "Pass the caller of the App method this runs in, while that call runs.",
   "app.checks_exhausted":
     "This draft failed its checks too many times in a row this turn. Stop, and tell the person what still fails.",
-  "app.dry_runs_exhausted":
-    "This draft has had as many dry runs as one question may. Tell the person what you found.",
   "app.creates_exhausted":
     "This chat created as many Apps as one question may. Tell the person what you made.",
   "app.no_draft": "This chat has no draft of that App to preview.",

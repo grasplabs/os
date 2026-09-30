@@ -99,7 +99,7 @@ export interface Draft {
  */
 interface TurnBuilds {
   created: number;
-  drafts: Map<string, { failed: number; running: number; dryRuns: number }>;
+  drafts: Map<string, { failed: number; running: number }>;
 }
 
 /**
@@ -1556,24 +1556,9 @@ export class Workspace extends DurableObject<Env> {
     if (found !== undefined) {
       return found;
     }
-    const made = { failed: 0, running: 0, dryRuns: 0 };
+    const made = { failed: 0, running: 0 };
     drafts.set(appId, made);
     return made;
-  }
-
-  /**
-   * Takes one of the dry runs of the chat's draft of App `appId` this
-   * turn, before it runs: `false` once it took `limit`. Counted apart from
-   * checks: a passing check doesn't give them back, and they never keep a
-   * check or a proposal from running.
-   */
-  takeDryRun(chatId: ChatId, appId: string, limit: number): boolean {
-    const draft = this.#draftBuilds(chatId, appId);
-    if (draft.dryRuns >= limit) {
-      return false;
-    }
-    draft.dryRuns += 1;
-    return true;
   }
 
   /**
