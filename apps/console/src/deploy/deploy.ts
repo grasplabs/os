@@ -60,7 +60,7 @@ import {
 import type { ReleaseStore } from "../releases/import.ts";
 import { holdsClient, stillHolds } from "../runners.ts";
 import type { HeldClient } from "../runners.ts";
-import { checkDeployedSignIn, derivedCoreConfig } from "./core-config.ts";
+import { checkDeployedConfig, derivedCoreConfig } from "./core-config.ts";
 import type { SignInApps } from "./core-config.ts";
 import { DeployError } from "./errors.ts";
 import { migrateDatabases } from "./migrations.ts";
@@ -337,6 +337,16 @@ const coreApp = "core";
 
 const configVarNames: ReadonlySet<string> = new Set(deploymentConfigVars);
 
+/** Setting `key`'s value, stored as JSON; `setting_invalid` when it isn't. */
+const settingValue = (key: string, value: string): unknown => {
+  try {
+    return JSON.parse(value);
+  } catch {
+    // Not the parser's message: it quotes the value.
+    throw new DeployError("setting_invalid", `The setting ${key} isn't JSON`);
+  }
+};
+
 /**
  * Core's vars: what every deploy derives for the client, its model
  * gateway and sign-in (`derivedCoreConfig`), each replaced by the
@@ -344,7 +354,9 @@ const configVarNames: ReadonlySet<string> = new Set(deploymentConfigVars);
  * each a JSON var named by its deployment config var (and nothing else:
  * `unknown_setting`); and `PLATFORM_CHANGE`, which core records as
  * `platform.updated`: a `release`, or new `secrets` on the release it
- * runs.
+ * runs. Refused unless core would take every one of them
+ * (`checkDeployedConfig`; `setting_invalid` too for a setting that isn't
+ * JSON).
  */
 const coreVars = async (
   context: DeployContext,
@@ -377,13 +389,16 @@ const coreVars = async (
       apps: context.signInApps ?? {},
     }),
     ...Object.fromEntries(
-      rows.map(({ key, value }): [string, unknown] => [key, JSON.parse(value)])
+      rows.map(({ key, value }): [string, unknown] => [
+        key,
+        settingValue(key, value),
+      ])
     ),
     PLATFORM_CHANGE: change,
   };
-  // The SIGN_IN that goes out, a setting's included: never one no admin
-  // can sign in with.
-  checkDeployedSignIn(deploy.clientId, vars);
+  // The config that goes out, settings included: never a SIGN_IN no admin
+  // can sign in with, nor a var core can't parse.
+  checkDeployedConfig(deploy.clientId, vars);
   return vars;
 };
 
@@ -572,7 +587,10 @@ const runPhase = async <T>(
 
 /**
  * The first two steps: the account's resources, then the release's
- * database migrations. Returns its databases' ids, by name.
+ * database migrations. Returns its databases' ids, by name. Before either,
+ * the config the deploy would set on core is checked (`coreVars`), so a
+ * setting core wouldn't take, or a sign-in nobody could use, stops the
+ * deploy before it changes anything in the client's account.
  */
 const prepare = async (
   context: DeployContext,
@@ -582,6 +600,7 @@ const prepare = async (
   const { api, db, store } = context;
   const { deploy, manifest } = loaded;
   current("resources");
+  await coreVars(context, deploy);
   const resources = await ensureResources(api, deploy.accountId, manifest);
   await recordStep(db, loaded, "resources", {
     databases: resources.databases.size,
@@ -641,8 +660,8 @@ const uploadApp = async (
   const { id, deploy, manifest } = loaded;
   const { accountId, clientId, releaseId } = deploy;
   const worker = workerOf(manifest, app);
-  // Read for every Worker, so a bad setting stops the deploy before the
-  // first one is uploaded (`unknown_setting`).
+  // Read for every Worker, so a setting that went bad since the deploy
+  // was prepared still stops it before the first one is uploaded.
   const vars = await coreVars(context, deploy);
   const workerSecretValues = await workerSecrets(
     app,

@@ -725,6 +725,105 @@ describe("deploying safely", () => {
     });
   });
 
+  it("stops at a setting core wouldn't take before it changes anything in the client's account", async () => {
+    const signIn = {
+      origin: `https://acme.${domain}`,
+      domains: ["acme.test"],
+      admins: ["ada@acme.test"],
+    };
+    const refusedSettings: [key: string, value: string][] = [
+      // No IdP: nobody could sign in.
+      ["SIGN_IN", JSON.stringify(signIn)],
+      ["MODEL_GATEWAY", JSON.stringify({ gateway: "grasp-os", models: [] })],
+      [
+        "MODEL_GATEWAY",
+        JSON.stringify({ gateway: "grasp-os", models: ["not a model"] }),
+      ],
+      // Its allowlist parses, its rules don't: EU models that aren't allowed.
+      [
+        "MODEL_GATEWAY",
+        JSON.stringify({
+          gateway: "grasp-os",
+          models: ["anthropic/claude-sonnet-4-5"],
+          eu: { models: ["mistral/mistral-large"] },
+        }),
+      ],
+      ["FEATURES", JSON.stringify({ apps: "yes" })],
+      ["MEMORY_LIMITS", JSON.stringify({ "USER.md": 0 })],
+      ["AUDIT_RETENTION_DAYS", "7"],
+      ["AUDIT_ARCHIVE_RETENTION_DAYS", "30"],
+      ["FEATURES", "{not json"],
+    ];
+    const outcomes: unknown[] = [];
+    for (const [key, value] of refusedSettings) {
+      // oxlint-disable-next-line no-await-in-loop -- one client at a time
+      const { account, clientId, deployId } = await setUp();
+      // oxlint-disable-next-line no-await-in-loop -- one client at a time
+      await db.insert(settings).values({
+        clientId,
+        key,
+        value,
+        updatedBy: staff.email,
+        updatedAt: new Date(),
+      });
+      // oxlint-disable-next-line no-await-in-loop -- one client at a time
+      await failingDeploy(deployId);
+      // oxlint-disable-next-line no-await-in-loop -- one client at a time
+      const row = await deployRow(deployId);
+      // oxlint-disable-next-line no-await-in-loop -- one client at a time
+      const events = await deployEvents(clientId);
+      outcomes.push({
+        key,
+        error: row?.error,
+        step: row?.step,
+        databases: account.d1.length,
+        buckets: account.buckets.length,
+        scripts: account.scripts.size,
+        steps: events.map(({ action }) => action),
+      });
+    }
+    // An archive kept shorter than the retention: each parses, not the two.
+    const { account, clientId, deployId } = await setUp();
+    await db.insert(settings).values(
+      [
+        ["AUDIT_RETENTION_DAYS", "730"],
+        ["AUDIT_ARCHIVE_RETENTION_DAYS", "365"],
+      ].map(([key = "", value = ""]) => ({
+        clientId,
+        key,
+        value,
+        updatedBy: staff.email,
+        updatedAt: new Date(),
+      }))
+    );
+    await failingDeploy(deployId);
+    const row = await deployRow(deployId);
+
+    const untouched = {
+      databases: 0,
+      buckets: 0,
+      scripts: 0,
+      // No step finished, nor was recorded as finished.
+      step: null,
+      steps: ["deploy.start", "deploy.fail"],
+    };
+    expect({
+      outcomes,
+      together: {
+        error: row?.error,
+        databases: account.d1.length,
+        scripts: account.scripts.size,
+      },
+    }).toStrictEqual({
+      outcomes: refusedSettings.map(([key]) => ({
+        key,
+        error: key === "SIGN_IN" ? "sign_in_incomplete" : "setting_invalid",
+        ...untouched,
+      })),
+      together: { error: "setting_invalid", databases: 0, scripts: 0 },
+    });
+  });
+
   it("gives core its model gateway and its sign-in from the client's record, a setting of the same name replacing it, and refuses sign-in through an IdP the console has no app for, or a record that isn't JSON", async () => {
     const { account, clientId, deployId } = await setUp();
     await db
