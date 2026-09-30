@@ -2924,6 +2924,58 @@ describe("controlling a rollout", () => {
     });
   });
 
+  it("rolls a client back to the release it runs whole when a later release reaches it after a rollout that failed once its Workers were live", async () => {
+    const before = await importedRelease("feat(core): the release before");
+    const internal = await activeClient(0, before);
+    const failing = await importedRelease("feat(core): live, then fails");
+    // Both Workers go live on the release; the step after them, which
+    // reads the account's subdomain for the smoke check, is refused.
+    cloudflare.failNext(
+      (call) =>
+        call.method === "GET" &&
+        call.path === `/accounts/${internal.account.id}/workers/subdomain`,
+      400
+    );
+    await using run = await followRollouts();
+    await using rollbacks = await followRollbacks();
+    const failed = await rollOut(failing, { scope: "ring", ring: 0 });
+    await run.waitForStatus("errored");
+    const whole = {
+      releases: await releasesOf(internal.clientId),
+      versions: await recordedVersionsOf(internal.clientId),
+      targets: await targetsOf(failed),
+    };
+
+    // The next release rolls out, and is rolled back.
+    const release = await importedRelease("feat(core): the release after");
+    const rolloutId = await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+    const onRelease = await releasesOf(internal.clientId);
+    await rollbacks.rollBack(rolloutId, internal.clientId);
+
+    expect({
+      whole: { releases: whole.releases, targets: whole.targets },
+      onRelease,
+      live: await liveVersionsOf(internal.clientId, internal.account),
+      recorded: await recordedVersionsOf(internal.clientId),
+      releases: await releasesOf(internal.clientId),
+      targets: await targetsOf(rolloutId),
+    }).toMatchObject({
+      whole: {
+        releases: [failing, failing],
+        targets: { [internal.clientId]: { ring: 0, status: "failed" } },
+      },
+      onRelease: [release, release],
+      // Back on the release it ran whole, not the one before that.
+      live: whole.versions,
+      recorded: whole.versions,
+      releases: [failing, failing],
+      targets: {
+        [internal.clientId]: { ring: 0, status: "rolled_back", error: null },
+      },
+    });
+  });
+
   it("keeps what a rollback puts back, and starts one deploy, when the claim of a rollout started again runs twice, its first try's answer lost", async () => {
     const before = await importedRelease("feat(core): the release before");
     const internal = await activeClient(0, before);

@@ -465,7 +465,8 @@ const deployKind = (
  * unless it started its deploy already. What a rollback puts back
  * (`previous`) is settled once, before anything of the release is live:
  * what the client runs now, or, when the rollout that last deployed to it
- * never finished it, what it ran before that one (`unfinishedPrevious`).
+ * never finished it and this one retries its release or finds the client
+ * between releases, what it ran before that one (`unfinishedPrevious`).
  * It's kept on the target with the deploy's id in the batch that starts
  * the deploy, so a try of the step that runs again finds both or neither,
  * never a deploy its target doesn't name. The target stays `pending`
@@ -515,7 +516,11 @@ const claimTarget = async (
     // An earlier try of the step started it, and kept `previous` with it.
     return { state: "claimed", deployId: plan.deployId, running };
   }
-  const previous = (await unfinishedPrevious(db, clientId)) ?? running;
+  const carried = await unfinishedPrevious(db, clientId, {
+    releaseId: plan.releaseId,
+    running: running.release,
+  });
+  const previous = carried ?? running;
   // Its target names the deploy, and what a rollback of it puts back, in
   // the batch that starts it. Still pending: claimed, but nothing of it
   // started yet.
