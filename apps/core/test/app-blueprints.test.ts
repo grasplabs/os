@@ -6,7 +6,6 @@ import { z } from "zod";
 
 import { createFromBlueprint } from "../src/app-blueprints.ts";
 import { outlook, release, requestGranted, serverBuilt } from "./apps.ts";
-import { runCron } from "./cron.ts";
 import { mockIdp } from "./idp.ts";
 import { storedGrant } from "./knowledge.ts";
 import { mailConnection } from "./mail-connection.ts";
@@ -446,7 +445,6 @@ describe("blueprints", { timeout: 60_000 }, () => {
 
     // The same code and none of the data: the new App starts empty, and
     // shared with nobody.
-    // Activated once the check passed: theirs to find and use.
     const theirs = await maker.api.apps.list();
     await maker.api.apps.versions.setCurrent(app.id, 1);
     await serverBuilt(app.id, 1);
@@ -616,182 +614,68 @@ describe("blueprints", { timeout: 60_000 }, () => {
     });
   });
 
-  it("are taken back when the App read what the caller can't while it was being copied", async () => {
+  it("aren't copied by someone who can't read what the App read, and gain nothing from a read raced in after the check", async () => {
     const owner = await personApi("builder");
     const maker = await personApi("builder");
-    const source = await notesApp(owner);
-    await share(owner, source, maker, "user");
-    await owner.api.apps.blueprints.mark(source, 1);
-    const by = await maker.api.whoami();
+    const [unreadable, raced] = await Promise.all([
+      notesApp(owner),
+      notesApp(owner),
+    ]);
+    for (const source of [unreadable, raced]) {
+      // oxlint-disable-next-line no-await-in-loop -- two, one at a time
+      await share(owner, source, maker, "user");
+      // oxlint-disable-next-line no-await-in-loop -- two, one at a time
+      await owner.api.apps.blueprints.mark(source, 1);
+    }
     const mailbox = await mailboxOf(owner);
-    // The owner's mailbox granted to the App just before the batch that
-    // creates the copy lands, once: the copy's taking back is a batch too.
+    const readsMailbox = async (app: string): Promise<void> => {
+      await storedGrant(
+        { type: "app", id: app },
+        { type: "connection", id: mailbox },
+        ["mail.list"],
+        "MAILBOX"
+      );
+    };
+    await readsMailbox(unreadable);
+    const by = await maker.api.whoami();
+    // The other App granted the owner's mailbox just before the batch that
+    // creates its copy lands, once: after the check, which it passed.
     let granted = false;
     const racing = racingDb(async () => {
       if (!granted) {
         granted = true;
-        await storedGrant(
-          { type: "app", id: source },
-          { type: "connection", id: mailbox },
-          ["mail.list"],
-          "MAILBOX"
-        );
+        await readsMailbox(raced);
       }
     });
 
-    let refused = "";
-    const events = await auditedDuring(async () => {
-      refused = await outcome(
-        createFromBlueprint({ ...env, DB: racing }, by, source, 1, {
-          name: `Unreadable ${unique()}`,
-        })
-      );
-    });
-    const owned = await env.DB.prepare(
-      "SELECT count(*) AS count FROM apps WHERE owner_id = ?"
-    )
-      .bind(maker.userId)
-      .first<{ count: number }>();
-    const revoked = events.find(
-      ({ action }) => action === "app.blueprint.revoked"
+    const refused = await outcome(
+      maker.api.apps.blueprints.create(unreadable, 1, named)
     );
+    const copy = await createFromBlueprint(
+      { ...env, DB: racing },
+      by,
+      raced,
+      1,
+      named
+    );
+    const owned = await env.DB.prepare("SELECT id FROM apps WHERE owner_id = ?")
+      .bind(maker.userId)
+      .all<{ id: string }>();
     expect({
       refused,
-      owned: owned?.count,
-      revoked: revoked?.detail,
+      owned: owned.results.map(({ id }) => id),
+      // Neither the mailbox nor a request for it: the copy asks only for
+      // what its App was given when read, before the batch.
+      permissions: await maker.api.permissions.list({
+        type: "app",
+        appId: copy.app.id,
+      }),
+      dropped: copy.dropped,
     }).toStrictEqual({
       refused: "app.unreadable",
-      owned: 0,
-      revoked: { fromApp: source, reason: "app.unreadable" },
-    });
-  });
-
-  it("leave no usable copy when the check after the copy fails without a reason", async () => {
-    const owner = await personApi("builder");
-    const maker = await personApi("builder");
-    const source = await notesApp(owner);
-    const mail = await mailConnection();
-    await storedGrant(
-      { type: "app", id: source },
-      { type: "connection", id: mail.id },
-      ["mail.list"],
-      "MAIL"
-    );
-    await share(owner, source, maker, "user");
-    await owner.api.apps.blueprints.mark(source, 1);
-    const by = await maker.api.whoami();
-    // Connect goes down once the copy's batch has landed, so the check
-    // after it fails with no code of ours.
-    let landed = false;
-    const racing = racingDb(() => {
-      landed = true;
-    });
-    const down = new Proxy(env.CONNECT, {
-      get: (target, property) => {
-        if (property === "connectionOwners" && landed) {
-          return async () => {
-            await Promise.reject(new Error("connect is down"));
-          };
-        }
-        const value: unknown = Reflect.get(target, property);
-        return typeof value === "function"
-          ? (...args: unknown[]): unknown => Reflect.apply(value, target, args)
-          : value;
-      },
-    });
-
-    const refused = await outcome(
-      createFromBlueprint(
-        { ...env, DB: racing, CONNECT: down },
-        by,
-        source,
-        1,
-        {
-          name: `Unchecked ${unique()}`,
-        }
-      )
-    );
-    const owned = await env.DB.prepare(
-      "SELECT count(*) AS count FROM apps WHERE owner_id = ?"
-    )
-      .bind(maker.userId)
-      .first<{ count: number }>();
-    expect({ refused: refused === "ok", owned: owned?.count }).toStrictEqual({
-      refused: false,
-      owned: 0,
-    });
-  });
-
-  it("leave a copy pending and invisible when it can't be taken back, until the cron deletes it", async () => {
-    const owner = await personApi("builder");
-    const maker = await personApi("builder");
-    const source = await notesApp(owner);
-    await share(owner, source, maker, "user");
-    await owner.api.apps.blueprints.mark(source, 1);
-    const by = await maker.api.whoami();
-    const mailbox = await mailboxOf(owner);
-    // The source reads the owner's mailbox by the time the copy lands, and
-    // the batch that would take the copy back fails.
-    let batches = 0;
-    const racing = racingDb(async () => {
-      batches += 1;
-      if (batches === 1) {
-        await storedGrant(
-          { type: "app", id: source },
-          { type: "connection", id: mailbox },
-          ["mail.list"],
-          "MAILBOX"
-        );
-        return;
-      }
-      throw new Error("The database is out of reach");
-    });
-
-    const refused = await outcome(
-      createFromBlueprint({ ...env, DB: racing }, by, source, 1, {
-        name: `Stuck ${unique()}`,
-      })
-    );
-    const stuck = await env.DB.prepare(
-      "SELECT id, pending_since AS pendingSince FROM apps WHERE owner_id = ?"
-    )
-      .bind(maker.userId)
-      .first<{ id: string; pendingSince: number | null }>();
-    const listed = await maker.api.apps.list();
-    const seen = {
-      refused,
-      pending: stuck?.pendingSince !== null,
-      listed: listed.some(({ id }) => id === stuck?.id),
-      opens: await outcome(maker.api.apps.get(stuck?.id ?? "")),
-    };
-    // Left pending past the hour the cron trigger allows.
-    await env.DB.prepare("UPDATE apps SET pending_since = ? WHERE id = ?")
-      .bind(Date.now() - 2 * 60 * 60 * 1000, stuck?.id ?? "")
-      .run();
-    const events = await auditedDuring(async () => {
-      await runCron();
-    });
-    const left = await env.DB.prepare(
-      "SELECT count(*) AS count FROM apps WHERE owner_id = ?"
-    )
-      .bind(maker.userId)
-      .first<{ count: number }>();
-    expect({
-      seen,
-      left: left?.count,
-      swept: events.find(
-        ({ action, target }) =>
-          action === "app.blueprint.revoked" && target?.id === stuck?.id
-      )?.detail,
-    }).toStrictEqual({
-      seen: {
-        refused: "app.unreadable",
-        pending: true,
-        listed: false,
-        opens: "app.not_found",
-      },
-      left: 0,
-      swept: { blueprint: `${source}@1`, reason: "pending_expired" },
+      owned: [copy.app.id],
+      permissions: [],
+      dropped: [],
     });
   });
 

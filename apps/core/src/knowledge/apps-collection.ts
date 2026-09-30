@@ -2,7 +2,7 @@ import type { AuditActor } from "@grasp-os/shared/audit";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import { knowledgeErrors } from "@grasp-os/shared/knowledge";
 import { errorFields, log } from "@grasp-os/shared/log";
-import { and, eq, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, eq, isNotNull, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { stringify } from "yaml";
@@ -98,7 +98,7 @@ interface IndexedApp {
 const entryText = (app: IndexedApp, body: string): string =>
   `---\n${stringify({ title: app.name, description: app.description, app: app.id })}---\n${body}`;
 
-/** The App `appId`, unless it isn't in use (a pending copy). */
+/** The App `appId`, if it exists. */
 const appInUse = async (env: Env, appId: string) =>
   await drizzle(env.DB)
     .select({
@@ -108,7 +108,7 @@ const appInUse = async (env: Env, appId: string) =>
       currentVersion: apps.currentVersion,
     })
     .from(apps)
-    .where(and(eq(apps.id, appId), isNull(apps.pendingSince)))
+    .where(eq(apps.id, appId))
     .get();
 
 /** The AGENTS.md of version `version` of the App `appId`, as indexed. */
@@ -167,7 +167,7 @@ const noteVersion = (
 
 /**
  * Indexes the App `appId` at its current version, unless its entry holds
- * that version already, or it has none or isn't in use (a pending copy).
+ * that version already, or it has none.
  * Throws what failed, `knowledge.conflict` when another indexing wrote
  * first. Does nothing while indexing is off.
  */
@@ -276,7 +276,7 @@ export const indexApps = async (env: Env): Promise<void> => {
     drizzle(env.DB)
       .select({ id: apps.id, currentVersion: apps.currentVersion })
       .from(apps)
-      .where(and(isNull(apps.pendingSince), isNotNull(apps.currentVersion))),
+      .where(isNotNull(apps.currentVersion)),
   ]);
   const held = new Map(noted.map(({ appId, version }) => [appId, version]));
   const stale = inUse
