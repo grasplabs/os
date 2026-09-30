@@ -170,9 +170,10 @@ export const modelGatewayConfigSchema = (modelRef: z.ZodType<string>) =>
   });
 
 /**
- * The models a new deployment allows until staff set its `MODEL_GATEWAY`:
- * Workers AI's, which AI Gateway runs on the client's own account with no
- * provider key, so a client can call a model on day one.
+ * The models a new deployment allows until staff change its
+ * `MODEL_GATEWAY`, and core allows while none is set: Workers AI's, which
+ * AI Gateway runs on the client's own account with no provider key, so a
+ * client can call a model on day one.
  */
 export const defaultGatewayModels = [
   "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast",

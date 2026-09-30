@@ -3,6 +3,7 @@
  * with the next scripted reply, in the wire format of the provider route the
  * request went to, and keeps every request it got.
  */
+import { z } from "zod";
 
 /** A tool call the model makes in a scripted answer. */
 export interface ScriptedToolCall {
@@ -37,7 +38,12 @@ export type GatewayReply =
        */
       cut?: number;
     }
-  | { status: number; errorType?: string }
+  | {
+      status: number;
+      errorType?: string;
+      /** The refusal's body, when not the provider's usual error. */
+      body?: unknown;
+    }
   | { hang: true };
 
 export interface GatewayRequest {
@@ -419,6 +425,44 @@ const providerStream = (
   return new Response("No such route", { status: 404 });
 };
 
+const messagesSchema = z.object({
+  messages: z.array(z.object({ content: z.unknown() })),
+});
+
+/**
+ * Workers AI's refusal of a request its model's input schema doesn't take,
+ * in its own words: a message without content, such as the `null` of an
+ * assistant message that only calls tools, which OpenAI's API takes.
+ * Its body has no `error`, so OpenAI's SDK drops it ("400 status code (no
+ * body)"). `undefined` for a request Workers AI takes.
+ */
+const workersAiBadInput = (
+  url: string,
+  body: unknown
+): Response | undefined => {
+  if (!new URL(url).pathname.includes("/workers-ai/")) {
+    return undefined;
+  }
+  const messages = messagesSchema.safeParse(body).data?.messages ?? [];
+  const index = messages.findIndex(
+    ({ content }) => typeof content !== "string" && !Array.isArray(content)
+  );
+  if (index === -1) {
+    return undefined;
+  }
+  const problem = `Type mismatch of '/messages/${index}/content', 'string' not in 'null'`;
+  return Response.json(
+    {
+      name: "AiError",
+      internalCode: 5006,
+      httpCode: 400,
+      message: `AiError: Bad input: Error: ${problem}`,
+      description: `Error: ${problem}`,
+    },
+    { status: 400 }
+  );
+};
+
 /**
  * A fake AI binding whose gateway answers with `replies`, in order. Its
  * `requests` are what reached the gateway.
@@ -430,11 +474,12 @@ export const fakeGateway = (...replies: GatewayReply[]) => {
     init?: RequestInit
   ): Promise<Response> => {
     const request = new Request(input, init);
-    requests.push({
-      url: request.url,
-      headers: request.headers,
-      body: await request.json(),
-    });
+    const body: unknown = await request.json();
+    requests.push({ url: request.url, headers: request.headers, body });
+    const badInput = workersAiBadInput(request.url, body);
+    if (badInput !== undefined) {
+      return badInput;
+    }
     const reply = replies.shift();
     if (reply === undefined) {
       throw new Error("The fake gateway has no reply left");
@@ -454,7 +499,7 @@ export const fakeGateway = (...replies: GatewayReply[]) => {
     if ("status" in reply) {
       // As Anthropic words it; pi quotes OpenAI's inner `error` the same way.
       return Response.json(
-        {
+        reply.body ?? {
           type: "error",
           error: {
             type: reply.errorType ?? "api_error",

@@ -36,6 +36,7 @@ import { jsonVar } from "@grasp-os/shared/config";
 import { deadline } from "@grasp-os/shared/deadline";
 import type { Deadline, Stopped } from "@grasp-os/shared/deadline";
 import {
+  defaultGatewayModels,
   modelGatewayConfigSchema as gatewayConfigSchema,
   modelRulesConfigSchema as rulesConfigSchema,
 } from "@grasp-os/shared/deployment-config";
@@ -187,17 +188,33 @@ const modelRulesConfigSchema = rulesConfigSchema(modelRefSchema);
 export type ModelsEnv = Omit<Env, "AI"> & { AI?: AiBinding };
 
 /**
+ * The gateway config of a deployment whose `MODEL_GATEWAY` isn't set: the
+ * account's default AI Gateway, which Cloudflare creates on its first use,
+ * and Workers AI's models, which run on the account with no provider key.
+ * So chat works on a new deployment, and in local development, where the
+ * AI binding reaches Cloudflare with the developer's Wrangler login. The
+ * var replaces all of it, to narrow the models or name another gateway.
+ */
+const defaultGatewayConfig = {
+  gateway: "default",
+  models: [...defaultGatewayModels],
+};
+
+/** The `MODEL_GATEWAY` var as set, or the default config without one. */
+const gatewayVar = (env: ModelsEnv): unknown =>
+  env.MODEL_GATEWAY === undefined
+    ? defaultGatewayConfig
+    : jsonVar(env.MODEL_GATEWAY);
+
+/**
  * The deployment's model gateway config: deployment config, set by the
  * console as the `MODEL_GATEWAY` var, never an in-product setting, so an
- * admin session can't allow a model the client didn't agree to. `undefined`
- * when none is set; one that doesn't parse counts as none, and every call
- * fails closed.
+ * admin session can't allow a model the client didn't agree to; the
+ * default config while none is set. One that doesn't parse counts as none
+ * at all: `undefined`, and every call fails closed.
  */
 const modelGatewayConfig = (env: ModelsEnv): ModelGatewayConfig | undefined => {
-  if (env.MODEL_GATEWAY === undefined) {
-    return undefined;
-  }
-  const parsed = modelGatewayConfigSchema.safeParse(jsonVar(env.MODEL_GATEWAY));
+  const parsed = modelGatewayConfigSchema.safeParse(gatewayVar(env));
   if (!parsed.success) {
     log.error("model.config_invalid", {
       paths: parsed.error.issues.map(({ path }) => path.join(".")).join(" "),
@@ -215,7 +232,7 @@ const modelRules = (env: ModelsEnv): ModelRules | undefined => {
   if (!featureEnabled(env, "model_rules")) {
     return {};
   }
-  const parsed = modelRulesConfigSchema.safeParse(jsonVar(env.MODEL_GATEWAY));
+  const parsed = modelRulesConfigSchema.safeParse(gatewayVar(env));
   if (!parsed.success) {
     log.error("model.rules_invalid", {
       paths: parsed.error.issues.map(({ path }) => path.join(".")).join(" "),
@@ -227,7 +244,7 @@ const modelRules = (env: ModelsEnv): ModelRules | undefined => {
 
 /**
  * The allowlist and the rules as they apply now, for admins to read
- * (models-rpc.ts): the allowed models, none while models aren't set up;
+ * (models-rpc.ts): the allowed models, none while the config doesn't parse;
  * and the rules, `off` while `model_rules` is, `undefined` when they
  * don't parse.
  */
@@ -244,13 +261,10 @@ export const gatewaySettings = (
  * says: for what sends data out of the Worker without being a model call,
  * such as Workers AI's document conversion (knowledge/extract.ts), which
  * then stays in the Worker. A config whose rules don't parse keeps it
- * there too: it fails closed. Without a config there is no EU rule.
+ * there too: it fails closed. The default config has no EU rule.
  */
 export const deploymentStaysInEu = (env: ModelsEnv): boolean => {
-  if (env.MODEL_GATEWAY === undefined) {
-    return false;
-  }
-  const parsed = modelRulesConfigSchema.safeParse(jsonVar(env.MODEL_GATEWAY));
+  const parsed = modelRulesConfigSchema.safeParse(gatewayVar(env));
   return !parsed.success || parsed.data.eu?.deployment === true;
 };
 
@@ -516,11 +530,45 @@ interface GatewayResponse {
   logId: string | undefined;
   /** Characters of the request's body as sent; 0 before it was. */
   sentChars: number;
+  /**
+   * The body of a response that refused the request, as far as the log
+   * keeps it (`failureFields`).
+   */
+  errorBody: string | undefined;
 }
 
 interface Sent extends GatewayResponse {
   answer: AssistantMessage;
 }
+
+/** How much of a provider's error the log keeps. */
+const loggedErrorChars = 1000;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * The request as Workers AI takes it. pi sends an assistant message that
+ * only calls tools with `null` content, as OpenAI's API allows, but Workers
+ * AI's models take text only and refuse the request (400, "Type mismatch
+ * of '/messages/2/content', 'string' not in 'null'"): every request after
+ * an agent's first tool call failed. Such content goes as empty text.
+ */
+const workersAiPayload = (payload: unknown): unknown => {
+  if (!(isRecord(payload) && Array.isArray(payload.messages))) {
+    return undefined;
+  }
+  return {
+    ...payload,
+    messages: payload.messages.map((message: unknown) =>
+      isRecord(message) &&
+      message.role === "assistant" &&
+      message.content === null
+        ? { ...message, content: "" }
+        : message
+    ),
+  };
+};
 
 /**
  * Opens one request through the gateway: the model's answer as it streams
@@ -536,12 +584,21 @@ const open = (
     status: undefined,
     logId: undefined,
     sentChars: 0,
+    errorBody: undefined,
   };
   // The request's size as sent, should what it used have to be estimated
-  // (`usedBy`).
+  // (`usedBy`); and the body of a refusal, which the provider SDKs drop
+  // when it isn't in their provider's shape (Workers AI's has no `error`,
+  // so OpenAI's SDK reports "400 status code (no body)").
   const measured: FetchFunction = async (input, init) => {
     response.sentChars = typeof init?.body === "string" ? init.body.length : 0;
-    return await transport(input, init);
+    const answered = await transport(input, init);
+    response.errorBody = undefined;
+    if (!answered.ok) {
+      const body = await answered.clone().text();
+      response.errorBody = body.slice(0, loggedErrorChars);
+    }
+    return answered;
   };
   // SAFETY: the provider picks both the adapter and the catalog the model
   // comes from, so the model always speaks the adapter's API.
@@ -559,6 +616,7 @@ const open = (
     // pi turns it off.
     reasoning: model.reasoning ? "medium" : undefined,
     signal,
+    onPayload: ref.provider === "workers-ai" ? workersAiPayload : undefined,
     onResponse: ({ status, headers }) => {
       response.status = status;
       response.logId = headers["cf-aig-log-id"];
@@ -645,6 +703,25 @@ const failureOf = (
     errorType: providerErrorType(text),
   };
 };
+
+/**
+ * A failed request as the log records it: the status and error type, and
+ * the provider's error, the body of its refusal where there was one, else
+ * pi's error, with the reason, such as a field the provider doesn't take.
+ * For the log only, never the audit log or the answer; the request itself
+ * is never logged, and an error that quotes some of it is cut short.
+ */
+const failureFields = (
+  model: string,
+  { answer, errorBody }: Sent,
+  { status, errorType }: Failure
+) => ({
+  model,
+  status,
+  errorType,
+  stopReason: answer.stopReason,
+  providerError: (errorBody ?? answer.errorMessage)?.slice(0, loggedErrorChars),
+});
 
 /** A failure in our own words, for whoever reads the answer. */
 const failureMessage = ({ status, errorType }: Failure): string => {
@@ -1019,12 +1096,7 @@ const answerCall = async <Output>(
 
     if (hasFailed(answer)) {
       const failure = failureOf(sent, limit.stopped());
-      log.warn("model.failed", {
-        model: call.model,
-        status: failure.status,
-        errorType: failure.errorType,
-        stopReason: answer.stopReason,
-      });
+      log.warn("model.failed", failureFields(call.model, sent, failure));
       // oxlint-disable-next-line no-await-in-loop
       await record(env, request, sent, attempt, "failed", failure);
       throw modelErrors.create("model.failed");
@@ -1136,12 +1208,7 @@ const relayEvents = async (
       const sent: Sent = { answer: event.error, ...response };
       const stopped = limit.stopped();
       const failure = failureOf(sent, stopped);
-      log.warn("model.failed", {
-        model: route.call.model,
-        status: failure.status,
-        errorType: failure.errorType,
-        stopReason: event.error.stopReason,
-      });
+      log.warn("model.failed", failureFields(route.call.model, sent, failure));
       await record(
         env,
         route,
