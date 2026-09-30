@@ -4,6 +4,7 @@ import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
+import { callApp } from "../src/app.ts";
 import { appHost } from "../src/durable-objects.ts";
 import { requestGranted, serverBuilt } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
@@ -117,13 +118,20 @@ describe("a run's held side effects", { timeout: 60_000 }, () => {
     });
   });
 
-  it("wait for a side effect held in their App's method, or caught by their code, and complete once confirmed", async () => {
+  it("wait for a side effect held in their App's method, or caught by their code, and complete once confirmed, with the method's statistics points added up once, as the step completes", async () => {
     const admin = await personApi("admin");
     const mail = await mailConnection();
     const app = await appWith(admin, {
       ...workflowFiles(
         "via-app",
         `  return await step.do("send", { description: "Send", sideEffect: true, input: null, retries: { limit: 0 } }, async () => await env.APP.call("mail", false));`,
+        { send: null }
+      ),
+      // Its App method records statistics points before the mail is held:
+      // the step records them again once it is confirmed.
+      ...workflowFiles(
+        "counted",
+        `  return await step.do("send", { description: "Send", sideEffect: true, input: null, retries: { limit: 0 } }, async () => await env.APP.call("mailCounted"));`,
         { send: null }
       ),
       ...workflowFiles(
@@ -142,9 +150,12 @@ describe("a run's held side effects", { timeout: 60_000 }, () => {
     // deadline.
     await serverBuilt(app, 1);
     await grantMail(idp, admin, app, mail.id);
-    await appHost(env, appIdSchema.parse(app)).restrict();
+    const appId = appIdSchema.parse(app);
+    const viewer = { userId: admin.userId, mode: "interactive" } as const;
+    await appHost(env, appId).restrict();
     const runs = [
       await admin.api.workflows.start(app, "via-app"),
+      await admin.api.workflows.start(app, "counted"),
       await admin.api.workflows.start(app, "caught"),
     ];
     for (const run of runs) {
@@ -153,6 +164,11 @@ describe("a run's held side effects", { timeout: 60_000 }, () => {
     }
     const held = await admin.api.pendingActions.list();
     const before = await mail.did();
+    const points = async () => ({
+      mails: await callApp(env, appId, viewer, "points", ["mails"]),
+      sent: await callApp(env, appId, viewer, "points", ["sent"]),
+    });
+    const pointsBefore = await points();
     for (const action of held) {
       // oxlint-disable-next-line no-await-in-loop -- one at a time
       await admin.api.pendingActions.confirm(action.id, action.inputHash);
@@ -166,22 +182,37 @@ describe("a run's held side effects", { timeout: 60_000 }, () => {
       outputs.push({ status, output });
     }
     const after = await mail.did();
+    const { results: counts } = await env.DB.prepare(
+      "SELECT step_key FROM app_statistic_steps WHERE app_id = ?"
+    )
+      .bind(app)
+      .all();
     expect({
       held: held.length,
       before,
+      pointsBefore,
       statuses: outputs.map(({ status }) => status),
       answered: outputs.map(({ output }) =>
         JSON.stringify(output).includes("messageId")
       ),
       server: after.calls,
+      points: await points(),
+      counts,
     }).toStrictEqual({
-      held: 2,
+      held: 3,
       before: { calls: 0, sent: [] },
+      // Recorded before the mail was held, but the step hasn't completed.
+      pointsBefore: { mails: 0, sent: 0 },
       // Neither the App's catch nor the workflow's ended the step: each ran
       // again once confirmed and got the mail's answer.
-      statuses: ["completed", "completed"],
-      answered: [true, true],
-      server: 2,
+      statuses: ["completed", "completed", "completed"],
+      answered: [true, true, true],
+      server: 3,
+      // Only the attempt that completed the step counts: its two points
+      // alike, and the one after the mail.
+      points: { mails: 2, sent: 1 },
+      // What the attempts recorded went with the ended run.
+      counts: [],
     });
   });
 

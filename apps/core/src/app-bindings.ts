@@ -41,6 +41,7 @@ export const callerOf = async (
 ): Promise<{
   authority: Authority;
   idempotencyKey: string | undefined;
+  attempt: string | undefined;
   path: CallPath;
   method: string;
 }> => {
@@ -54,14 +55,20 @@ export const callerOf = async (
 /**
  * Who `caller` is, as `callerOf` says, counting one statistics `use` (a
  * point or a read) of their call against its bounds
- * (`App.claimStatistic`): `statistics.rate_limited` past a bound.
+ * (`App.claimStatistic`): `statistics.rate_limited` past a bound. With
+ * the step's key and its attempt, for a workflow run's caller, which its
+ * points are kept by until the step completes.
  */
 export const statisticCallerOf = async (
   env: Env,
   app: AppId,
   caller: unknown,
   use: StatisticUse
-): Promise<{ authority: Authority }> => {
+): Promise<{
+  authority: Authority;
+  idempotencyKey: string | undefined;
+  attempt: string | undefined;
+}> => {
   const parsed = callerSchema.safeParse(caller);
   if (!parsed.success) {
     throw appErrors.create("app.caller_invalid");

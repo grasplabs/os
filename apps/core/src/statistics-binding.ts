@@ -22,7 +22,9 @@ import {
  * measures too, only of Apps whose runs the caller may see. Like every
  * stub, it passes the caller of the App method it runs in, and acts only
  * while that call runs; points and reads count against the call's and
- * the App's minute's bounds (`statisticCallerOf`).
+ * the App's minute's bounds (`statisticCallerOf`). A point recorded for a
+ * workflow run's step is added up when the step completes, once however
+ * often the step runs, and isn't read before (`recordStatistic`).
  */
 export class AppStatisticsBinding extends WorkerEntrypoint<
   Env,
@@ -32,8 +34,20 @@ export class AppStatisticsBinding extends WorkerEntrypoint<
   async record(caller: unknown, point: unknown): Promise<void> {
     const { app } = this.ctx.props;
     try {
-      await statisticCallerOf(this.env, app, caller, "point");
-      await recordStatistic(this.env, app, point);
+      const { idempotencyKey, attempt } = await statisticCallerOf(
+        this.env,
+        app,
+        caller,
+        "point"
+      );
+      // A workflow run's step: kept with its attempt, and added up when
+      // the step completes.
+      await recordStatistic(this.env, app, point, {
+        step:
+          idempotencyKey === undefined || attempt === undefined
+            ? undefined
+            : { key: idempotencyKey, attempt },
+      });
     } catch (error) {
       throw forSandbox(error);
     }

@@ -85,6 +85,14 @@ const dayMs = 24 * 60 * 60 * 1000;
 /** The UTC day of `date`, `YYYY-MM-DD`. */
 const dayOf = (date: Date): string => date.toISOString().slice(0, 10);
 
+/** A workflow run's step, and the attempt of it a point comes from. */
+export interface StepAttemptRef {
+  /** The step's idempotency key (`stepIdempotencyKey`). */
+  key: string;
+  /** The attempt, as the run's engine names it. */
+  attempt: string;
+}
+
 /**
  * Records one point (`statisticPointSchema`) of App `app`'s, on the UTC
  * day of `now`: added to that day's row of its measure and dimensions,
@@ -92,12 +100,22 @@ const dayOf = (date: Date): string => date.toISOString().slice(0, 10);
  * `statisticRowsPerDay` rows that day is refused (`statistics.too_many`);
  * two landing at once may each make the last one, so the bound is that
  * or a few over.
+ *
+ * A point of a workflow run's step (`step`) isn't added up here: it is
+ * kept with its attempt (`app_statistic_steps`), and the points of the
+ * attempt that completes the step are added up then, once, by the run's
+ * engine (`commitStepStatistics`, statistic-steps.ts). So a step that
+ * runs again, after a retry, a replay or a held side effect, counts once,
+ * and a step that never completes counts nothing. The day's bound is
+ * checked when they are added up, where a point past it is left out; here
+ * the call succeeds, and is refused only once one attempt holds as many
+ * rows for the App as a day does.
  */
 export const recordStatistic = async (
   env: Env,
   app: AppId,
   input: unknown,
-  now = new Date()
+  { now = new Date(), step }: { now?: Date; step?: StepAttemptRef } = {}
 ): Promise<void> => {
   requireFeature(env, "statistics");
   const { measure, value, dimensions } = statisticErrors.parse(
@@ -107,26 +125,57 @@ export const recordStatistic = async (
   );
   const day = dayOf(now);
   const key = canonicalJson(dimensions);
-  const result = await env.DB.prepare(
-    `INSERT INTO app_statistics (app_id, measure, day, dimensions, count, sum, min, max)
-     SELECT ?1, ?2, ?3, ?4, 1, ?5, ?5, ?5
-     WHERE EXISTS (
-         SELECT 1 FROM app_statistics
-         WHERE app_id = ?1 AND measure = ?2 AND day = ?3 AND dimensions = ?4
-       )
-       OR (
-         SELECT count(*) FROM (
-           SELECT 1 FROM app_statistics WHERE app_id = ?1 AND day = ?3 LIMIT ?6
-         )
-       ) < ?6
-     ON CONFLICT (app_id, measure, day, dimensions) DO UPDATE SET
-       count = count + 1,
-       sum = sum + excluded.sum,
-       min = min(min, excluded.min),
-       max = max(max, excluded.max)`
-  )
-    .bind(app, measure, day, key, value, statisticRowsPerDay)
-    .run();
+  const statement =
+    step === undefined
+      ? env.DB.prepare(
+          `INSERT INTO app_statistics (app_id, measure, day, dimensions, count, sum, min, max)
+           SELECT ?1, ?2, ?3, ?4, 1, ?5, ?5, ?5
+           WHERE EXISTS (
+               SELECT 1 FROM app_statistics
+               WHERE app_id = ?1 AND measure = ?2 AND day = ?3 AND dimensions = ?4
+             )
+             OR (
+               SELECT count(*) FROM (
+                 SELECT 1 FROM app_statistics WHERE app_id = ?1 AND day = ?3 LIMIT ?6
+               )
+             ) < ?6
+           ON CONFLICT (app_id, measure, day, dimensions) DO UPDATE SET
+             count = count + 1,
+             sum = sum + excluded.sum,
+             min = min(min, excluded.min),
+             max = max(max, excluded.max)`
+        ).bind(app, measure, day, key, value, statisticRowsPerDay)
+      : env.DB.prepare(
+          `INSERT INTO app_statistic_steps
+             (step_key, attempt, app_id, measure, day, dimensions, count, sum, min, max, committed)
+           SELECT ?7, ?8, ?1, ?2, ?3, ?4, 1, ?5, ?5, ?5, 0
+           WHERE EXISTS (
+               SELECT 1 FROM app_statistic_steps
+               WHERE step_key = ?7 AND attempt = ?8 AND app_id = ?1
+                 AND measure = ?2 AND day = ?3 AND dimensions = ?4
+             )
+             OR (
+               SELECT count(*) FROM (
+                 SELECT 1 FROM app_statistic_steps
+                 WHERE step_key = ?7 AND attempt = ?8 AND app_id = ?1 LIMIT ?6
+               )
+             ) < ?6
+           ON CONFLICT (step_key, attempt, app_id, measure, day, dimensions) DO UPDATE SET
+             count = count + 1,
+             sum = sum + excluded.sum,
+             min = min(min, excluded.min),
+             max = max(max, excluded.max)`
+        ).bind(
+          app,
+          measure,
+          day,
+          key,
+          value,
+          statisticRowsPerDay,
+          step.key,
+          step.attempt
+        );
+  const result = await statement.run();
   if (result.meta.changes === 0) {
     throw statisticErrors.create("statistics.too_many", {
       maxRows: statisticRowsPerDay,

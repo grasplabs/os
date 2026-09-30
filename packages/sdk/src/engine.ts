@@ -80,7 +80,9 @@ export type BindingMethod = (...args: Json[]) => Promise<unknown>;
  * actions on; elsewhere it is refused), and the run waits with it, using
  * none of the step's retries. After their decision the step's
  * function runs again from the top, so work before the call repeats:
- * keep it idempotent. Confirmed, the call answers as it would have; a
+ * keep it idempotent. (The statistics points an App method records are:
+ * they are added up when the step completes, once, however often it
+ * runs; a step that fails adds none.) Confirmed, the call answers as it would have; a
  * decline, or a drop (its connection disconnected, the person removed),
  * fails the call with `connect.declined`, which isn't retried: a final
  * answer, which the step's code (or the App's) may catch and handle like
