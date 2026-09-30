@@ -1519,6 +1519,104 @@ describe("rolling new secrets out", () => {
     });
   });
 
+  it("reads a few clients at a time for the check, and counts one whose account doesn't answer in time as behind, aborting its requests", async () => {
+    const release = await importedRelease("feat(core): what they all run");
+    const all = [];
+    for (let index = 0; index < 4; index += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- one deploy at a time
+      all.push(await activeClient(0, release));
+    }
+    await rotateMicrosoftSecret();
+    await using run = await followRollouts();
+    const rolloutId = await rollOutSecrets({ scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+    // One client's account doesn't answer until the test lets it.
+    const [slow] = all;
+    const held = Promise.withResolvers<boolean>();
+    cloudflare.beforeAnswering(
+      ({ path }) =>
+        path.startsWith(`/accounts/${slow?.account.id ?? ""}/workers`),
+      async () => {
+        await held.promise;
+      }
+    );
+    // Set up and rolled out one client at a time: never two accounts at once.
+    const peakBefore = cloudflare.peakAccounts();
+
+    const check = await checkRevocation(env, rolloutId, {
+      concurrency: 2,
+      rowDeadlineMs: 200,
+      waitBudgetMs: 0,
+    });
+    const aborted = cloudflare.abortedCalls();
+    held.resolve(true);
+
+    expect({
+      peakBefore,
+      peak: cloudflare.peakAccounts(),
+      // Its stalled request was aborted, not left running past the deadline.
+      aborted: aborted > 0,
+      check,
+    }).toMatchObject({
+      peakBefore: 1,
+      peak: 2,
+      aborted: true,
+      check: {
+        revocable: [],
+        rotated: ["MICROSOFT_CLIENT_SECRET"],
+        behind: { MICROSOFT_CLIENT_SECRET: [slow?.clientId] },
+      },
+    });
+  });
+
+  it("never says an old secret can go while a client still being provisioned has a Worker live, which no secrets rollout reaches", async () => {
+    const release = await importedRelease(
+      "feat(core): while one is provisioned"
+    );
+    await activeClient(0, release);
+    // Part way through provisioning: its Workers are live, on the secrets
+    // the store held then, and its run may yet upload more.
+    const partWay = await activeClient(1, release);
+    await db
+      .update(clients)
+      .set({ status: "provisioning" })
+      .where(eq(clients.id, partWay.clientId));
+    // Provisioning too, with nothing made live yet: it holds no secret.
+    const notYet = `client-${crypto.randomUUID().slice(0, 8)}`;
+    const now = new Date();
+    await db.insert(clients).values({
+      id: notYet,
+      name: notYet,
+      accountId: cloudflare.addAccount().id,
+      ring: 1,
+      status: "provisioning",
+      createdAt: now,
+      updatedAt: now,
+    });
+    await rotateMicrosoftSecret();
+    await using run = await followRollouts();
+    const rolloutId = await rollOutSecrets({ scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+    const callsBefore = cloudflare.calls.length;
+
+    const check = await checkRevocation(env, rolloutId);
+
+    const partWayCalls = cloudflare.calls
+      .slice(callsBefore)
+      .filter(({ path }) =>
+        path.startsWith(`/accounts/${partWay.account.id}/`)
+      );
+    expect({ check, partWayCalls: partWayCalls.length }).toMatchObject({
+      check: {
+        revocable: [],
+        rotated: ["MICROSOFT_CLIENT_SECRET"],
+        // Behind without being read; the one with nothing live isn't.
+        behind: { MICROSOFT_CLIENT_SECRET: [partWay.clientId] },
+      },
+      partWayCalls: 0,
+    });
+  });
+
   it("skips a client whose Workers don't run one release, deploying nothing to it", async () => {
     const older = await importedRelease("feat(core): what connect runs");
     const newer = await importedRelease("feat(core): what core runs");

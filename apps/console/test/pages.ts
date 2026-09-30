@@ -62,18 +62,28 @@ const answerSchema = z.object({
   error: z.unknown().optional(),
 });
 
+/** Who a server function is called as, and from where. */
+export interface Caller {
+  /** The staff member Access vouches for; null for a request without its JWT. */
+  email?: string | null;
+  /** The page's origin, as the browser sends it: the console's own unless given. */
+  from?: string;
+}
+
 /**
  * What server function `fn` answers `data` with, called as the console's
- * own pages call it: through the Worker's entry as `email` (a staff
+ * own pages call it: through the Worker's entry as `caller.email` (a staff
  * member), at TanStack Start's route for server functions, in its wire
- * format.
+ * format. A `caller` can also be what the console's pages never are:
+ * another site's page, or no one Access vouches for. An answer that isn't
+ * one (a refusal) throws, saying its status.
  */
 export const callServerFn = async <Data, Result>(
   fn: ((options: { data: Data }) => Promise<Result>) & {
     serverFnMeta?: { id: string };
   },
   data: Data,
-  email = "staff@grasp.test"
+  { email = "staff@grasp.test", from = origin }: Caller = {}
 ): Promise<Result> => {
   const id = fn.serverFnMeta?.id;
   if (id === undefined) {
@@ -82,8 +92,10 @@ export const callServerFn = async <Data, Result>(
   const response = await exports.default.fetch(`${origin}/_serverFn/${id}`, {
     method: "POST",
     headers: {
-      "cf-access-jwt-assertion": await accessJwt(email),
-      origin,
+      ...(email === null
+        ? {}
+        : { "cf-access-jwt-assertion": await accessJwt(email) }),
+      origin: from,
       "x-tsr-serverFn": "true",
       "content-type": "application/json",
       accept: "application/json",

@@ -155,7 +155,7 @@ const keepReason = (check: RevocationCheck, name: string): string | null => {
   }
   const behind = check.behind[name] ?? [];
   if (behind.length > 0) {
-    return `Keep the old ${name}: ${behind.join(", ")} ${behind.length === 1 ? "doesn't" : "don't"} run the new value yet, read live.`;
+    return `Keep the old ${name}: ${behind.join(", ")} ${behind.length === 1 ? "isn't" : "aren't"} known to run the new value yet. Active clients are read live, and one that doesn't answer, or is still being provisioned, counts.`;
   }
   return null;
 };
@@ -170,7 +170,7 @@ const checkLines = (check: RevocationCheck): string[] => [
   ...(check.revocable.length === 0
     ? []
     : [
-        `The old ${check.revocable.join(", ")} can be revoked at ${check.revocable.length === 1 ? "its provider" : "their providers"}: every active client runs the new value, read live.`,
+        `The old ${check.revocable.join(", ")} can be revoked at ${check.revocable.length === 1 ? "its provider" : "their providers"}: every active client runs the new value, read live, and none is part way through provisioning.`,
       ]),
   ...check.rotated.flatMap((name) => {
     const reason = keepReason(check, name);

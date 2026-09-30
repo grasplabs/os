@@ -17,25 +17,39 @@
  *   release that holds the secret, read live from its account as drift
  *   reads it (src/rollout/drift.ts): a Worker that's unrecorded, split,
  *   unreadable, or live on a version without fingerprints is behind on
- *   every secret it holds.
+ *   every secret it holds, and so is a client whose account doesn't
+ *   answer in time;
+ * - no client is still being provisioned with a Worker made live: its
+ *   run isn't a rollout's target, and may hold the store's earlier values
+ *   for the Workers it has yet to upload, so it counts as behind on every
+ *   secret, unread.
  * A secret the rollout didn't rotate is never called revocable.
  *
- * Read on demand: it reads every active client's account.
+ * Read on demand: it reads every active client's account, a few at a
+ * time, each within a deadline (src/live-reads.ts).
  */
-import { eq } from "drizzle-orm";
+import { and, eq, exists } from "drizzle-orm";
 import { z } from "zod";
 
+import { cloudflareApi } from "../cloudflare/api.ts";
 import { consoleDatabase } from "../db/act.ts";
 import type { ConsoleDatabase } from "../db/act.ts";
-import { clients, rollouts, rolloutTargets } from "../db/schema.ts";
 import {
-  deployerApi,
+  clients,
+  clientWorkers,
+  rollouts,
+  rolloutTargets,
+} from "../db/schema.ts";
+import {
+  deployerToken,
   deploySecrets,
   MissingStoreSecretError,
 } from "../deploy/context.ts";
 import { recordedPrintOf } from "../deploy/deploy.ts";
 import { sharedSecretPrints } from "../deploy/secrets.ts";
 import type { DeploySecrets } from "../deploy/secrets.ts";
+import { defaultLiveReadLimits, eachLimited, within } from "../live-reads.ts";
+import type { LiveReadLimits } from "../live-reads.ts";
 import { driftOf } from "./drift.ts";
 import type { ClientDrift } from "./drift.ts";
 import { parsePrevious } from "./targets.ts";
@@ -187,7 +201,12 @@ export interface RevocationCheck {
   rotated: string[];
   /** Secrets Secrets Store changed since the rollout started, by name. */
   storeChanged: string[];
-  /** Per rotated secret, the active clients that don't run the store's value, read live. */
+  /**
+   * Per rotated secret, the clients not known to run the store's value:
+   * active ones that don't, read live, or whose account didn't answer in
+   * time, and every client still being provisioned with a Worker made
+   * live.
+   */
   behind: Record<string, string[]>;
   /** Targets it reached whose previous shared secrets aren't on record. */
   unproven: string[];
@@ -210,13 +229,40 @@ const changedSince = (before: SharedPrints, started: SharedPrints): string[] =>
   );
 
 /**
+ * The clients still being provisioned that have a Worker the console made
+ * live: what a revocation check counts as behind without reading them.
+ */
+const provisioningWithWorker = async (
+  db: ConsoleDatabase
+): Promise<string[]> => {
+  const rows = await db
+    .select({ id: clients.id })
+    .from(clients)
+    .where(
+      and(
+        eq(clients.status, "provisioning"),
+        exists(
+          db
+            .select({ worker: clientWorkers.worker })
+            .from(clientWorkers)
+            .where(eq(clientWorkers.clientId, clients.id))
+        )
+      )
+    );
+  return rows.map(({ id }) => id);
+};
+
+/**
  * Which of secrets rollout `rolloutId`'s old shared secrets can be revoked
  * (`RevocationCheck`); a refusal for a rollout that isn't one, or while
- * Secrets Store can't be read.
+ * Secrets Store can't be read. Active clients are read `limits.concurrency`
+ * at a time, each within `limits.rowDeadlineMs`; one that doesn't answer
+ * by then is behind on every secret.
  */
 export const checkRevocation = async (
   env: Env,
-  rolloutId: string
+  rolloutId: string,
+  limits: LiveReadLimits = defaultLiveReadLimits
 ): Promise<RevocationCheck | RevocationRefusal> => {
   const db = consoleDatabase(env.DB);
   const [rollout] = await db
@@ -280,23 +326,45 @@ export const checkRevocation = async (
     .select({ id: clients.id })
     .from(clients)
     .where(eq(clients.status, "active"));
-  const api = await deployerApi(env);
-  const live = await Promise.all(
-    active.map(
-      async ({ id }) =>
-        [
-          id,
-          await liveMatches(db, await driftOf(api, db, id), holders, now),
-        ] as const
-    )
+  // Read once: every client's reads make their API from it, each stopped
+  // by its own deadline.
+  const token = await deployerToken(env);
+  const live = await eachLimited(
+    active,
+    limits.concurrency,
+    async ({ id }) =>
+      [
+        id,
+        await within(
+          limits.rowDeadlineMs,
+          async (signal) => {
+            const api = cloudflareApi({
+              token,
+              waitBudgetMs: limits.waitBudgetMs,
+              signal,
+            });
+            return await liveMatches(
+              db,
+              await driftOf(api, db, id),
+              holders,
+              now
+            );
+          },
+          // No answer in time: it runs none of them, as far as is known.
+          await liveMatches(db, null, holders, now)
+        ),
+      ] as const
   );
+  const provisioning = await provisioningWithWorker(db);
   const behind = Object.fromEntries(
     [...rotated].map((name) => [
       name,
-      live
-        .filter(([, matches]) => matches.get(name) !== true)
-        .map(([id]) => id)
-        .toSorted(byId),
+      [
+        ...live
+          .filter(([, matches]) => matches.get(name) !== true)
+          .map(([id]) => id),
+        ...provisioning,
+      ].toSorted(byId),
     ])
   );
   const targeted = new Set(targets.map(({ clientId }) => clientId));

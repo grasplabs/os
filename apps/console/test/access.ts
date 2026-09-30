@@ -49,19 +49,29 @@ export const accessJwt = async (
     .sign(stranger ? strangerKeys.privateKey : teamKeys.privateKey);
 };
 
-/** Serves the team's keys to the console for each test in the file. */
+/**
+ * Serves the team's keys to the console for each test in the file. Any
+ * other request goes to the stand-in for `fetch` the file set up before
+ * this one (the fake Cloudflare API, test/cloudflare-api.ts), if it has
+ * one; without one it's refused.
+ */
 export const mockAccess = (): void => {
   beforeEach(() => {
+    const stoodIn = vi.isMockFunction(globalThis.fetch);
+    const earlier = stoodIn
+      ? vi.mocked(globalThis.fetch).getMockImplementation()
+      : undefined;
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const { url } = new Request(input, init);
-      if (url !== certsUrl) {
+      if (url === certsUrl) {
+        return Response.json({
+          keys: [{ ...publicJwk, kid: keyId, alg: algorithm, use: "sig" }],
+        });
+      }
+      if (earlier === undefined) {
         throw new Error(`Unexpected outbound request to ${url}`);
       }
-      return await Promise.resolve(
-        Response.json({
-          keys: [{ ...publicJwk, kid: keyId, alg: algorithm, use: "sig" }],
-        })
-      );
+      return await earlier(input, init);
     });
   });
   afterEach(() => {

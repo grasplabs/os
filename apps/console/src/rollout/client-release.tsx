@@ -40,7 +40,7 @@ const driftWords: Readonly<Record<ClientDriftState, string>> = {
 /** Whether it runs the shared secrets in Secrets Store now, in words. */
 const sharedSecretsWords = (current: boolean | null): string => {
   if (current === null) {
-    return "Whether it runs the shared secrets in Secrets Store now can't be told: the store can't be read.";
+    return "Whether it runs the shared secrets in Secrets Store now can't be told: the store or its account couldn't be read, or nothing is live on it yet.";
   }
   return current
     ? "It runs the shared secrets in Secrets Store now."
