@@ -23,8 +23,14 @@ const toolkits: FakeToolkit[] = [
         slug: "HUBSPOT_LIST_CONTACTS",
         description: "List contacts",
         inputs: ["limit", "after"],
+        tags: ["important", "readOnlyHint"],
       },
-      { slug: "HUBSPOT_CREATE_CONTACT", description: "Create a contact" },
+      {
+        slug: "HUBSPOT_CREATE_CONTACT",
+        description: "Create a contact",
+        tags: ["createHint"],
+      },
+      // Tagged with nothing: not taken for a read.
       { slug: "HUBSPOT_DELETE_CONTACT" },
     ],
   },
@@ -45,7 +51,17 @@ const toolkits: FakeToolkit[] = [
   {
     slug: "notion",
     name: "Notion",
-    tools: [{ slug: "NOTION_SEARCH" }],
+    tools: [
+      { slug: "NOTION_SEARCH", tags: ["readOnlyHint"] },
+      // Tags connect can't read, each beside the read-only tag.
+      { slug: "NOTION_NOT_STRINGS", tags: ["readOnlyHint", 7] },
+      { slug: "NOTION_TOO_LONG", tags: ["readOnlyHint", "t".repeat(129)] },
+      {
+        slug: "NOTION_TOO_MANY",
+        tags: Array.from({ length: 65 }, () => "readOnlyHint"),
+      },
+      { slug: "NOTION_NOT_A_LIST", tags: "readOnlyHint" },
+    ],
   },
 ];
 
@@ -256,7 +272,7 @@ describe("a catalog entry's tools", () => {
       .map(({ path }) => path)
       .filter((path) => path.startsWith("/tools"));
 
-  it("lists a Composio toolkit's tools by the names its server gives them", async () => {
+  it("lists a Composio toolkit's tools by the names its server gives them, read-only only where Composio tags them so", async () => {
     await expect(
       exports.default.catalogTools({
         composio: true,
@@ -268,17 +284,39 @@ describe("a catalog entry's tools", () => {
         name: "HUBSPOT_LIST_CONTACTS",
         description: "List contacts",
         inputs: ["limit", "after"],
+        readOnly: true,
       },
       {
         name: "HUBSPOT_CREATE_CONTACT",
         description: "Create a contact",
         inputs: [],
+        readOnly: false,
       },
-      { name: "HUBSPOT_DELETE_CONTACT", description: null, inputs: [] },
+      {
+        name: "HUBSPOT_DELETE_CONTACT",
+        description: null,
+        inputs: [],
+        readOnly: false,
+      },
     ]);
     expect(toolRequests()).toStrictEqual([
       "/tools?toolkit_slug=hubspot&limit=200",
       "/tools?toolkit_slug=hubspot&limit=200&cursor=2",
+    ]);
+  });
+
+  it("lists a tool whose tags it can't read as one that changes things", async () => {
+    const tools = await exports.default.catalogTools({
+      composio: true,
+      source: "composio",
+      id: "notion",
+    });
+    expect(tools.map(({ name, readOnly }) => [name, readOnly])).toStrictEqual([
+      ["NOTION_SEARCH", true],
+      ["NOTION_NOT_STRINGS", false],
+      ["NOTION_TOO_LONG", false],
+      ["NOTION_TOO_MANY", false],
+      ["NOTION_NOT_A_LIST", false],
     ]);
   });
 
@@ -310,6 +348,14 @@ describe("a catalog entry's tools", () => {
     expect(tools.every(({ description }) => description === null)).toBeTruthy();
     // Its input properties, as its manifest declares them.
     expect(tools.some(({ inputs }) => inputs.length > 0)).toBeTruthy();
+    // Read-only as its manifest says: its reads, and not its writes.
+    const readOnlyOf = Object.fromEntries(
+      tools.map(({ name, readOnly }) => [name, readOnly])
+    );
+    expect(readOnlyOf).toMatchObject({
+      "mail.list": true,
+      "mail.send": false,
+    });
     expect(composio.requests).toStrictEqual([]);
   });
 

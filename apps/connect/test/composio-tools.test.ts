@@ -33,7 +33,12 @@ const composio = fakeComposioApi(
       name: "HubSpot",
       tools: [
         { slug: "HUBSPOT_LIST_CONTACTS", inputs: ["owner_id", "limit"] },
-        { slug: "HUBSPOT_GET_CONTACT", inputs: ["contact_id"] },
+        {
+          slug: "HUBSPOT_GET_CONTACT",
+          inputs: ["contact_id"],
+          // Composio says it only reads; the list above, it says nothing of.
+          tags: ["readOnlyHint"],
+        },
         { slug: "HUBSPOT_CREATE_CONTACT", inputs: ["owner_id", "email"] },
       ],
     },
@@ -212,6 +217,23 @@ describe("a Composio tool the admin didn't mark as a read", () => {
     expect(composio.state.mcp.ran).toStrictEqual([]);
   });
 
+  it("waits in chat for its person, audited as a side effect, and doesn't run", async () => {
+    const anna = someone();
+    const connectionId = await hubspot();
+    const inChat = agentFor(anna.userId, "agent-chat", "interactive");
+    const call = {
+      ...read(connectionId, "HUBSPOT_GET_CONTACT", { contact_id: "c-1" }),
+      idempotencyKey: crypto.randomUUID(),
+    };
+    const answer = await callAs(inChat, call, { origin: chatOrigin });
+    const [pending] = await exports.default.listPendingActions(anna);
+    expect(answer.pending?.id).toBe(pending?.id);
+    expect(pending?.action).toBe("HUBSPOT_GET_CONTACT");
+    const [held] = await events();
+    expect(held?.detail).toMatchObject({ sideEffect: true, outcome: "held" });
+    expect(composio.state.mcp.ran).toStrictEqual([]);
+  });
+
   it("isn't held to the resource property its server names, only to one the admin named", async () => {
     const connectionId = await hubspot();
     const call = {
@@ -256,9 +278,14 @@ const start = async (
   });
 
 describe("the admin's allowlist, when they connect", () => {
-  it("is kept with the flow, rules and all, and counted in the consent and the connection", async () => {
+  it("is kept with the flow, rules and all, and the log names each tool that runs unheld, and whether Composio said it only reads", async () => {
     const admin = someone("admin");
-    const { url } = await start(rules, admin);
+    const allowed = [
+      { name: "HUBSPOT_LIST_CONTACTS", read: true },
+      { name: "HUBSPOT_GET_CONTACT", read: true },
+      "HUBSPOT_CREATE_CONTACT",
+    ];
+    const { url } = await start(allowed, admin);
     const { state } = composio.authorize(url);
     await exports.default.finishConnection({
       person: admin,
@@ -274,11 +301,44 @@ describe("the admin's allowlist, when they connect", () => {
         action,
         toolCount: detail.toolCount,
         readCount: detail.readCount,
+        unhintedReadCount: detail.unhintedReadCount,
       }));
     expect(counted).toStrictEqual([
-      { action: "connection.consent", toolCount: 3, readCount: 1 },
-      { action: "connection.connect", toolCount: 3, readCount: 1 },
+      {
+        action: "connection.consent",
+        toolCount: 3,
+        readCount: 2,
+        unhintedReadCount: 1,
+      },
+      {
+        action: "connection.connect",
+        toolCount: 3,
+        readCount: 2,
+        unhintedReadCount: undefined,
+      },
     ]);
+    const consent = recorded.find(
+      ({ action }) => action === "connection.consent"
+    );
+    expect(
+      recorded
+        .filter(({ action }) => action === "connection.consent.read_tools")
+        .map(({ actor, detail }) => ({ actor, detail }))
+    ).toStrictEqual(
+      [
+        { hinted: false, part: 1, names1: "HUBSPOT_LIST_CONTACTS" },
+        { hinted: true, part: 1, names1: "HUBSPOT_GET_CONTACT" },
+      ].map((names) => ({
+        actor: consent?.actor,
+        detail: {
+          provider: "hubspot",
+          scope: "shared",
+          flowId: consent?.detail.flowId,
+          ...names,
+        },
+      }))
+    );
+    expect(consent?.detail).not.toHaveProperty("unnamedReadCount");
   });
 
   it("names only the tools' own input properties as resources, and each tool once", async () => {

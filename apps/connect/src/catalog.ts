@@ -191,7 +191,19 @@ const toolSchema = z.object({
   input_parameters: z
     .object({ properties: z.record(z.string(), z.unknown()).optional() })
     .nullish(),
+  /** Its behaviour tags, read on their own ({@link tagsSchema}). */
+  tags: z.unknown().optional(),
 });
+
+/**
+ * A tool's behaviour tags, of which only {@link readOnlyTag} is read. Tags
+ * connect can't read (not strings, too long, too many) count as none: the
+ * tool is still listed, as one that changes things.
+ */
+const tagsSchema = z.array(z.string().max(128)).max(64);
+
+/** Composio's tag for a tool that reads, searches or lists and changes nothing. */
+const readOnlyTag = "readOnlyHint";
 
 /**
  * Every item of one of Composio's lists at `path`, page after page, as
@@ -309,10 +321,12 @@ const toolsOf = async (
     toolSchema,
     toolPaging
   );
-  return tools.map(({ slug, description, input_parameters: input }) => ({
+  return tools.map(({ slug, description, input_parameters: input, tags }) => ({
     name: slug,
     description: description ?? null,
     inputs: Object.keys(input?.properties ?? {}),
+    // Strictly the tag: a tool that says nothing isn't taken for a read.
+    readOnly: tagsSchema.safeParse(tags).data?.includes(readOnlyTag) === true,
   }));
 };
 
@@ -365,7 +379,12 @@ export const catalogTools = async (
       throw connectErrors.create("connect.catalog_entry_not_found");
     }
     return Object.entries(connector.manifest.actions).map(
-      ([name, { input }]) => ({ name, description: null, inputs: input })
+      ([name, { input, readOnly }]) => ({
+        name,
+        description: null,
+        inputs: input,
+        readOnly,
+      })
     );
   }
   const key = composioKey(env);

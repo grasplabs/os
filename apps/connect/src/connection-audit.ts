@@ -20,7 +20,8 @@ export const connectionEvent = (
     | "connection.connect"
     | "connection.reconnected"
     | "connection.disconnect"
-    | "connection.consent",
+    | "connection.consent"
+    | "connection.consent.read_tools",
   connectionId: string | undefined,
   detail: Record<string, AuditDetailValue>
 ): AuditEntry => ({
@@ -32,6 +33,65 @@ export const connectionEvent = (
       : { type: "connection", id: connectionId },
   detail,
 });
+
+/** Most characters of names one detail value holds: a detail value's limit. */
+const namesPerValueMaxLength = 256;
+
+/**
+ * Most values of names one event holds: a detail has 32 members, and the
+ * event needs a few for what the names are of.
+ */
+const nameValuesPerEvent = 24;
+
+/**
+ * Most events one list of names takes. A Composio allowlist has at most
+ * 1,000 tools of at most 64 characters, three or more to a value, so 14
+ * events name them all: with this, a consent never adds more than these
+ * few inserts to its batch, and nothing is cut off while those limits
+ * hold.
+ */
+export const namesEventsMax = 16;
+
+/**
+ * `names` for the audit log, whose detail values are small: joined with
+ * commas into values of at most 256 characters, as `names1`, `names2`, …,
+ * up to 24 to an event's detail, in at most `maxEvents` details. Names
+ * that don't fit in those are `rest`, for the caller to record as a count
+ * and a hash; so is a name too long for one value, and all after it.
+ */
+export const packedNames = (
+  names: readonly string[],
+  maxEvents = namesEventsMax
+): { details: Record<string, string>[]; rest: string[] } => {
+  const values: string[] = [];
+  let taken = 0;
+  for (const name of names) {
+    const last = values.at(-1);
+    const joined = last === undefined ? name : `${last},${name}`;
+    if (last !== undefined && joined.length <= namesPerValueMaxLength) {
+      values[values.length - 1] = joined;
+    } else if (
+      name.length <= namesPerValueMaxLength &&
+      values.length < maxEvents * nameValuesPerEvent
+    ) {
+      values.push(name);
+    } else {
+      break;
+    }
+    taken += 1;
+  }
+  const details: Record<string, string>[] = [];
+  for (const [index, value] of values.entries()) {
+    if (index % nameValuesPerEvent === 0) {
+      details.push({});
+    }
+    const detail = details.at(-1);
+    if (detail !== undefined) {
+      detail[`names${(index % nameValuesPerEvent) + 1}`] = value;
+    }
+  }
+  return { details, rest: names.slice(taken) };
+};
 
 /** Records a refused or failed attempt; if that fails too, it is logged. */
 export const auditRefusal = async (

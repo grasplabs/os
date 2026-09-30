@@ -25,7 +25,12 @@ import { z } from "zod";
 import { recordEvents } from "./audit.ts";
 import { composioTools } from "./catalog.ts";
 import { ComposioError, composioKey, composioRequest } from "./composio.ts";
-import { auditRefusal, connectionEvent } from "./connection-audit.ts";
+import {
+  auditRefusal,
+  connectionEvent,
+  namesEventsMax,
+  packedNames,
+} from "./connection-audit.ts";
 import { isComposioServerUrl } from "./connections.ts";
 import type { Connection } from "./connections.ts";
 import { composioCleanups, composioFlows, connections } from "./db/schema.ts";
@@ -408,12 +413,17 @@ const refuseUnlessAdmin = async (
 };
 
 /**
- * How many of an allowlist's tools the admin marked as reads: the consent
- * and connect events record it beside the `toolsHash`, so the log shows at
- * a glance what runs unheld and without a key.
+ * The tools of an allowlist the admin marked as reads, by name: they run
+ * unheld and without a key. The consent and connect events record how many
+ * beside the `toolsHash`, and the consent names them in a few events of
+ * their own (`connection.consent.read_tools`; `packedNames`), those
+ * Composio didn't tag read-only first (`hinted: false`): one marked without
+ * the hint is the admin's word alone.
  */
-const readCountOf = (tools: readonly (string | ComposioToolRule)[]): number =>
-  tools.filter((tool) => typeof tool !== "string" && tool.read === true).length;
+const readToolsOf = (tools: readonly (string | ComposioToolRule)[]): string[] =>
+  tools.flatMap((tool) =>
+    typeof tool !== "string" && tool.read === true ? [tool.name] : []
+  );
 
 /**
  * Starts connecting a toolkit for an admin who consented: records their
@@ -441,6 +451,10 @@ export const startToolkitConnection = async (
   const inputsOf = new Map(
     toolkitTools.map(({ name, inputs }) => [name, inputs])
   );
+  const hinted = new Set(
+    toolkitTools.flatMap(({ name, readOnly }) => (readOnly ? [name] : []))
+  );
+  const readTools = readToolsOf(tools);
   const fits = tools.every((tool) => {
     const inputs = inputsOf.get(composioToolName(tool));
     const resource = typeof tool === "string" ? undefined : tool.resource;
@@ -456,6 +470,24 @@ export const startToolkitConnection = async (
   const state = randomToken();
   const stateHash = await sha256Hex(state);
   const flowId = crypto.randomUUID();
+  const unhinted = readTools.filter((tool) => !hinted.has(tool));
+  // The unhinted first, so they are the ones named if names are cut off.
+  const named = packedNames(unhinted);
+  const namedHinted = packedNames(
+    readTools.filter((tool) => hinted.has(tool)),
+    namesEventsMax - named.details.length
+  );
+  const unnamed = [...named.rest, ...namedHinted.rest];
+  const namesOf = (details: Record<string, string>[], wasHinted: boolean) =>
+    details.map((names, index) =>
+      connectionEvent(person, "connection.consent.read_tools", undefined, {
+        ...detailOf(toolkit),
+        flowId,
+        hinted: wasHinted,
+        part: index + 1,
+        ...names,
+      })
+    );
   const storedTools = JSON.stringify(tools);
   const callback = new URL(connectionCallbackPath, origin);
   callback.searchParams.set("state", state);
@@ -514,8 +546,18 @@ export const startToolkitConnection = async (
           flowId,
           toolsHash: await sha256Hex(storedTools),
           toolCount: tools.length,
-          readCount: readCountOf(tools),
+          readCount: readTools.length,
+          unhintedReadCount: unhinted.length,
+          // Only when names were cut off: how many, and their hash.
+          ...(unnamed.length === 0
+            ? {}
+            : {
+                unnamedReadCount: unnamed.length,
+                unnamedReadHash: await sha256Hex(unnamed.join(",")),
+              }),
         }),
+        ...namesOf(named.details, false),
+        ...namesOf(namedHinted.details, true),
       ],
       [
         db.delete(composioCleanups).where(thisCleanup),
@@ -773,7 +815,7 @@ const finishToolkitConnection = async (
           flowId: flow.flowId,
           toolsHash: await sha256Hex(flow.tools),
           toolCount: tools.length,
-          readCount: readCountOf(tools),
+          readCount: readToolsOf(tools).length,
         }),
       ],
       [

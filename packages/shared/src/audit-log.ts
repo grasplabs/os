@@ -53,7 +53,9 @@ const typeRules: readonly {
   // A connection whose grant ran out given a new one, by signing in again.
   { action: "connection.reconnected", type: "config" },
   { action: "connection.disconnect", type: "config" },
-  // An admin consenting to Composio holding a connection's tokens.
+  // An admin consenting to Composio holding a connection's tokens, and
+  // the tools they marked as reads, which run unheld
+  // (`connection.consent.read_tools`).
   { action: "connection.consent", type: "config" },
   // An admin changing which connectors are offered.
   { action: "connection.offer_changed", type: "config" },

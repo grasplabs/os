@@ -30,6 +30,8 @@ import type { ReactNode } from "react";
 import { ErrorText } from "../error-text.tsx";
 import { useCoreAction } from "../use-core-action.ts";
 import { SourceBadge } from "./source-badge.tsx";
+import { toolRules, withAllowed, withRead } from "./tool-choices.ts";
+import type { AllowedTool } from "./tool-choices.ts";
 import { useChange } from "./use-change.ts";
 
 // What can be connected, to search and connect from. A native provider
@@ -114,16 +116,51 @@ const NativeConnect = ({
 };
 
 /**
- * Connecting a Composio toolkit: the admin picks the tools to allow, reads
- * what they consent to, and consents by connecting. Each tool is allowed
- * by name, so every call of it counts as a side effect and waits for its
- * person to confirm it.
+ * One tool of the toolkit: whether to allow it and, once allowed, whether
+ * it only reads (tool-choices.ts).
+ */
+const ToolChoice = ({
+  tool,
+  choice,
+  onAllow,
+  onRead,
+}: {
+  tool: CatalogTool;
+  choice: AllowedTool | undefined;
+  onAllow: (allow: boolean) => void;
+  onRead: (read: boolean) => void;
+}) => (
+  <div className="flex items-center justify-between gap-4 text-sm">
+    <label className="flex items-center gap-2">
+      <Checkbox checked={choice !== undefined} onCheckedChange={onAllow} />
+      {tool.name}
+    </label>
+    {choice === undefined ? null : (
+      <div className="text-muted-foreground flex items-center gap-2">
+        <Checkbox
+          checked={choice.read}
+          aria-label={`${tool.name} is read-only`}
+          onCheckedChange={onRead}
+        />
+        <span aria-hidden="true">Read-only</span>
+      </div>
+    )}
+  </div>
+);
+
+/**
+ * Connecting a Composio toolkit: the admin picks the tools to allow, says
+ * which of them only read, reads what they consent to, and consents by
+ * connecting. A read-only tool runs without asking; a call of any other is
+ * a side effect, which waits for its person to confirm it wherever a
+ * person is there (chat, an App they use), and which a workflow's run
+ * makes as a step.
  */
 const ComposioConnect = ({ entry }: { entry: Entry }) => {
   const { busy, failure, run } = useCoreAction();
   const [open, setOpen] = useState(false);
   const [tools, setTools] = useState<CatalogTool[]>();
-  const [allowed, setAllowed] = useState<string[]>([]);
+  const [allowed, setAllowed] = useState<AllowedTool[]>([]);
   const loadTools = async (): Promise<void> => {
     const listed = await run(
       async (session) =>
@@ -139,7 +176,7 @@ const ComposioConnect = ({ entry }: { entry: Entry }) => {
         async (session) =>
           await session.connections.connectToolkit({
             toolkit: entry.id,
-            tools: allowed,
+            tools: toolRules(allowed),
             consent: composioConsentText,
             returnTo,
           })
@@ -173,23 +210,29 @@ const ComposioConnect = ({ entry }: { entry: Entry }) => {
         </DialogHeader>
         <fieldset className="flex max-h-80 flex-col gap-2 overflow-y-auto">
           <legend className="mb-2 text-sm font-medium">Tools to allow</legend>
+          <p className="text-muted-foreground text-sm">
+            Read-only is ticked where Composio says a tool only reads; Grasp
+            doesn&apos;t check that. A read-only tool runs without asking. A
+            call of any other tool from chat, or from a person using an App,
+            waits for that person to confirm it; a workflow&apos;s run makes it
+            as one of its steps. Mark a tool read-only only if it changes
+            nothing: marked wrongly, it changes things without asking.
+          </p>
           {tools === undefined && busy ? (
             <p className="text-muted-foreground text-sm">Loading its tools…</p>
           ) : null}
           {tools?.map((tool) => (
-            <label key={tool.name} className="flex items-center gap-2 text-sm">
-              <Checkbox
-                checked={allowed.includes(tool.name)}
-                onCheckedChange={(checked) => {
-                  setAllowed((current) =>
-                    checked
-                      ? [...current, tool.name]
-                      : current.filter((name) => name !== tool.name)
-                  );
-                }}
-              />
-              {tool.name}
-            </label>
+            <ToolChoice
+              key={tool.name}
+              tool={tool}
+              choice={allowed.find(({ name }) => name === tool.name)}
+              onAllow={(allow) => {
+                setAllowed((current) => withAllowed(current, tool, allow));
+              }}
+              onRead={(read) => {
+                setAllowed((current) => withRead(current, tool.name, read));
+              }}
+            />
           ))}
         </fieldset>
         <ErrorText>{failure}</ErrorText>
