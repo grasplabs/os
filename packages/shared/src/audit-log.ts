@@ -61,8 +61,8 @@ const typeRules: readonly {
   // triggers, dropping an event it couldn't deliver, and starting or
   // stopping listening there, being refused it, or failing to read it.
   { action: "connection.events.read", type: "read" },
-  // An event dropped, after its last try or because core can't take it: a
-  // workflow it would have started didn't start.
+  // An event dropped after its last try: a workflow it would have started
+  // didn't start.
   { action: "connection.events.dropped", type: "action" },
   { action: "connection.events", type: "config" },
   // A held action dropped because nobody can confirm it any more, then a

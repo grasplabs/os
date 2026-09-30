@@ -1,5 +1,6 @@
 import type { EventListener } from "@grasp-os/shared/connect";
 import { connectionIdSchema } from "@grasp-os/shared/ids";
+import { connectorEventSchema } from "@grasp-os/shared/workflows";
 import { env, exports } from "cloudflare:workers";
 import {
   afterEach,
@@ -49,7 +50,7 @@ import { fakeProviders } from "./oauth-provider.ts";
 const providers = fakeProviders();
 let graph: GraphEventsFake = graphEventsFake();
 /** Answers the next Graph request instead of the fake, when set. */
-let instead: (() => Response) | undefined;
+let instead: (() => Response | Promise<Response>) | undefined;
 /** Drives Graph fails every request for. */
 const failingDrives = new Set<string>();
 /** Holds each request for where a drive stands until it resolves, when set. */
@@ -61,7 +62,7 @@ const internet = fakeInternet(async (request, url) => {
   const answer = instead;
   if (answer !== undefined) {
     instead = undefined;
-    return answer();
+    return await answer();
   }
   if (
     [...failingDrives].some((drive) =>
@@ -211,6 +212,13 @@ const failedReads = async (outlook: Connected, status: number) => {
       .map(({ action, detail }) => ({ action, detail })),
   };
 };
+
+/** Graph failing a request. */
+const failedAnswer = (): Response =>
+  Response.json({ error: { code: "Failed" } }, { status: 500 });
+
+/** An ID's hash, as an event is delivered under it. */
+const hashedIdPattern = /^sha256:[0-9a-f]{64}$/u;
 
 const eventIdsOf = (taken: { event: string }[]): string[] =>
   taken.map(
@@ -936,46 +944,86 @@ describe("connector events", () => {
     });
   });
 
-  it("drop an event whose ID is longer than core takes, say so in the audit log, and read on", async () => {
+  it("say nothing of a failure a read that outlived its lease didn't count, its source read on since", async () => {
+    const outlook = await connected();
+    const listeners = [listener(outlook, { resource: invoices })];
+    await sync(listeners);
+    for (let attempt = 1; attempt < failedLimit; attempt += 1) {
+      instead = failedAnswer;
+      // oxlint-disable-next-line no-await-in-loop -- each read after the last one's wait
+      const [due] = await sources();
+      vi.setSystemTime(Math.max(Date.now(), due?.poll_at ?? 0));
+      // oxlint-disable-next-line no-await-in-loop -- reads in turn
+      await sync(listeners);
+    }
+    const [due] = await sources();
+    vi.setSystemTime(Math.max(Date.now(), due?.poll_at ?? 0));
+    // The read that would fail for the tenth time in a row, held at Graph.
+    const gate = Promise.withResolvers<null>();
+    instead = async () => {
+      await gate.promise;
+      return failedAnswer();
+    };
+    const slow = sync(listeners);
+    await vi.waitFor(() => {
+      expect(instead).toBeUndefined();
+    });
+    // Its lease runs out, and another sync reads the source on.
+    later(3 * 60_000);
+    const mail = invoiceMail(invoices, 1, now());
+    graph.receive(invoices, mail);
+    await sync(listeners);
+    gate.resolve(null);
+    await slow;
+    const [source] = await sources();
+    const events = await outboxed();
+    const listed = await listening();
+
+    expect({
+      failures: source?.failures,
+      events: events.map(({ id }) => id),
+      failing: listed.filter(({ action }) =>
+        ["connection.events.refused", "connection.events.failed"].includes(
+          action
+        )
+      ),
+    }).toStrictEqual({ failures: 0, events: [mail.id], failing: [] });
+  });
+
+  it("report an item whose ID is longer than an event's may be under the ID's hash, in full in its payload, and once", async () => {
     const outlook = await connected();
     await sync([listener(outlook)]);
-    const mail = invoiceMail(outlook.oid, 1, now());
-    graph.receive(outlook.oid, {
-      ...invoiceMail(outlook.oid, 2, now()),
-      id: "A".repeat(201),
-    });
+    const longId = "A".repeat(201);
+    const mail = { ...invoiceMail(outlook.oid, 1, now()), id: longId };
     graph.receive(outlook.oid, mail);
     later();
     await sync([listener(outlook)]);
-    // Not read again: the source moved on past it.
+    // Shown again, changed: the same event, under the same ID.
+    graph.receive(outlook.oid, { ...mail, isRead: true });
     later();
     await sync([listener(outlook)]);
     const events = await outboxed();
     const listed = await listening();
 
     expect({
-      events: events.map(({ id }) => id),
-      recorded: listed
-        .filter(({ action }) => action !== "connection.events.started")
-        .map(({ action, target, detail }) => ({ action, target, detail })),
+      events: events.map((event) => ({
+        hashed: hashedIdPattern.test(String(event.id)),
+        // As core takes an event, and a run gets it as input.
+        taken: connectorEventSchema.safeParse(event).success,
+        payloadId: z.object({ id: z.string() }).parse(event.payload).id,
+      })),
+      dropped: listed.filter(
+        ({ action }) => action === "connection.events.dropped"
+      ),
     }).toStrictEqual({
-      events: [mail.id],
-      recorded: [
+      events: [
         {
-          action: "connection.events.read",
-          target: outlook.id,
-          detail: { type: "m365.mail.received", count: 1 },
-        },
-        {
-          action: "connection.events.dropped",
-          target: outlook.id,
-          detail: {
-            reason: "id_too_long",
-            type: "m365.mail.received",
-            count: 1,
-          },
+          hashed: true,
+          taken: true,
+          payloadId: longId,
         },
       ],
+      dropped: [],
     });
   });
 

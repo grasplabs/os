@@ -253,7 +253,9 @@ const maxEventPayloadLength = 64 * 1024;
  * An event a connection reported, as core takes it from connect and
  * delivers it, and as the run an event trigger starts gets it as input (the SDK's
  * `connectorEvent`). `id` is the source's own ID of the event, the same
- * for the same event delivered again. `resource` narrows it to a part of
+ * for the same event delivered again; for an ID longer than 200
+ * characters it is `sha256:` and the ID's SHA-256 instead, and the payload
+ * has the ID in full. `resource` narrows it to a part of
  * the connection (a mailbox, a drive), when the source says. `action` is
  * the connector's read action whose data the event carries (such as
  * `mail.list`): an App hears the event only through a permission that
