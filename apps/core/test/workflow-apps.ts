@@ -87,6 +87,18 @@ export class App extends DurableObject {
     }
   }
 
+  // Waits at \`gate\`, then records a point of \`measure\`, and counts
+  // whether the call was taken (\`measure\`:recorded) or refused.
+  async pointAfter(caller: Caller, gate: string, measure: string): Promise<void> {
+    await this.gate(gate).promise;
+    try {
+      await this.point(caller, measure);
+      this.hit(caller, measure + ":recorded");
+    } catch {
+      this.hit(caller, measure + ":refused");
+    }
+  }
+
   // Waits until \`open\` was called for \`gate\`, before or after.
   async waitFor(_caller: Caller, gate: string): Promise<void> {
     await this.gate(gate).promise;

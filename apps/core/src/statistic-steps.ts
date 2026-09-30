@@ -10,11 +10,14 @@ import { stepIdempotencyKey } from "@grasp-os/shared/workflows";
 /**
  * Adds up the points attempt `attempt` of the step `stepKey` recorded, in
  * every App whose methods recorded them, as the step completes: added to
- * their days' rows and marked committed, in one batch. Once per step: a
- * step with committed points adds nothing again, so one the engine runs
- * again after this (it stopped before it stored the step's result) counts
- * once. Points other attempts recorded, one the engine gave up on
- * included, are never added.
+ * their days' rows, with the step's marker (a row of no App and no
+ * measure, `committed`), in one batch. Once per step: a step with its
+ * marker adds nothing again, so one the engine runs again after this (it
+ * stopped before it stored the step's result) counts once, whatever it
+ * records then, also when it recorded nothing the first time. The host
+ * calls this only for a step that called an App, the only way to record
+ * a point, so other steps get no row. Points other attempts recorded,
+ * one the engine gave up on included, are never added.
  *
  * The day's bound (`statisticRowsPerDay`) is checked here, exactly: of
  * the new rows the points would make, in the order of their measure and
@@ -60,7 +63,9 @@ export const commitStepStatistics = async (
          max = max(max, excluded.max)`
     ).bind(stepKey, attempt, statisticRowsPerDay),
     env.DB.prepare(
-      "UPDATE app_statistic_steps SET committed = 1 WHERE step_key = ? AND attempt = ?"
+      `INSERT OR IGNORE INTO app_statistic_steps
+         (step_key, attempt, app_id, measure, day, dimensions, count, sum, min, max, committed)
+       VALUES (?, ?, '', '', '', '', 0, 0, 0, 0, 1)`
     ).bind(stepKey, attempt),
   ]);
 };
@@ -68,6 +73,8 @@ export const commitStepStatistics = async (
 /**
  * Forgets the points the steps of run `runId` recorded, once it has ended:
  * an ended run is never replayed, so none of them is added up any more.
+ * None is kept after either: a point is kept only while its run hasn't
+ * ended (`recordStatistic`), and the run is marked ended before this.
  */
 export const forgetStepStatistics = async (
   env: Env,

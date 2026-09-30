@@ -253,6 +253,13 @@
       "when": 1790770160237,
       "tag": "0035_schedule_failed_starts",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "6",
+      "when": 1790772736692,
+      "tag": "0036_app_statistic_steps",
+      "breakpoints": true
     }
   ]
 }

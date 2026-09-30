@@ -280,7 +280,7 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
     });
   });
 
-  it("add a step's statistics points up once, as it completes: never an abandoned attempt's, nor again when the engine runs the step anew, nor past the day's rows", async () => {
+  it("add a step's statistics points up once, as it completes: never an abandoned attempt's, nor when the engine runs the step anew, nor past the day's rows, and keep none for an ended run", async () => {
     const builder = await personApi("builder");
     const app = await appWith(builder, {
       // The first attempt hangs in an App call until the engine gave up on
@@ -316,6 +316,36 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
   await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
   return attempt;`,
         { count: 1 }
+      ),
+      // Records nothing the first time it runs, and a point when run anew.
+      ...workflowFiles(
+        "silent",
+        `  const attempt = await step.do("count", { description: "Count" }, async () => {
+    const attempt = await env.APP.call("hit", "silent");
+    if (attempt > 1) {
+      await env.APP.call("point", "anew");
+    }
+    return attempt;
+  });
+  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+  return attempt;`,
+        { count: 1 }
+      ),
+      // The first attempt's App call waits at a gate the test opens once
+      // the run has ended, and records a point then.
+      ...workflowFiles(
+        "outlived",
+        `  return await step.do(
+    "count",
+    { description: "Count", timeout: "${attemptTimeout}", retries: { limit: 1, delay: 10 } },
+    async () => {
+      if ((await env.APP.call("hit", "outlived")) === 1) {
+        await env.APP.call("pointAfter", "ended", "outlived");
+      }
+      return null;
+    }
+  );`,
+        { count: null }
       ),
       ...workflowFiles(
         "bounded",
@@ -361,6 +391,44 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
       kept: await count("kept"),
     };
 
+    const silent = await builder.api.workflows.start(app, "silent");
+    await stepDone(silent.id, "count");
+    const silentInstance = await env.WORKFLOWS.get(silent.id);
+    await silentInstance.restart({ from: { name: "count" } });
+    await vi.waitFor(
+      async () => {
+        await expect(
+          hitsOf(app, builder.userId, "silent")
+        ).resolves.toBeGreaterThan(1);
+      },
+      { timeout: 10_000, interval: 100 }
+    );
+    await finished(silent.id, { type: "go", payload: null });
+
+    const outlived = await builder.api.workflows.start(app, "outlived");
+    await finished(outlived.id);
+    // The run has ended: the call its first attempt left waiting goes on.
+    await callApp(
+      env,
+      appIdSchema.parse(app),
+      { userId: builder.userId, mode: "interactive" },
+      "open",
+      ["ended"]
+    );
+    await vi.waitFor(
+      async () => {
+        await expect(
+          hitsOf(app, builder.userId, "outlived:recorded")
+        ).resolves.toBe(1);
+      },
+      { timeout: 10_000, interval: 100 }
+    );
+    const { results: kept } = await env.DB.prepare(
+      "SELECT step_key, measure FROM app_statistic_steps WHERE app_id = ?"
+    )
+      .bind(app)
+      .all();
+
     // A day's rows, but for one, with those the runs above made: today's
     // and tomorrow's, should the run cross midnight. `known` has its row,
     // holding no point yet.
@@ -398,6 +466,8 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
     expect({
       abandoned,
       anew,
+      silent: await count("anew"),
+      outlived: { counted: await count("outlived"), kept },
       bounded: {
         status: await builder.api.workflows.status(bounded.id),
         known: await count("known"),
@@ -416,6 +486,12 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
       // Two points alike, added up when the step first completed, and not
       // again when it ran anew.
       anew: { attempts: 2, once: 2, kept: 2 },
+      // Completed without a point: what it records when run anew isn't
+      // added either.
+      silent: 0,
+      // Recorded once its run had ended: taken, but neither counted nor
+      // kept.
+      outlived: { counted: 0, kept: [] },
       // The point in a row the day has, and the first new row, which
       // fits; the next is left out, and the step completes all the same.
       bounded: { status: { status: "completed" }, known: 1, fits: 1, over: 0 },
