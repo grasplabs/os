@@ -27,7 +27,8 @@ import { useCoreAction } from "../use-core-action.ts";
 // input's own, never a summary; any other shows its action and its input.
 // Either way the exact input each runs with, which is what confirming
 // names, is one click away, and open from the start whenever the card
-// doesn't show all of it.
+// doesn't show all of it. Confirm waits until everything that will be
+// sent has been shown in full.
 
 /** What the page read of the chat's held writes. */
 type Held =
@@ -75,17 +76,31 @@ const shownLines = 12;
 /** Characters of a value shown before the rest waits behind "Show all". */
 const shownCharacters = 1200;
 
+/** How much of `value` a card shows before "Show all": its start, if not all. */
+const startOf = (value: string): string =>
+  value.split("\n").slice(0, shownLines).join("\n").slice(0, shownCharacters);
+
+/** Whether a card starts `value` cut short. */
+const isCutShort = (value: string): boolean =>
+  startOf(value).length < value.length;
+
 /**
  * A text value, exactly as the input holds it, all of it: no scroll box
  * hides a part. A very long one starts cut short, with a control that says
- * how much there is and shows it all, so what follows a run of blank lines
- * can't go unseen unnoticed.
+ * how much there is and shows it all (`onShowAll`), so what follows a run
+ * of blank lines can't go unseen unnoticed.
  */
-const TextValue = ({ value }: { value: string }) => {
+const TextValue = ({
+  value,
+  onShowAll,
+}: {
+  value: string;
+  onShowAll: () => void;
+}) => {
   const [all, setAll] = useState(false);
   const lines = value.split("\n");
-  const start = lines.slice(0, shownLines).join("\n").slice(0, shownCharacters);
-  const long = start.length < value.length;
+  const start = startOf(value);
+  const long = isCutShort(value);
   return (
     <dd className="flex flex-col items-start gap-1">
       <span className="break-words whitespace-pre-wrap">
@@ -95,6 +110,9 @@ const TextValue = ({ value }: { value: string }) => {
         <Button
           aria-expanded={all}
           onClick={() => {
+            if (!all) {
+              onShowAll();
+            }
             setAll(!all);
           }}
           size="sm"
@@ -110,9 +128,15 @@ const TextValue = ({ value }: { value: string }) => {
 };
 
 /** One value of a description, exactly as the input holds it. */
-const FieldValue = ({ value }: { value: string | string[] }) =>
+const FieldValue = ({
+  value,
+  onShowAll,
+}: {
+  value: string | string[];
+  onShowAll: () => void;
+}) =>
   typeof value === "string" ? (
-    <TextValue value={value} />
+    <TextValue onShowAll={onShowAll} value={value} />
   ) : (
     <dd>
       <ul className="flex flex-col">
@@ -126,13 +150,27 @@ const FieldValue = ({ value }: { value: string | string[] }) =>
     </dd>
   );
 
-/** The parts of the input its tool shows, each under its label. */
-const Described = ({ description }: { description: ActionDescription }) => (
+/**
+ * The parts of the input its tool shows, each under its label; `onShowAll`
+ * names a value cut short once it is shown in full.
+ */
+const Described = ({
+  description,
+  onShowAll,
+}: {
+  description: ActionDescription;
+  onShowAll: (input: string) => void;
+}) => (
   <dl className="flex flex-col gap-2 text-sm">
     {description.fields.map(({ input, label, value }) => (
       <div className="flex flex-col" key={input}>
         <dt className="text-muted-foreground">{label}</dt>
-        <FieldValue value={value} />
+        <FieldValue
+          onShowAll={() => {
+            onShowAll(input);
+          }}
+          value={value}
+        />
       </div>
     ))}
   </dl>
@@ -140,9 +178,18 @@ const Described = ({ description }: { description: ActionDescription }) => (
 
 /**
  * The exact input the write runs with, behind a disclosure: open from the
- * start unless the card already shows all of it (`shown`).
+ * start unless the card already shows all of it (`shown`). `onOpen` says
+ * it was opened.
  */
-const ExactInput = ({ input, shown }: { input: string; shown: boolean }) => {
+const ExactInput = ({
+  input,
+  shown,
+  onOpen,
+}: {
+  input: string;
+  shown: boolean;
+  onOpen: () => void;
+}) => {
   const [open, setOpen] = useState(!shown);
   const id = useId();
   return (
@@ -151,6 +198,9 @@ const ExactInput = ({ input, shown }: { input: string; shown: boolean }) => {
         aria-controls={id}
         aria-expanded={open}
         onClick={() => {
+          if (!open) {
+            onOpen();
+          }
           setOpen(!open);
         }}
         size="sm"
@@ -187,6 +237,20 @@ const HeldWrite = ({
     onDecided();
   };
   const { description } = action;
+  // Confirming is for what the person was shown, all of it: while a value
+  // the card cut short hasn't been shown in full, and the exact input
+  // hasn't been opened, Confirm waits. The exact input starts open unless
+  // the description shows every property of the input.
+  const complete = description?.complete === true;
+  const [inputSeen, setInputSeen] = useState(!complete);
+  const [seen, setSeen] = useState<string[]>([]);
+  const unseen =
+    !inputSeen &&
+    (description?.fields ?? []).some(
+      ({ input, value }) =>
+        typeof value === "string" && isCutShort(value) && !seen.includes(input)
+    );
+  const unseenId = useId();
   const title = description?.title ?? action.action;
   const connection = action.connectionName ?? action.connectionId;
   const what = `${title} on ${connection}`;
@@ -214,7 +278,12 @@ const HeldWrite = ({
             </Badge>
           ) : null}
           {description === undefined ? null : (
-            <Described description={description} />
+            <Described
+              description={description}
+              onShowAll={(input) => {
+                setSeen((shown) => [...shown, input]);
+              }}
+            />
           )}
           {description?.complete === false ? (
             <p className="text-sm" role="note">
@@ -224,16 +293,26 @@ const HeldWrite = ({
           ) : null}
           <ExactInput
             input={action.input}
-            shown={description?.complete === true}
+            onOpen={() => {
+              setInputSeen(true);
+            }}
+            shown={complete}
           />
+          {unseen ? (
+            <p className="text-muted-foreground text-sm" id={unseenId}>
+              Part of what will be sent is cut short above. Show it all, or
+              exactly what will be sent, to confirm.
+            </p>
+          ) : null}
           <ErrorText>{failure}</ErrorText>
         </div>
       </CardContent>
       <CardFooter>
         <div className="flex gap-2">
           <Button
+            aria-describedby={unseen ? unseenId : undefined}
             aria-label={`Confirm ${what}`}
-            disabled={busy}
+            disabled={busy || unseen}
             onClick={() => {
               void decide(
                 async (session) =>
