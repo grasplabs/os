@@ -120,10 +120,7 @@ export const revokeOtherCopies = async (
   const listed = await api.apps.list();
   const others = new Set(
     listed
-      .filter(
-        ({ id, blueprint: from }) =>
-          id !== keep && from?.startsWith(`${blueprint}@`) === true
-      )
+      .filter(({ id, blueprint: from }) => id !== keep && from === blueprint)
       .map(({ id }) => id)
   );
   const permissions = await api.permissions.list();

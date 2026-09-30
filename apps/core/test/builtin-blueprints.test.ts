@@ -10,7 +10,6 @@ import { describe, expect, it } from "vite-plus/test";
 import type { BuiltinBlueprint } from "#blueprints";
 
 import { installBuiltinBlueprint } from "../src/app-blueprints.ts";
-import { builtinAppId } from "../src/builtin-app-id.ts";
 import {
   builtins,
   fingerprintOf,
@@ -24,20 +23,18 @@ import { mockIdp } from "./idp.ts";
 import { collectionWithNote } from "./knowledge.ts";
 import { auditedDuring, outcome, signedInApi, unique } from "./sign-in.ts";
 
-// The built-in blueprints: Apps' blueprints that ship with each release,
-// installed on the first request (src/builtins.ts) through the App
-// registry (src/app-blueprints.ts). These tests start from the ways that
-// can fail: a built-in isn't listed, or can't be created from, as any
-// blueprint is; a changed release doesn't reach it, writes it twice when
-// two installs race, or changes an App already created from it; an
-// unchanged release writes again; a failure halfway is recorded as done;
-// someone who builds can't find or copy it, a user can, or anyone, an
-// admin too, changes, runs, shares, asks permissions for it, or grants
-// or revokes its own; a copy doesn't ask for what the release declares,
-// keeps asking once it no longer does, or asks twice when two installs
-// race; a declaration reordered is written again, or one changed under
-// its binding leaves two live requests; and a built-in the release ships
-// doesn't build.
+// The built-in blueprints: blueprints that ship with each release,
+// installed on the first request (src/builtins.ts) as blueprints like any
+// other (src/app-blueprints.ts). These tests start from the ways that can
+// fail: a built-in isn't listed, or can't be created from, as any
+// blueprint is; it leaves an App behind that anyone finds, changes, runs,
+// shares or asks permissions for; anyone, an admin too, unmarks it; a
+// changed release doesn't reach it, is recorded twice when two installs
+// race, or changes an App already created from it; an unchanged release
+// writes again; a failure halfway is recorded as done; someone who builds
+// can't find or copy it, or a user can; a copy doesn't ask for what the
+// release declares, or keeps asking once it no longer does; and a
+// built-in the release ships doesn't build.
 //
 // The global setup embeds the tests' own built-in, `hello`
 // (test/fixtures/blueprints/), with the release's. The tests of a file
@@ -53,8 +50,6 @@ const hello = (): BuiltinBlueprint => {
   }
   return found;
 };
-
-const helloApp = builtinAppId("hello");
 
 /** The singleton's install, asked for by an isolate of this release. */
 const ensureInstalled = async (): Promise<boolean> =>
@@ -89,28 +84,23 @@ const reinstall = async (): Promise<void> => {
   await expect(install(release)).resolves.toBeTruthy();
 };
 
-/** `hello`'s versions, and which of them is marked. */
-const helloState = async (): Promise<{
-  versions: number[];
-  marked: number[];
-}> => {
-  const versionsIn = async (table: string): Promise<number[]> => {
-    const { results } = await env.DB.prepare(
-      `SELECT version FROM ${table} WHERE app_id = ? ORDER BY version`
-    )
-      .bind(helloApp)
-      .all<{ version: number }>();
-    return results.map(({ version }) => version);
-  };
-  return {
-    versions: await versionsIn("app_versions"),
-    marked: await versionsIn("app_blueprints"),
-  };
-};
+/** `hello` as stored. */
+const helloRow = async () =>
+  await env.DB.prepare(
+    "SELECT name, description, tree, permissions FROM blueprints WHERE id = 'hello'"
+  ).first<{
+    name: string;
+    description: string;
+    tree: string;
+    permissions: string;
+  }>();
 
-const appActions = (events: { action: string; target?: { id: string } }[]) =>
+/** The actions of the audit events of `hello` in `events`. */
+const helloActions = (
+  events: { action: string; target?: { id: string } }[]
+): string[] =>
   events
-    .filter(({ target }) => target?.id === helloApp)
+    .filter(({ target }) => target?.id === "hello")
     .map(({ action }) => action);
 
 /** A permission to read and write the collection `collectionId`. */
@@ -120,32 +110,11 @@ const notesOf = (collectionId: CollectionId): DeclaredPermission => ({
   binding: "NOTES",
 });
 
-/** `hello`'s permissions (only those not revoked, with `live`), oldest first. */
-const helloRequests = async (live = false) => {
-  const { results } = await env.DB.prepare(
-    `SELECT binding, status, requested_by AS requestedBy, revoked_by AS revokedBy
-     FROM permissions WHERE subject_id = ? ${live ? "AND status <> 'revoked'" : ""}
-     ORDER BY requested_at`
-  )
-    .bind(helloApp)
-    .all();
-  return results;
-};
+const writesBlueprint = /^update "blueprints"/iu;
 
-/** The permission changes of `hello` in `events`, and who made them. */
-const permissionEvents = (events: Awaited<ReturnType<typeof auditedDuring>>) =>
-  events
-    .filter(({ detail }) => detail?.subjectId === helloApp)
-    .map(({ action, actor }) => [action, actor.type]);
-
-const insertsVersion = /^insert into "app_versions"/iu;
-const insertsPermission = /^insert into "permissions"/iu;
-
-/** `racingDb`, racing the batch that writes an App version by default. */
-const dbRacing = (
-  first: () => Promise<unknown>,
-  writes: RegExp = insertsVersion
-): D1Database => racingDb(first, writes);
+/** `racingDb`, racing the batch that changes a blueprint. */
+const dbRacing = (first: () => Promise<unknown>): D1Database =>
+  racingDb(first, writesBlueprint);
 
 describe("the built-in blueprints", () => {
   it("are every folder under apps/core/blueprints, and the tests' own", () => {
@@ -158,19 +127,24 @@ describe("the built-in blueprints", () => {
     );
   });
 
-  it("are an App's blueprints that everyone who builds finds and creates from, and users don't", async () => {
+  it("are blueprints that everyone who builds finds and creates from, and users don't", async () => {
     await expect(ensureInstalled()).resolves.toBeTruthy();
     const builder = await signedInApi(idp, "builder");
     const user = await signedInApi(idp, "user");
 
     // Shared with nobody, and found by every builder all the same.
     const listed = await builder.api.apps.blueprints.list();
-    const found = listed.find(({ app }) => app === helloApp);
-    expect(
-      found && [found.name, found.description, found.version, found.markedBy]
-    ).toStrictEqual([hello().name, hello().description, 1, "grasp"]);
+    expect(listed.find(({ id }) => id === "hello")).toMatchObject({
+      id: "hello",
+      name: hello().name,
+      description: hello().description,
+      app: null,
+      version: null,
+      markedBy: null,
+      permissions: [],
+    });
 
-    const created = await builder.api.apps.blueprints.create(helloApp, 1, {
+    const created = await builder.api.apps.blueprints.create("hello", {
       name: "Our hello",
     });
     await builder.api.apps.versions.setCurrent(created.app.id, 1);
@@ -184,7 +158,7 @@ describe("the built-in blueprints", () => {
         "Ann",
       ]),
     }).toStrictEqual({
-      blueprint: `${helloApp}@1`,
+      blueprint: "hello",
       owner: builder.userId,
       permissions: [],
       files: hello().files,
@@ -192,70 +166,51 @@ describe("the built-in blueprints", () => {
     });
 
     // Users build no Apps: they neither find a built-in nor create from one.
-    await expect(
-      Promise.all([
-        outcome(user.api.apps.get(helloApp)),
-        outcome(user.api.apps.blueprints.create(helloApp, 1, { name: "Mine" })),
-      ])
-    ).resolves.toStrictEqual(["app.not_found", "role.forbidden"]);
+    const theirs = await user.api.apps.blueprints.list();
+    expect({
+      found: theirs.some(({ id }) => id === "hello"),
+      create: await outcome(
+        user.api.apps.blueprints.create("hello", { name: "Mine" })
+      ),
+    }).toStrictEqual({ found: false, create: "role.forbidden" });
   });
 
-  it("can't be changed, run, shared or given permissions, by an admin neither", async () => {
+  it("leave no App behind, and can't be unmarked, by an admin neither", async () => {
     await expect(ensureInstalled()).resolves.toBeTruthy();
     const admin = await signedInApi(idp, "admin");
-    const builder = await signedInApi(idp, "builder");
-    const changes = async (api: typeof admin.api) =>
-      await Promise.all([
-        outcome(
-          api.apps.files.commit(helloApp, { "notes.md": "# Mine\n" }, "Mine")
-        ),
-        outcome(api.apps.blueprints.mark(helloApp, 1)),
-        outcome(api.apps.blueprints.unmark(helloApp, 1)),
-        outcome(api.apps.versions.setCurrent(helloApp, 1)),
-        outcome(
-          api.apps.members.add(helloApp, {
-            type: "person",
-            id: builder.userId,
-            role: "builder",
-          })
-        ),
-        outcome(
-          api.permissions.request({
-            subject: { type: "app", appId: helloApp },
-            object: { type: "connection", connectionId: "connection-outlook" },
-            actions: ["mail.list"],
-            binding: "OUTLOOK",
-          })
-        ),
-      ]);
-    const refused = Array.from({ length: 6 }, () => "role.forbidden");
-
-    const before = await helloState();
-    await expect(changes(admin.api)).resolves.toStrictEqual(refused);
-
-    await expect(helloState()).resolves.toStrictEqual(before);
-
-    // Nor does another App get to call its exports: a built-in never runs.
+    const before = await helloRow();
     const caller = await admin.api.apps.create({ name: `Caller ${unique()}` });
-    await expect(
-      outcome(
+    const listed = await admin.api.apps.list();
+
+    expect({
+      // No App for anyone to change, run, share or ask permissions for.
+      apps: listed.filter(({ owner }) => owner === "grasp"),
+      unmark: await outcome(admin.api.apps.blueprints.unmark("hello")),
+      calls: await outcome(
         admin.api.permissions.request({
           subject: { type: "app", appId: caller.id },
-          object: { type: "app", appId: helloApp },
+          object: { type: "app", appId: "hello" },
           actions: ["read"],
           binding: "HELLO",
         })
-      )
-    ).resolves.toBe("permission.invalid");
+      ),
+      after: await helloRow(),
+    }).toStrictEqual({
+      apps: [],
+      // Only the release changes it.
+      unmark: "role.forbidden",
+      // There's no App of it to call.
+      calls: "app.not_found",
+      after: before,
+    });
   });
 
   it("each create an App that builds", async () => {
     await expect(ensureInstalled()).resolves.toBeTruthy();
     const builder = await signedInApi(idp, "builder");
     for (const blueprint of release.blueprints) {
-      const app = builtinAppId(blueprint.id);
       // oxlint-disable-next-line no-await-in-loop -- one at a time, as the install does
-      const created = await builder.api.apps.blueprints.create(app, 1, {
+      const created = await builder.api.apps.blueprints.create(blueprint.id, {
         name: blueprint.name,
       });
       // Its workflows' tests run as it becomes current.
@@ -287,34 +242,34 @@ describe("the built-in blueprints", () => {
     }
   });
 
-  it("take a changed release as a new version once, and leave Apps created from them alone", async () => {
-    await expect(ensureInstalled()).resolves.toBeTruthy();
+  it("take a changed release once, and leave Apps created from them alone", async () => {
+    await reinstall();
     const admin = await signedInApi(idp, "admin");
-    const before = await helloState();
-    const created = await admin.api.apps.blueprints.create(
-      helloApp,
-      before.versions.at(-1) ?? 1,
-      { name: "Kept" }
-    );
+    const before = await helloRow();
+    const created = await admin.api.apps.blueprints.create("hello", {
+      name: "Kept",
+    });
 
     const events = await auditedDuring(async () => {
       await expect(install(changedHello())).resolves.toBeTruthy();
       // Installed again with nothing changed: nothing more is written.
       await expect(install(changedHello())).resolves.toBeTruthy();
     });
-    const next = (before.versions.at(-1) ?? 0) + 1;
-    await expect(helloState()).resolves.toStrictEqual({
-      versions: [...before.versions, next],
-      marked: [next],
+    const after = await admin.api.apps.blueprints.create("hello", {
+      name: "Changed",
     });
-    expect(appActions(events)).toStrictEqual([
-      "app.committed",
-      "app.blueprint.marked",
-      "app.blueprint.unmarked",
-    ]);
-    await expect(
-      admin.api.apps.files.read(created.app.id, 1)
-    ).resolves.toStrictEqual(hello().files);
+    const stored = await helloRow();
+    expect({
+      changed: stored?.tree !== before?.tree,
+      audited: helloActions(events),
+      kept: await admin.api.apps.files.read(created.app.id, 1),
+      after: await admin.api.apps.files.read(after.app.id, 1),
+    }).toStrictEqual({
+      changed: true,
+      audited: ["blueprint.changed"],
+      kept: hello().files,
+      after: changedHello().blueprints.find(({ id }) => id === "hello")?.files,
+    });
 
     await reinstall();
   });
@@ -330,12 +285,12 @@ describe("the built-in blueprints", () => {
     const listed = await admin.api.apps.blueprints.list();
     expect({
       listed: listed
-        .filter(({ app }) => app === helloApp)
+        .filter(({ id }) => id === "hello")
         .map(({ name, description }) => [name, description]),
-      audited: appActions(events),
+      audited: helloActions(events),
     }).toStrictEqual({
       listed: [["Hi", "Says hi."]],
-      audited: ["app.described"],
+      audited: ["blueprint.changed"],
     });
 
     await reinstall();
@@ -389,9 +344,8 @@ describe("the built-in blueprints", () => {
     await reinstall();
   });
 
-  it("are written once when two installs race for the same version", async () => {
+  it("are recorded once when two installs race to change them", async () => {
     await reinstall();
-    const before = await helloState();
     const changed = changedHello().blueprints.find(({ id }) => id === "hello");
     if (!changed) {
       throw new Error("There's no changed hello");
@@ -404,29 +358,28 @@ describe("the built-in blueprints", () => {
           await installBuiltinBlueprint(env, changed);
         }),
       };
-      // The other install wrote the version first: this one is refused,
-      // and writes nothing.
+      // The other install changed it first: this one changes nothing, and
+      // records nothing.
       await expect(
         outcome(installBuiltinBlueprint(racing, changed))
-      ).resolves.not.toBe("ok");
+      ).resolves.toBe("ok");
     });
-    const next = (before.versions.at(-1) ?? 0) + 1;
-    await expect(helloState()).resolves.toStrictEqual({
-      versions: [...before.versions, next],
-      marked: [next],
+    const raced = await helloRow();
+    await expect(install(changedHello())).resolves.toBeTruthy();
+    expect({
+      stored: raced,
+      audited: helloActions(events),
+    }).toStrictEqual({
+      stored: await helloRow(),
+      audited: ["blueprint.changed"],
     });
-    expect(appActions(events)).toStrictEqual([
-      "app.committed",
-      "app.blueprint.marked",
-      "app.blueprint.unmarked",
-    ]);
 
     await reinstall();
   });
 
   it("aren't recorded as installed after a failure halfway, and the next install finishes", async () => {
     await reinstall();
-    const before = await helloState();
+    const before = await helloRow();
     const down: Env = {
       ...env,
       DB: dbRacing(() => {
@@ -439,14 +392,11 @@ describe("the built-in blueprints", () => {
       builtins(env),
       async (_instance, state) => await state.storage.get("installed")
     );
-    expect([stamped, await helloState()]).toStrictEqual([undefined, before]);
+    expect([stamped, await helloRow()]).toStrictEqual([undefined, before]);
 
     await expect(install(changedHello())).resolves.toBeTruthy();
-    const next = (before.versions.at(-1) ?? 0) + 1;
-    await expect(helloState()).resolves.toStrictEqual({
-      versions: [...before.versions, next],
-      marked: [next],
-    });
+    const finished = await helloRow();
+    expect(finished?.tree).not.toBe(before?.tree);
 
     await reinstall();
   });
@@ -465,33 +415,24 @@ describe("the built-in blueprints", () => {
     await expect(fingerprintOf(declaring)).resolves.not.toBe(
       await fingerprintOf(release)
     );
-    const requested = await auditedDuring(async () => {
+    const redeclared = await auditedDuring(async () => {
       await expect(install(declaring)).resolves.toBeTruthy();
       // Installed again: nothing more is written.
       await expect(install(declaring)).resolves.toBeTruthy();
     });
+    const listed = await builder.api.apps.blueprints.list();
     expect({
-      stored: await helloRequests(),
-      audited: permissionEvents(requested),
+      declared: listed.find(({ id }) => id === "hello")?.permissions,
+      audited: helloActions(redeclared),
     }).toStrictEqual({
-      stored: [
-        {
-          binding: "NOTES",
-          status: "requested",
-          requestedBy: "grasp",
-          revokedBy: null,
-        },
-      ],
-      audited: [["permission.requested", "system"]],
+      declared: [declared],
+      audited: ["blueprint.changed"],
     });
 
     // A copy asks for it, for an admin to grant, and gets it.
-    const { versions } = await helloState();
-    const created = await builder.api.apps.blueprints.create(
-      helloApp,
-      versions.at(-1) ?? 1,
-      { name: "Asks" }
-    );
+    const created = await builder.api.apps.blueprints.create("hello", {
+      name: "Asks",
+    });
     const [asked] = created.permissions;
     expect(created.permissions).toStrictEqual([
       expect.objectContaining({
@@ -503,61 +444,19 @@ describe("the built-in blueprints", () => {
     ]);
     const granted = await grantReviewed(admin.api, asked?.id ?? "");
 
-    // The built-in's own request is the release's: an admin neither grants
-    // nor revokes it, so every copy keeps asking for it.
-    const own = await env.DB.prepare(
-      "SELECT id FROM permissions WHERE subject_id = ? AND status = 'requested'"
-    )
-      .bind(helloApp)
-      .first<{ id: string }>();
-    const refusedOwn = await Promise.all([
-      outcome(grantReviewed(admin.api, own?.id ?? "")),
-      outcome(admin.api.permissions.revoke(own?.id ?? "")),
-    ]);
-    const second = await builder.api.apps.blueprints.create(
-      helloApp,
-      versions.at(-1) ?? 1,
-      { name: "Asks too" }
-    );
-    expect({
-      refusedOwn,
-      second: second.permissions.map(({ binding, status }) => [
-        binding,
-        status,
-      ]),
-    }).toStrictEqual({
-      refusedOwn: ["permission.builtin", "permission.builtin"],
-      second: [["NOTES", "requested"]],
+    // The release stops declaring it: the copy keeps what it was granted,
+    // and a new copy asks for nothing.
+    await expect(install(release)).resolves.toBeTruthy();
+    const later = await builder.api.apps.blueprints.create("hello", {
+      name: "Asks nothing",
     });
-
-    // The release stops declaring it: the built-in's request is revoked,
-    // the copy keeps what it was granted, and a new copy asks for nothing.
-    const revoked = await auditedDuring(async () => {
-      await expect(install(release)).resolves.toBeTruthy();
-    });
-    const later = await builder.api.apps.blueprints.create(
-      helloApp,
-      versions.at(-1) ?? 1,
-      { name: "Asks nothing" }
-    );
     expect({
-      stored: await helloRequests(),
-      audited: permissionEvents(revoked),
       copy: await admin.api.permissions.list({
         type: "app",
         appId: created.app.id,
       }),
       later: later.permissions,
     }).toStrictEqual({
-      stored: [
-        {
-          binding: "NOTES",
-          status: "revoked",
-          requestedBy: "grasp",
-          revokedBy: "grasp",
-        },
-      ],
-      audited: [["permission.revoked", "system"]],
       copy: [granted],
       later: [],
     });
@@ -573,12 +472,9 @@ describe("the built-in blueprints", () => {
     });
     const declaring = releaseWith({ permissions: [notesOf(collectionId)] });
     await expect(install(declaring)).resolves.toBeTruthy();
-    const { versions } = await helloState();
-    const created = await builder.api.apps.blueprints.create(
-      helloApp,
-      versions.at(-1) ?? 1,
-      { name: "Granted" }
-    );
+    const created = await builder.api.apps.blueprints.create("hello", {
+      name: "Granted",
+    });
     const [asked] = created.permissions;
     const granted = await grantReviewed(admin.api, asked?.id ?? "");
     const copy = { type: "app", appId: created.app.id } as const;
@@ -633,133 +529,6 @@ describe("the built-in blueprints", () => {
       afterRelease: [granted],
       next: [{ status: "requested", requestedBy: builder.userId }],
       rolledBack: ["requested"],
-    });
-
-    await reinstall();
-  });
-
-  it("take a declaration again the same with its actions reordered, and in its place when changed under the same binding", async () => {
-    await reinstall();
-    const admin = await signedInApi(idp, "admin");
-    const { collectionId } = await collectionWithNote(admin.api, {
-      name: `Replaced ${unique()}`,
-      access: "everyone",
-    });
-    const declared = notesOf(collectionId);
-    await expect(
-      install(releaseWith({ permissions: [declared] }))
-    ).resolves.toBeTruthy();
-
-    // Revoked in the database (as before admins were refused that): the
-    // next install asks again, and keeps the revoked row as history.
-    await env.DB.prepare(
-      "UPDATE permissions SET status = 'revoked', revoked_by = 'test', revoked_at = 0 WHERE subject_id = ? AND status = 'requested'"
-    )
-      .bind(helloApp)
-      .run();
-    const restored = await auditedDuring(async () => {
-      await expect(
-        install(releaseWith({ permissions: [declared] }))
-      ).resolves.toBeTruthy();
-    });
-    const { results: history } = await env.DB.prepare(
-      "SELECT status, revoked_by AS revokedBy FROM permissions WHERE subject_id = ? AND revoked_by IS NOT 'grasp' ORDER BY requested_at, status"
-    )
-      .bind(helloApp)
-      .all();
-    expect({
-      restored: permissionEvents(restored),
-      history: history.slice(-2),
-    }).toStrictEqual({
-      restored: [["permission.requested", "system"]],
-      history: [
-        { status: "revoked", revokedBy: "test" },
-        { status: "requested", revokedBy: null },
-      ],
-    });
-
-    // The same permission with its actions in another order changes
-    // nothing; one with other actions under the same binding takes its
-    // place in one install, leaving one live request.
-    const reordered = await auditedDuring(async () => {
-      await expect(
-        install(
-          releaseWith({
-            permissions: [{ ...declared, actions: ["write", "read"] }],
-          })
-        )
-      ).resolves.toBeTruthy();
-    });
-    const replaced = await auditedDuring(async () => {
-      await expect(
-        install(
-          releaseWith({ permissions: [{ ...declared, actions: ["read"] }] })
-        )
-      ).resolves.toBeTruthy();
-    });
-    expect({
-      reordered: permissionEvents(reordered),
-      replaced: permissionEvents(replaced),
-      live: await helloRequests(true),
-    }).toStrictEqual({
-      reordered: [],
-      replaced: [
-        ["permission.revoked", "system"],
-        ["permission.requested", "system"],
-      ],
-      live: [
-        {
-          binding: "NOTES",
-          status: "requested",
-          requestedBy: "grasp",
-          revokedBy: null,
-        },
-      ],
-    });
-
-    await reinstall();
-  });
-
-  it("ask once when two installs race to declare the same permission", async () => {
-    await reinstall();
-    const admin = await signedInApi(idp, "admin");
-    const { collectionId } = await collectionWithNote(admin.api, {
-      name: `Raced ${unique()}`,
-      access: "everyone",
-    });
-    const declaring = releaseWith({
-      permissions: [notesOf(collectionId)],
-    }).blueprints.find(({ id }) => id === "hello");
-    if (!declaring) {
-      throw new Error("There's no declaring hello");
-    }
-
-    const events = await auditedDuring(async () => {
-      const racing: Env = {
-        ...env,
-        DB: dbRacing(async () => {
-          await installBuiltinBlueprint(env, declaring);
-        }, insertsPermission),
-      };
-      // The other install asked first: this one is refused by the binding's
-      // unique index, and writes nothing.
-      await expect(installBuiltinBlueprint(racing, declaring)).rejects.toThrow(
-        "UNIQUE"
-      );
-    });
-    expect({
-      live: await helloRequests(true),
-      audited: permissionEvents(events),
-    }).toStrictEqual({
-      live: [
-        {
-          binding: "NOTES",
-          status: "requested",
-          requestedBy: "grasp",
-          revokedBy: null,
-        },
-      ],
-      audited: [["permission.requested", "system"]],
     });
 
     await reinstall();

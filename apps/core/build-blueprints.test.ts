@@ -236,7 +236,6 @@ describe("the built-in blueprints' build", () => {
   );
 
   it.each([
-    ["a folder name too long for an App ID", "a".repeat(249), server, "App ID"],
     ["a hidden file", "hidden", { ...server, ".env": "SECRET=1\n" }, "files/"],
     ["a path an App can't have", "spaced", { "app/my file.ts": "" }, "files/"],
     [

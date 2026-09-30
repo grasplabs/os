@@ -48,7 +48,6 @@ import { z } from "zod";
 import { appsFoundBy, appsReadableBy } from "../app-access.ts";
 import { appFor, versionFiles } from "../apps.ts";
 import type { Member } from "../auth/identity.ts";
-import { builtinOwner } from "../builtin-app-id.ts";
 import {
   apps,
   appVersions,
@@ -66,9 +65,8 @@ import type { RunRow } from "./runs.ts";
 
 // Every workflow a person can see, across Apps, and their runs: the
 // Workflows page, its Runs tab and the workflow view. A person sees the
-// workflows and runs of every App they can open (app-access.ts), with the
-// built-ins' Apps left out, as nobody runs those. What each run shows
-// them is what `list` shows for one App (`runFor`).
+// workflows and runs of every App they can open (app-access.ts). What
+// each run shows them is what `list` shows for one App (`runFor`).
 //
 // A run waits when it hasn't ended and one of its decisions is still
 // open, as answering decides it (`stillOpen`): open, and not past its
@@ -107,8 +105,8 @@ interface ListedApp {
 }
 
 /**
- * The Apps `by` can open now, by name, the built-ins' left out: those they
- * have a role in (`appsFoundBy`) and whose data they can read
+ * The Apps `by` can open now, by name: those they have a role in
+ * (`appsFoundBy`) and whose data they can read
  * (`appsReadableBy`).
  */
 const visibleApps = async (env: Env, by: Member): Promise<ListedApp[]> => {
@@ -130,7 +128,7 @@ const visibleApps = async (env: Env, by: Member): Promise<ListedApp[]> => {
         eq(appVersions.version, apps.currentVersion)
       )
     )
-    .where(and(appsFoundBy(env, by), sql`${apps.ownerId} <> ${builtinOwner}`))
+    .where(appsFoundBy(env, by))
     .orderBy(asc(apps.name), asc(apps.id));
   const readable = await appsReadableBy(
     env,
@@ -534,7 +532,7 @@ export const listAllRuns = async (
     )
   );
   if (filter.app !== undefined && !owners.has(filter.app)) {
-    // A built-in's App, which nobody runs.
+    // One they can't open any more, since the check above.
     return { runs: [], more: false };
   }
   const workflowIs = (checkedOnly: boolean): SQL | undefined => {

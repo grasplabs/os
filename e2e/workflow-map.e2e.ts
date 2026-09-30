@@ -17,7 +17,7 @@ import { revokeOtherCopies } from "./playbook.ts";
 // unseen. An answer to an earlier open, arriving late, never replaces the
 // workflow opened since.
 
-const workflowMap = "builtin-workflow-map";
+const workflowMap = "workflow-map";
 
 /**
  * How long the release's install may take to list the built-in: it runs
@@ -33,15 +33,12 @@ const mapFor = async (admin: Person): Promise<string> => {
       .poll(
         async () => {
           const listed = await api.apps.blueprints.list();
-          return listed.some((blueprint) => blueprint.app === workflowMap);
+          return listed.some(({ id }) => id === workflowMap);
         },
         { timeout: installedMs }
       )
       .toBeTruthy();
-    const listed = await api.apps.blueprints.list();
-    const version =
-      listed.find((blueprint) => blueprint.app === workflowMap)?.version ?? 1;
-    const created = await api.apps.blueprints.create(workflowMap, version, {
+    const created = await api.apps.blueprints.create(workflowMap, {
       name: `Workflow map ${crypto.randomUUID().slice(0, 8)}`,
     });
     expect(

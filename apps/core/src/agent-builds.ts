@@ -87,8 +87,8 @@ import type { Draft } from "./workspace.ts";
 // isolate with an empty env and leave nothing behind.
 //
 // The person's rights bound every call, read again each time: creating an
-// App needs a role that builds (and, from a blueprint, a role in its
-// App), and changing one a builder's role in it.
+// App needs a role that builds (and, from a marked blueprint, a role in
+// its App), and changing one a builder's role in it.
 // The agent needs a permission of its own too: `write` on the Apps
 // collection, the company's catalog of Apps, which no one writes as
 // Knowledge (it is read only), so granting it means only this. A chat
@@ -430,8 +430,8 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
   }
 
   /**
-   * The blueprints the person may create an App from: of the Apps they
-   * have a role in, newest first, as people's own list has them.
+   * The blueprints the person may create an App from, newest first, as
+   * people's own list has them.
    */
   async blueprints(): Promise<Blueprint[]> {
     return await this.#build(
@@ -442,24 +442,22 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
   }
 
   /**
-   * A new App owned by the person, from the blueprint of App `app` at
-   * `version`, by the same rules as a person creating one
-   * (app-blueprints.ts): only someone who builds, from a blueprint of an
-   * App they have a role in. Its requests wait for an admin, recorded as
+   * A new App owned by the person, from the blueprint `blueprint`, by the
+   * same rules as a person creating one (app-blueprints.ts): only someone
+   * who builds, from a built-in or a blueprint of an App they have a role
+   * in. Its requests wait for an admin, recorded as
    * the agent's. Counted with `create`: at most {@link maxCreatesPerTurn}
    * a turn.
    */
   async createFromBlueprint(
-    app: unknown,
-    version: unknown,
+    blueprint: unknown,
     input: unknown
   ): Promise<CreatedFromBlueprint> {
     return await this.#build(
       "build.createFromBlueprint",
       async (by) =>
         await this.#creating(
-          async () =>
-            await createFromBlueprint(this.env, by, app, version, input)
+          async () => await createFromBlueprint(this.env, by, blueprint, input)
         ),
       (created) => ({
         app: created.app.id,
@@ -838,22 +836,19 @@ const buildDeclaration = `/**
 build: {
   /** Creates an App owned by the person, with no files yet: at most ${maxCreatesPerTurn} a question. */
   create(app: { name: string; description?: string }): Promise<{ id: string; name: string }>;
-  /** The blueprints the person may create an App from, newest first: \`app\` and \`version\` name each. */
-  blueprints(): Promise<{ app: string; name: string; description: string; version: number }[]>;
+  /** The blueprints the person may create an App from, newest first: \`id\` names each. */
+  blueprints(): Promise<{ id: string; name: string; description: string }[]>;
   /**
-   * Creates an App owned by the person from the blueprint of App \`app\` at
-   * \`version\`: the blueprint's code as its first version, and a request
-   * for each permission the blueprint's App has, which an admin grants or
-   * not. Counts with \`create\`: at most ${maxCreatesPerTurn} a question. Change it
-   * afterwards in a draft, as any App.
+   * Creates an App owned by the person from the blueprint \`blueprint\`
+   * (its \`id\`): the blueprint's code as its first version, and a request
+   * for each permission the blueprint declares, which an admin grants or
+   * not; ask for any other it needs as for any App. Counts with \`create\`:
+   * at most ${maxCreatesPerTurn} a question. Change it afterwards in a draft, as any App.
    */
-  createFromBlueprint(app: string, version: number, created: { name: string; description?: string }): Promise<{
+  createFromBlueprint(blueprint: string, created: { name: string; description?: string }): Promise<{
     app: { id: string; name: string };
     version: { version: number };
     permissions: { id: string; binding: string; status: string }[];
-    /** Connections and other Apps' workflows or exports it doesn't ask for, by binding. */
-    dropped: { binding: string }[];
-    droppedApps: { binding: string }[];
   }>;
   /**
    * This chat's draft of an App: every file as the draft has them, the

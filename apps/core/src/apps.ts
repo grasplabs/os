@@ -21,7 +21,7 @@ import type { AuditDetailValue, AuditEntry } from "@grasp-os/shared/audit";
 import { actorOf, createAuditEvent } from "@grasp-os/shared/audit";
 import { sha256Hex } from "@grasp-os/shared/encoding";
 import { appIdSchema } from "@grasp-os/shared/ids";
-import type { AppId } from "@grasp-os/shared/ids";
+import type { AppId, BlueprintId } from "@grasp-os/shared/ids";
 import { canonicalJson } from "@grasp-os/shared/json";
 import { requireBuilder } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
@@ -84,20 +84,39 @@ const versionsPerPage = 100;
 const treeKey = (app: AppId, tree: string): string =>
   `apps/${app}/trees/${tree}.json`;
 
+/** A blueprint's code (app-blueprints.ts), stored as a version's is. */
+const blueprintTreeKey = (blueprint: BlueprintId, tree: string): string =>
+  `blueprints/${blueprint}/trees/${tree}.json`;
+
+/** The files stored under `key`, checked against the hash `tree`. */
+const readTreeAt = async (
+  env: Env,
+  key: string,
+  tree: string
+): Promise<Map<string, string>> => {
+  const object = await env.FILES.get(key);
+  const text = await object?.text();
+  if (text === undefined || (await sha256Hex(text)) !== tree) {
+    throw new Error(`Tree ${key} is missing or damaged`);
+  }
+  return new Map(Object.entries(storedTreeSchema.parse(JSON.parse(text))));
+};
+
 /** A version's files, checked against the hash that names them. */
 const readTree = async (
   env: Env,
   app: AppId,
   tree: string
-): Promise<Map<string, string>> => {
-  const key = treeKey(app, tree);
-  const object = await env.FILES.get(key);
-  const text = await object?.text();
-  if (text === undefined || (await sha256Hex(text)) !== tree) {
-    throw new Error(`App tree ${key} is missing or damaged`);
-  }
-  return new Map(Object.entries(storedTreeSchema.parse(JSON.parse(text))));
-};
+): Promise<Map<string, string>> =>
+  await readTreeAt(env, treeKey(app, tree), tree);
+
+/** A blueprint's files, checked against the hash that names them. */
+export const blueprintFiles = async (
+  env: Env,
+  blueprint: BlueprintId,
+  tree: string
+): Promise<Map<string, string>> =>
+  await readTreeAt(env, blueprintTreeKey(blueprint, tree), tree);
 
 export const toApp = (row: AppRow): App => ({
   id: appIdSchema.parse(row.id),
@@ -131,9 +150,7 @@ export const changeEntry = (
     | "app.version.proposed"
     | "app.version.current"
     | "app.blueprint.marked"
-    | "app.blueprint.unmarked"
-    | "app.blueprint.connection_dropped"
-    | "app.blueprint.app_dropped",
+    | "app.blueprint.unmarked",
   app: AppId,
   detail: Record<string, AuditDetailValue>
 ): AuditEntry => ({
@@ -161,8 +178,7 @@ export const findApp = async (env: Env, input: unknown): Promise<App> => {
 
 /**
  * The App `input` names, for `by` with at least `needed` in it
- * (app-access.ts). A built-in's App is `user` at most for everyone,
- * admins included: `role.forbidden` for anything that needs `builder`.
+ * (app-access.ts).
  */
 export const appFor = async (
   env: Env,
@@ -361,6 +377,17 @@ export const storeTree = async (
 ): Promise<void> => {
   // R2 checks the upload against its hash, so what's stored is what's named.
   await env.FILES.put(treeKey(app, tree), json, { sha256: tree });
+};
+
+/** Stores a blueprint's tree under its hash, before its row names it. */
+export const storeBlueprintTree = async (
+  env: Env,
+  blueprint: BlueprintId,
+  { tree, json }: Tree
+): Promise<void> => {
+  await env.FILES.put(blueprintTreeKey(blueprint, tree), json, {
+    sha256: tree,
+  });
 };
 
 /** The files of one of an App's versions. For the runtime and the compiler. */

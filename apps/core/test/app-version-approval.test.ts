@@ -461,8 +461,8 @@ describe("An App's next version", { timeout: 60_000 }, () => {
       "Never run"
     );
     await builder.api.permissions.request(collectionFor(source));
-    await builder.api.apps.blueprints.mark(source, version);
-    const created = await builder.api.apps.blueprints.create(source, version, {
+    const blueprint = await builder.api.apps.blueprints.mark(source, version);
+    const created = await builder.api.apps.blueprints.create(blueprint.id, {
       name: `Copy ${unique()}`,
     });
     const copy = appIdSchema.parse(created.app.id);
@@ -483,7 +483,7 @@ describe("An App's next version", { timeout: 60_000 }, () => {
     // A label anyone creating an App may give: not a copy of anything.
     const { id } = await builder.api.apps.create({
       name: `Map ${unique()}`,
-      blueprint: "builtin-workflow-map@1",
+      blueprint: "workflow-map",
     });
     const app = appIdSchema.parse(id);
     const asked = await builder.api.permissions.request(collectionFor(app));

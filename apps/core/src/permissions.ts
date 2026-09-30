@@ -6,10 +6,11 @@ import type {
   AuditEntry,
 } from "@grasp-os/shared/audit";
 import { actorOf, createAuditEvent } from "@grasp-os/shared/audit";
-import { appIdSchema, permissionIdSchema } from "@grasp-os/shared/ids";
+import { permissionIdSchema } from "@grasp-os/shared/ids";
 import type { AppId, PermissionId } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
 import {
+  declaredPermissionSchema,
   grantReviewSchema,
   permissionErrors,
   permissionObjectSchema,
@@ -59,8 +60,6 @@ import {
 import { activeMember } from "./auth/auth.ts";
 import { memberRole } from "./auth/identity.ts";
 import type { Acting } from "./auth/identity.ts";
-import { builtinOwner } from "./builtin-app-id.ts";
-import { connectionOwnersOf } from "./connections.ts";
 import {
   apps,
   appVersions,
@@ -334,9 +333,8 @@ const findRow = async (env: Env, id: string): Promise<Row | undefined> =>
  * The Apps a permission names, its subject and a workflow's or another
  * App's exports' App, must be in the registry: one query for both. Apps
  * are never deleted, so one that exists now still does when the permission
- * is stored. Another App's exports are never a built-in blueprint's, which
- * never runs, and never the subject's own: an App calls its own methods
- * without a permission.
+ * is stored. Another App's exports are never the subject's own: an App
+ * calls its own methods without a permission.
  */
 const requireApps = async (
   env: Env,
@@ -363,7 +361,7 @@ const requireApps = async (
     });
   }
   const found = await drizzle(env.DB)
-    .select({ id: apps.id, ownerId: apps.ownerId })
+    .select({ id: apps.id })
     .from(apps)
     .where(inArray(apps.id, [...new Set(named.values())]));
   const existing = new Set(found.map(({ id }) => id));
@@ -371,16 +369,6 @@ const requireApps = async (
   if (missing.length > 0) {
     throw permissionErrors.create("permission.invalid", {
       issues: missing.map(([path]) => `${path}: There's no such App.`),
-    });
-  }
-  const builtinExports =
-    object.type === "app" &&
-    found.some(
-      ({ id, ownerId }) => id === object.appId && ownerId === builtinOwner
-    );
-  if (builtinExports) {
-    throw permissionErrors.create("permission.invalid", {
-      issues: ["object.appId: A built-in blueprint never runs."],
     });
   }
 };
@@ -517,254 +505,74 @@ export const requestPermission = async (
 };
 
 /**
- * What makes two permissions the same grant: all but who and when, with
- * the actions in any order.
+ * What a blueprint of App `app` declares as it is marked
+ * (app-blueprints.ts), for each App created from it to ask for: of what
+ * `app` asks for or was given (its permissions that aren't revoked), its
+ * collections and what the platform offers, which name the same thing for
+ * whoever creates from it. A connection is someone's, set up for this
+ * App, and a workflow or exports name an App, which the creator may not
+ * see: a copy's builders ask for those themselves.
  */
-const grantKey = (
-  row: Pick<Row, "objectType" | "objectId" | "resource" | "actions" | "binding">
-): string =>
-  JSON.stringify([
-    row.objectType,
-    row.objectId,
-    row.resource,
-    stringListSchema.parse(JSON.parse(row.actions)).toSorted(),
-    row.binding,
-  ]);
-
-/**
- * The statements that make the requests of the built-in App `app` what
- * its release declares (`declared`, from its `blueprint.json`), for the
- * install's batch (app-blueprints.ts), with their audit entries by the
- * system: a request, by `owner`, for each declared permission it doesn't
- * have live (requested or active) yet, and a revoke of each it has live
- * that the release no longer declares. A declared permission with only a
- * revoked row (revoked before admins were refused that, or in the
- * database) gets a new request, and the revoked row stays as history. The
- * release's fingerprint covers the declarations (builtins.ts), so the
- * first install of a release restores them. The revokes come first, so a declaration
- * changed under the same binding name takes its place. A built-in never
- * runs, so its requests only say what an App created from it asks for
- * (`blueprintRequests`), each waiting for an admin there. Two installs
- * at once both insert the same binding, and the second batch is refused
- * by its unique index, writing nothing.
- */
-export const declaredRequests = async (
+export const declarableOf = async (
   env: Env,
-  owner: string,
-  app: AppId,
-  declared: readonly DeclaredPermission[]
-): Promise<BatchItem<"sqlite">[]> => {
-  const subject: PermissionSubject = { type: "app", appId: app };
-  const db = drizzle(env.DB);
-  const live = await db
+  app: AppId
+): Promise<DeclaredPermission[]> => {
+  const rows = await drizzle(env.DB)
     .select()
     .from(permissions)
     .where(
       and(
-        ofSubject(subject),
-        inArray(permissions.status, ["requested", "active"])
+        ofSubject({ type: "app", appId: app }),
+        inArray(permissions.status, ["requested", "active"]),
+        inArray(permissions.objectType, ["collection", "platform"])
       )
-    );
+    )
+    .orderBy(asc(permissions.requestedAt), asc(permissions.id));
+  return rows.map((row) =>
+    declaredPermissionSchema.parse({
+      object: objectOf(row),
+      actions: stringListSchema.parse(JSON.parse(row.actions)),
+      binding: row.binding,
+    })
+  );
+};
+
+/**
+ * Requests for `app`, made by `by` as `app` is created from the blueprint
+ * `blueprint` (app-blueprints.ts), of what the blueprint declares: the
+ * rows and their audit entries, for the batch that creates `app`. Like
+ * any request, each allows nothing until an admin grants it.
+ */
+export const declaredRequests = (
+  by: Acting,
+  app: AppId,
+  declared: readonly DeclaredPermission[],
+  blueprint: string
+): { rows: Row[]; entries: AuditEntry[] } => {
   const requestedAt = new Date();
-  const wanted = declared.map(({ object, actions, binding }): Row => ({
+  const rows = declared.map(({ object, actions, binding }): Row => ({
     id: crypto.randomUUID(),
-    ...subjectColumns(subject),
+    ...subjectColumns({ type: "app", appId: app }),
     ...objectColumns(object),
     actions: JSON.stringify(actions),
     binding,
     status: "requested",
-    requestedBy: owner,
+    requestedBy: by.userId,
     requestedAt,
     grantedBy: null,
     grantedAt: null,
     revokedBy: null,
     revokedAt: null,
-    requestedVia: null,
+    requestedVia: by.via ?? null,
   }));
-  const liveKeys = new Set(live.map(grantKey));
-  const wantedKeys = new Set(wanted.map(grantKey));
-  const system = { type: "system" } as const;
-  const revokes = live.flatMap((row) =>
-    wantedKeys.has(grantKey(row))
-      ? []
-      : [
-          db
-            .update(permissions)
-            .set({
-              status: "revoked",
-              revokedBy: owner,
-              revokedAt: requestedAt,
-            })
-            .where(
-              and(
-                eq(permissions.id, row.id),
-                inArray(permissions.status, ["requested", "active"])
-              )
-            ),
-          outboxedIfChanged(
-            db,
-            permissionEntry(system, "permission.revoked", toPermission(row))
-          ),
-        ]
-  );
-  const requests = wanted.flatMap((row) =>
-    liveKeys.has(grantKey(row))
-      ? []
-      : [
-          db.insert(permissions).values(row),
-          outboxed(
-            db,
-            permissionEntry(system, "permission.requested", toPermission(row))
-          ),
-        ]
-  );
-  return [...revokes, ...requests];
-};
-
-/** A connection a blueprint's App was given that a copy doesn't ask for. */
-export interface DroppedConnection {
-  connectionId: string;
-  binding: string;
-}
-
-/**
- * A workflow or the exports of another App a blueprint's App was given,
- * that a copy doesn't ask for: by its type and binding only, never the
- * App, which its creator can't see.
- */
-export interface DroppedApp {
-  type: "workflow" | "app";
-  binding: string;
-}
-
-/**
- * Requests for `app` of what `from` was given or asked for (its
- * permissions that aren't revoked), made by `by` as `app` is created from
- * a blueprint of `from` (app-blueprints.ts): the rows and their audit
- * entries, for the batch that creates `app`. Like any request, each allows
- * nothing until an admin grants it. A workflow of `from` itself becomes
- * the same workflow of `app`. Someone else's personal connection is left
- * out (`dropped`), as only its owner's calls could use it and a copy is
- * `by`'s own App, and so is one connect doesn't know. So is a workflow or
- * the exports of another App `by` couldn't ask for themselves
- * (`droppedApps`): one they have no role in, as `openTo` (the Apps of
- * those it names they may open; apps.ts, passed in as for
- * `requestPermission`) says, so a copy never names an App its creator
- * can't see.
- */
-export const blueprintRequests = async (
-  env: Env,
-  by: Acting,
-  from: AppId,
-  app: AppId,
-  openTo: (apps: AppId[]) => Promise<ReadonlySet<string>>
-): Promise<{
-  rows: Row[];
-  entries: AuditEntry[];
-  dropped: DroppedConnection[];
-  droppedApps: DroppedApp[];
-}> => {
-  const found = await drizzle(env.DB)
-    .select()
-    .from(permissions)
-    .where(
-      and(
-        ofSubject({ type: "app", appId: from }),
-        inArray(permissions.status, ["requested", "active"])
-      )
-    )
-    .orderBy(asc(permissions.requestedAt), asc(permissions.id));
-  const connectionIds = [
-    ...new Set(
-      found.flatMap(({ objectType, objectId }) =>
-        objectType === "connection" ? [objectId] : []
-      )
-    ),
-  ];
-  const owners =
-    connectionIds.length === 0
-      ? []
-      : await connectionOwnersOf(env, connectionIds);
-  // Kept: shared connections and `by`'s own. Connect knows the rest as
-  // someone else's, or not at all.
-  const kept = new Set(
-    owners.flatMap(({ id, ownerUserId }) =>
-      ownerUserId === null || ownerUserId === by.userId ? [id] : []
-    )
-  );
-  const isOthers = (row: Row): boolean =>
-    row.objectType === "connection" && !kept.has(row.objectId);
-  // Another App's workflow or exports: kept only if `by` may open it.
-  const namesOtherApp = (row: Row): boolean =>
-    (row.objectType === "workflow" || row.objectType === "app") &&
-    row.objectId !== from;
-  const otherApps = [
-    ...new Set(
-      found
-        .filter(namesOtherApp)
-        .map(({ objectId }) => appIdSchema.parse(objectId))
-    ),
-  ];
-  const open = otherApps.length === 0 ? new Set() : await openTo(otherApps);
-  const isHidden = (row: Row): boolean =>
-    namesOtherApp(row) && !open.has(row.objectId);
-  const requestedAt = new Date();
-  const rows = found
-    .filter((row) => !isOthers(row) && !isHidden(row))
-    .map((row): Row => ({
-      ...row,
-      id: crypto.randomUUID(),
-      ...subjectColumns({ type: "app", appId: app }),
-      objectId:
-        row.objectType === "workflow" && row.objectId === from
-          ? app
-          : row.objectId,
-      status: "requested",
-      requestedBy: by.userId,
-      requestedAt,
-      grantedBy: null,
-      grantedAt: null,
-      revokedBy: null,
-      revokedAt: null,
-      requestedVia: by.via ?? null,
-    }));
   return {
     rows,
     entries: rows.map((row) =>
       changeEntry(by, "permission.requested", toPermission(row), {
-        blueprint: from,
+        blueprint,
       })
     ),
-    dropped: found
-      .filter(isOthers)
-      .map(({ objectId, binding }) => ({ connectionId: objectId, binding })),
-    droppedApps: found.filter(isHidden).map(({ objectType, binding }) => ({
-      type: objectType === "app" ? "app" : "workflow",
-      binding,
-    })),
   };
-};
-
-/**
- * Refuses a grant or revoke of a built-in blueprint's own permission (its
- * App is owned by `builtinOwner`). A built-in never runs: its requests are
- * what its copies ask for, which only the release changes
- * (`declaredRequests`). Granting one would do nothing, and revoking one
- * would stop copies asking for it until a release declared it again. An
- * App's owner never changes, so reading it first is enough.
- */
-const requireNotBuiltin = async (env: Env, row: Row): Promise<void> => {
-  if (row.subjectType !== "app") {
-    return;
-  }
-  const app = await drizzle(env.DB)
-    .select({ ownerId: apps.ownerId })
-    .from(apps)
-    .where(eq(apps.id, row.subjectId))
-    .get();
-  if (app?.ownerId === builtinOwner) {
-    throw permissionErrors.create("permission.builtin");
-  }
 };
 
 /**
@@ -794,7 +602,6 @@ export const grantPermission = async (
   if (!found) {
     throw permissionErrors.create("permission.not_found");
   }
-  await requireNotBuiltin(env, found);
   // No grant ever names a missing or personal collection, nor gives an App
   // the Apps collection, however old its request.
   await requireCollection(env, subjectOf(found), objectOf(found));
@@ -1142,7 +949,6 @@ export const revokePermission = async (
   if (!found) {
     throw permissionErrors.create("permission.not_found");
   }
-  await requireNotBuiltin(env, found);
   const db = drizzle(env.DB);
   const [[revoked]] = await auditedBatch(env, db, [
     db

@@ -6,7 +6,6 @@ import { z } from "zod";
 
 import { callApp } from "../src/app.ts";
 import type { AppCallerInput } from "../src/app.ts";
-import { builtinAppId } from "../src/builtin-app-id.ts";
 import { builtins, fingerprintOf, release } from "../src/builtins.ts";
 import {
   grantReviewed,
@@ -25,7 +24,7 @@ import { auditedDuring, signedInApi, unique } from "./sign-in.ts";
 
 const idp = mockIdp();
 
-const workflowMap = builtinAppId("workflow-map");
+const workflowMap = "workflow-map";
 
 /** The collection the workflow map declares, and keeps its records in. */
 const playbookCollectionId = "playbook";
@@ -101,7 +100,7 @@ const drawn = {
 const setUp = async () => {
   await builtins(env).ensureInstalled(await fingerprintOf(release));
   const admin = await signedInApi(idp, "admin");
-  const created = await admin.api.apps.blueprints.create(workflowMap, 1, {
+  const created = await admin.api.apps.blueprints.create(workflowMap, {
     name: `Our map ${unique()}`,
   });
   const asked = created.permissions.map(
@@ -490,7 +489,7 @@ export default workflowTests(pay, [{ name: "counts", mocks: { count: 1 }, expect
       savedSchema
     );
     // A second copy, granted without taking the first one's away.
-    const second = await admin.api.apps.blueprints.create(workflowMap, 1, {
+    const second = await admin.api.apps.blueprints.create(workflowMap, {
       name: `Another map ${unique()}`,
     });
     const listed = await admin.api.permissions.list({
@@ -540,7 +539,7 @@ export default workflowTests(pay, [{ name: "counts", mocks: { count: 1 }, expect
   it("says it has no Playbook until an admin grants it", async () => {
     await builtins(env).ensureInstalled(await fingerprintOf(release));
     const admin = await signedInApi(idp, "admin");
-    const created = await admin.api.apps.blueprints.create(workflowMap, 1, {
+    const created = await admin.api.apps.blueprints.create(workflowMap, {
       name: `Ungranted ${unique()}`,
     });
     await admin.api.apps.versions.setCurrent(created.app.id, 1);

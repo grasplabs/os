@@ -7,7 +7,6 @@ import { z } from "zod";
 import { hoursOf } from "../blueprints/board-page/files/app/figures.ts";
 import { callApp } from "../src/app.ts";
 import type { AppCallerInput } from "../src/app.ts";
-import { builtinAppId } from "../src/builtin-app-id.ts";
 import { builtins, fingerprintOf, release } from "../src/builtins.ts";
 import {
   grantReviewed,
@@ -40,8 +39,8 @@ const idp = mockIdp();
 
 type Person = Awaited<ReturnType<typeof signedInApi>>;
 
-const boardPage = builtinAppId("board-page");
-const workflowMap = builtinAppId("workflow-map");
+const boardPage = "board-page";
+const workflowMap = "workflow-map";
 
 /** The collection the Playbook's built-ins declare. */
 const playbook = "playbook";
@@ -83,7 +82,7 @@ const savedSchema = z.object({
 /** An App created from the built-in `blueprint` by `admin`, granted or not. */
 const fromBuiltin = async (admin: Person, blueprint: string, grant = true) => {
   await builtins(env).ensureInstalled(await fingerprintOf(release));
-  const created = await admin.api.apps.blueprints.create(blueprint, 1, {
+  const created = await admin.api.apps.blueprints.create(blueprint, {
     name: `Ours ${unique()}`,
   });
   const asked = created.permissions.map(({ object, actions, binding }) => ({

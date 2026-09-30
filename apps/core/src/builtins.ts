@@ -13,8 +13,8 @@ import type { GraspSkill } from "./knowledge/grasp-skills.ts";
 
 // What ships with the release, installed once per release on the first
 // request: the built-in blueprints
-// (apps/core/blueprints/, embedded by build-blueprints.ts, each the
-// blueprint of an ordinary App, app-blueprints.ts), and the Grasp skills
+// (apps/core/blueprints/, embedded by build-blueprints.ts, each installed
+// as a blueprint like any other, app-blueprints.ts), and the Grasp skills
 // (knowledge/grasp-skills.ts). Workers have no deploy hook, so the first
 // request core serves after the router's check starts the install, in the
 // background (`installBuiltinsOnce`), once per isolate.
@@ -61,7 +61,7 @@ export const release: Release = {
 const installedKey = "installed";
 
 /**
- * Makes each built-in blueprint an App's blueprint, one at a time (each is
+ * Installs each built-in blueprint, one at a time (each is
  * one batch, well within D1's limits). A blueprint that fails is logged,
  * and the others are still installed. Resolves whether all of them are.
  */
