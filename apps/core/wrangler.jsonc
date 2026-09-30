@@ -63,7 +63,8 @@
   // So is the model gateway: the `MODEL_GATEWAY` var (src/models.ts) names
   // the deployment's AI Gateway, the models it allows and the client's rules
   // for them (src/model-rules.ts). It needs no secret:
-  // provider keys stay in AI Gateway. Without it every model call is refused.
+  // provider keys stay in AI Gateway. Without it core uses the account's
+  // default gateway and Workers AI's models.
   //
   // So is `PLATFORM_CHANGE` (src/platform-updates.ts): who made this
   // version, and what they changed, which the cron records in the audit log

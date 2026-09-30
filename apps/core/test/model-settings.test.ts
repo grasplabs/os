@@ -1,4 +1,5 @@
 import { runActorOf } from "@grasp-os/shared/audit";
+import { defaultGatewayModels } from "@grasp-os/shared/deployment-config";
 import { appIdSchema, runIdSchema } from "@grasp-os/shared/ids";
 import { modelSpendListed } from "@grasp-os/shared/models";
 import { env } from "cloudflare:workers";
@@ -232,12 +233,25 @@ describe("model settings", { timeout: 60_000 }, () => {
       models: [workersAi],
       rules: { state: "invalid" },
     });
-    await expect(settingsIn(envWith())).resolves.toMatchObject({
+    // A config that doesn't parse allows nothing: calls fail closed.
+    await expect(settingsIn(envWith("{"))).resolves.toMatchObject({
       models: [],
     });
     await expect(outcome(settingsIn(envWith(config), "builder"))).resolves.toBe(
       "role.forbidden"
     );
+  });
+
+  it("offer the default models on a deployment whose MODEL_GATEWAY isn't set, to admins and in chat", async () => {
+    const coreEnv = envWith();
+    await expect(settingsIn(coreEnv)).resolves.toMatchObject({
+      models: [...defaultGatewayModels],
+    });
+    const { session } = await signedInWithRole(idp, "user");
+    const { core } = await openRpc(session, { coreEnv });
+    await expect(core.authenticate().chats.models()).resolves.toStrictEqual([
+      ...defaultGatewayModels,
+    ]);
   });
 
   it("list the most who spent, most first and ties by key, say more spent, and name nobody who's gone", async () => {

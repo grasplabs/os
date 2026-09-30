@@ -40,7 +40,10 @@ const answer = (text: string): GatewayReply => ({
  * rules are off: model-rules.test.ts tests them, and with them the `work`
  * context, which the calls here carry but nothing reads.
  */
-const withGateway = (replies: GatewayReply[], ...modelGateway: unknown[]) => {
+const withGateway = (
+  replies: GatewayReply[],
+  modelGateway: unknown = config
+) => {
   const gateway = fakeGateway(...replies);
   const gatewayEnv: ModelsEnv = {
     ...env,
@@ -49,8 +52,7 @@ const withGateway = (replies: GatewayReply[], ...modelGateway: unknown[]) => {
       ...z.record(z.string(), z.boolean()).parse(env.FEATURES),
       model_rules: false,
     },
-    // Only an explicit `undefined` leaves the deployment without config.
-    MODEL_GATEWAY: modelGateway.length === 0 ? config : modelGateway[0],
+    MODEL_GATEWAY: modelGateway,
   };
   return { gateway, gatewayEnv };
 };
@@ -321,8 +323,27 @@ describe("model gateway", { timeout: 30_000 }, () => {
     expect(gateway.requests).toStrictEqual([]);
   });
 
+  it("answers through the account's default gateway with the default models while no config is set", async () => {
+    const [model] = defaultGatewayModels;
+    const { gateway, gatewayEnv } = withGateway([answer("Hello.")]);
+    gatewayEnv.MODEL_GATEWAY = undefined;
+    const call = async (to: string) =>
+      await models(gatewayEnv).call({
+        model: to,
+        input: "Say hello.",
+        purpose: "chat.turn",
+        trigger: newPerson(),
+        work,
+      });
+
+    await expect(call(model)).resolves.toMatchObject({ text: "Hello." });
+    await expect(outcome(call(anthropic))).resolves.toBe("model.not_allowed");
+    expect(
+      gateway.requests.map(({ url }) => new URL(url).pathname.split("/")[3])
+    ).toStrictEqual(["default"]);
+  });
+
   it.each([
-    ["no config", undefined],
     ["config that isn't JSON", "{"],
     ["no gateway", { models: [workersAi] }],
     ["no models", { gateway: "grasp-os-test", models: [] }],
@@ -786,6 +807,119 @@ describe("model gateway for agents", () => {
       });
     }
   );
+
+  it.each([workersAi, anthropic, openai])(
+    "goes on after a tool call that came with no text, with its result, on %s",
+    async (model) => {
+      const { gateway, gatewayEnv } = withGateway([
+        {
+          text: "",
+          toolCalls: [
+            { id: "call_1", name: "executeCode", arguments: { code: "1 + 1" } },
+          ],
+          inputTokens: 1000,
+          outputTokens: 100,
+        },
+        answer("It is 2."),
+      ]);
+      const agent = await models(gatewayEnv).agent({
+        model,
+        purpose: "chat.turn",
+        trigger: newPerson(),
+        work,
+      });
+      const context = withTool("What is 1 + 1?");
+
+      const called = await agent.stream(agent.model, context).result();
+      const toolCall = called.content.find(
+        (block) => block.type === "toolCall"
+      );
+      const followUp = normalizeContext({
+        ...context,
+        messages: [
+          ...context.messages,
+          called,
+          {
+            role: "toolResult",
+            toolCallId: toolCall?.id ?? "",
+            toolName: "executeCode",
+            content: [{ type: "text", text: "2" }],
+            isError: false,
+            timestamp: Date.now(),
+          },
+        ],
+      });
+      const answered = await agent.stream(agent.model, followUp).result();
+
+      expect({
+        called: called.stopReason,
+        answered: answered.stopReason,
+        text: answered.content.flatMap((block) =>
+          block.type === "text" ? [block.text] : []
+        ),
+        requests: gateway.requests.length,
+      }).toStrictEqual({
+        called: "toolUse",
+        answered: "stop",
+        text: ["It is 2."],
+        requests: 2,
+      });
+    }
+  );
+
+  it("logs what a refusal says went wrong, and never its message, which may quote the prompt or a key", async () => {
+    const prompt = "What is in the merger memo?";
+    const key = "sk-live-4f9a8b7c6d5e4f3a";
+    const problem = `AiError: Bad input: Type mismatch of '/messages/2/content', 'string' not in 'null', near '${prompt}' (key ${key})`;
+    const { gatewayEnv } = withGateway([
+      {
+        status: 400,
+        body: {
+          name: "AiError",
+          internalCode: 5006,
+          httpCode: 400,
+          message: problem,
+          description: problem,
+        },
+      },
+    ]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {
+      // Kept for the test to read.
+    });
+    try {
+      const agent = await models(gatewayEnv).agent({
+        model: workersAi,
+        purpose: "chat.turn",
+        trigger: newPerson(),
+        work,
+      });
+      const failed = await agent.stream(agent.model, withTool(prompt)).result();
+
+      const logged = warn.mock.calls
+        .map(([fields]: unknown[]) => fields)
+        .find(
+          (fields) =>
+            z.object({ event: z.literal("model.failed") }).safeParse(fields)
+              .success
+        );
+      expect({ answer: failed.errorMessage, logged }).toMatchObject({
+        answer: "The model call failed (400).",
+        logged: {
+          status: 400,
+          providerErrorName: "AiError",
+          providerInternalCode: 5006,
+          providerErrorPaths: "/messages/2/content",
+        },
+      });
+      const text = JSON.stringify(logged);
+      expect({
+        prompt: text.includes(prompt),
+        key: text.includes(key),
+      }).toStrictEqual({ prompt: false, key: false });
+    } finally {
+      warn.mockRestore();
+    }
+  });
 
   it("refuses a model the deployment doesn't allow before the loop sends anything", async () => {
     const { gateway, gatewayEnv } = withGateway([], {
