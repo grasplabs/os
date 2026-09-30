@@ -60,7 +60,6 @@ import {
 import { activeMember } from "./auth/auth.ts";
 import { memberRole } from "./auth/identity.ts";
 import type { Acting } from "./auth/identity.ts";
-import { builtinOwner } from "./builtin-app-id.ts";
 import {
   apps,
   appVersions,
@@ -334,9 +333,8 @@ const findRow = async (env: Env, id: string): Promise<Row | undefined> =>
  * The Apps a permission names, its subject and a workflow's or another
  * App's exports' App, must be in the registry: one query for both. Apps
  * are never deleted, so one that exists now still does when the permission
- * is stored. Another App's exports are never a built-in blueprint's, which
- * never runs, and never the subject's own: an App calls its own methods
- * without a permission.
+ * is stored. Another App's exports are never the subject's own: an App
+ * calls its own methods without a permission.
  */
 const requireApps = async (
   env: Env,
@@ -363,7 +361,7 @@ const requireApps = async (
     });
   }
   const found = await drizzle(env.DB)
-    .select({ id: apps.id, ownerId: apps.ownerId })
+    .select({ id: apps.id })
     .from(apps)
     .where(inArray(apps.id, [...new Set(named.values())]));
   const existing = new Set(found.map(({ id }) => id));
@@ -371,16 +369,6 @@ const requireApps = async (
   if (missing.length > 0) {
     throw permissionErrors.create("permission.invalid", {
       issues: missing.map(([path]) => `${path}: There's no such App.`),
-    });
-  }
-  const builtinExports =
-    object.type === "app" &&
-    found.some(
-      ({ id, ownerId }) => id === object.appId && ownerId === builtinOwner
-    );
-  if (builtinExports) {
-    throw permissionErrors.create("permission.invalid", {
-      issues: ["object.appId: A built-in blueprint never runs."],
     });
   }
 };

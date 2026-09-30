@@ -7,7 +7,6 @@ import { z } from "zod";
 
 import { callApp } from "../src/app.ts";
 import type { AppCallerInput } from "../src/app.ts";
-import { builtinAppId } from "../src/builtin-app-id.ts";
 import { builtins, fingerprintOf, release } from "../src/builtins.ts";
 import { fakeGateway } from "./ai-gateway.ts";
 import { grantReviewed, revokeOtherCopies, serverBuilt } from "./apps.ts";
@@ -33,7 +32,7 @@ import { outcome, routed, signedInApi, unique } from "./sign-in.ts";
 
 const idp = mockIdp();
 
-const intake = builtinAppId("intake");
+const intake = "intake";
 
 /** The one model the tests' gateway allows (vite.config.ts). */
 const testModel = "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast";
@@ -108,7 +107,7 @@ const copyOf = async (
   admin: Awaited<ReturnType<typeof signedInApi>>,
   builder = admin
 ) => {
-  const created = await builder.api.apps.blueprints.create(intake, 1, {
+  const created = await builder.api.apps.blueprints.create(intake, {
     name: `Intake ${unique()}`,
   });
   for (const { id } of created.permissions) {

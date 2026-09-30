@@ -43,7 +43,8 @@ const tryEach = (calls: Record<string, string>): string =>
  * A chat of `role`'s person answered by `replies`, whose agent may build
  * Apps; the Ledger, a builder's App marked as a blueprint and shared with
  * the person, which reads a collection; and the Vault, a blueprint of
- * another builder's that the person has no role in.
+ * another builder's that the person has no role in: by their blueprints'
+ * IDs.
  */
 const setUp = async (
   replies: (apps: { ledger: string; vault: string }) => GatewayReply[],
@@ -68,25 +69,31 @@ const setUp = async (
     admin,
     readCollection({ type: "app", appId: ledger }, collectionId)
   );
-  await owner.api.apps.blueprints.mark(ledger, version);
+  const { id: ledgerBlueprint } = await owner.api.apps.blueprints.mark(
+    ledger,
+    version
+  );
   await owner.api.apps.members.add(ledger, {
     type: "person",
     id: person.userId,
     role: "user",
   });
   const { id: vault } = await stranger.api.apps.create({ name: "Vault" });
-  await stranger.api.apps.blueprints.mark(
+  const { id: vaultBlueprint } = await stranger.api.apps.blueprints.mark(
     vault,
     await release(stranger, vault, { "notes.md": "vault" })
   );
-  const chat = await chatOf(person.userId, ...replies({ ledger, vault }));
+  const chat = await chatOf(
+    person.userId,
+    ...replies({ ledger: ledgerBlueprint, vault: vaultBlueprint })
+  );
   await requestGranted(idp, admin, {
     subject: chat.agent,
     object: { type: "collection", collectionId: "apps" },
     actions: ["read", "write"],
     binding: "APP_LIBRARY",
   });
-  return { person, chat, ledger, vault };
+  return { person, chat, ledgerBlueprint };
 };
 
 describe(
@@ -94,11 +101,11 @@ describe(
   { timeout: 60_000 },
   () => {
     it("creates one as its person may, asking for what the blueprint declares, as the agent", async () => {
-      const { person, chat, ledger } = await setUp(() => [
+      const { person, chat, ledgerBlueprint } = await setUp(() => [
         codeStep(`export default async (env) => {
         const listed = await env.build.blueprints();
-        const { app, version } = listed.find(({ name }) => name === "Ledger");
-        const created = await env.build.createFromBlueprint(app, version, { name: "My ledger" });
+        const { id } = listed.find(({ name }) => name === "Ledger");
+        const created = await env.build.createFromBlueprint(id, { name: "My ledger" });
         return {
           listed: listed.map(({ name, version }) => ({ name, version })),
           app: created.app.id,
@@ -136,7 +143,7 @@ describe(
         ({ subject }) => subject.type === "app" && subject.appId === made.app
       );
       expect({ app, request }).toMatchObject({
-        app: { owner: person.userId, blueprint: `${ledger}@1` },
+        app: { owner: person.userId, blueprint: ledgerBlueprint },
         request: {
           requestedBy: person.userId,
           requestedVia: {
@@ -171,12 +178,12 @@ describe(
       const attempts = ({ ledger, vault }: { ledger: string; vault: string }) =>
         codeStep(
           tryEach({
-            vault: `(await env.build.createFromBlueprint(${JSON.stringify(vault)}, 1, { name: "Mine" })).app.name`,
-            notMarked: `(await env.build.createFromBlueprint(${JSON.stringify(ledger)}, 2, { name: "Mine" })).app.name`,
+            vault: `(await env.build.createFromBlueprint(${JSON.stringify(vault)}, { name: "Mine" })).app.name`,
+            notMarked: `(await env.build.createFromBlueprint("no-such-blueprint", { name: "Mine" })).app.name`,
             first: `(await env.build.create({ name: "One" })).name`,
             second: `(await env.build.create({ name: "Two" })).name`,
-            third: `(await env.build.createFromBlueprint(${JSON.stringify(ledger)}, 1, { name: "Three" })).app.name`,
-            fourth: `(await env.build.createFromBlueprint(${JSON.stringify(ledger)}, 1, { name: "Four" })).app.name`,
+            third: `(await env.build.createFromBlueprint(${JSON.stringify(ledger)}, { name: "Three" })).app.name`,
+            fourth: `(await env.build.createFromBlueprint(${JSON.stringify(ledger)}, { name: "Four" })).app.name`,
           })
         );
       // One chat at a time: a Workspace object's env points at the
@@ -188,7 +195,7 @@ describe(
           codeStep(
             tryEach({
               listed: "(await env.build.blueprints()).length",
-              create: `(await env.build.createFromBlueprint(${JSON.stringify(ledger)}, 1, { name: "Mine" })).app.name`,
+              create: `(await env.build.createFromBlueprint(${JSON.stringify(ledger)}, { name: "Mine" })).app.name`,
             })
           ),
           says("No."),

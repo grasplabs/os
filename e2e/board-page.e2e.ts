@@ -11,8 +11,8 @@ import { revokeOtherCopies } from "./playbook.ts";
 // workflow map's records, whose type it declares: the admin creates one
 // from it too.
 
-const boardPage = "builtin-board-page";
-const workflowMap = "builtin-workflow-map";
+const boardPage = "board-page";
+const workflowMap = "workflow-map";
 
 /**
  * How long the release's install may take to list the built-in: it runs
@@ -46,20 +46,15 @@ test("an admin takes a snapshot on the board page, writes its narrative and prin
         async () => {
           const listed = await api.apps.blueprints.list();
           return [boardPage, workflowMap].every((builtin) =>
-            listed.some((blueprint) => blueprint.app === builtin)
+            listed.some(({ id }) => id === builtin)
           );
         },
         { timeout: installedMs }
       )
       .toBeTruthy();
-    const listed = await api.apps.blueprints.list();
     /** An App of the admin's from the built-in `builtin`, approved and current. */
     const copy = async (builtin: string, name: string): Promise<string> => {
-      const version =
-        listed.find((blueprint) => blueprint.app === builtin)?.version ?? 1;
-      const created = await api.apps.blueprints.create(builtin, version, {
-        name,
-      });
+      const created = await api.apps.blueprints.create(builtin, { name });
       await revokeOtherCopies(api, builtin, created.app.id);
       for (const { id } of created.permissions) {
         // Reviewed before a version of the copy is current.

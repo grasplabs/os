@@ -181,14 +181,14 @@ describe("blueprints", { timeout: 60_000 }, () => {
       await owner.api.permissions.request(request);
     }
     await share(owner, source, maker, "user");
-    await owner.api.apps.blueprints.mark(source, 1);
+    const { id: blueprint } = await owner.api.apps.blueprints.mark(source, 1);
     // Asked for after the version was marked: not declared.
     await owner.api.permissions.request(
       readCollection({ type: "app", appId: source }, later, "LATER")
     );
 
     const listed = await maker.api.apps.blueprints.list();
-    const created = await maker.api.apps.blueprints.create(source, 1, named);
+    const created = await maker.api.apps.blueprints.create(blueprint, named);
     const theirs = await maker.api.permissions.list({
       type: "app",
       appId: created.app.id,
@@ -259,14 +259,14 @@ describe("blueprints", { timeout: 60_000 }, () => {
     await serverBuilt(source, 1);
     await owner.api.screens.call(source, "addNote", ["Only the source's"]);
     await share(owner, source, maker, "user");
-    await owner.api.apps.blueprints.mark(source, 1);
+    const { id: blueprint } = await owner.api.apps.blueprints.mark(source, 1);
 
     await expect(maker.api.apps.blueprints.list()).resolves.toContainEqual(
-      expect.objectContaining({ app: source, version: 1 })
+      expect.objectContaining({ id: blueprint, app: source, version: 1 })
     );
     const made: CreatedFromBlueprint[] = [];
     const events = await auditedDuring(async () => {
-      made.push(await maker.api.apps.blueprints.create(source, 1, named));
+      made.push(await maker.api.apps.blueprints.create(blueprint, named));
     });
     const [created] = made;
     if (!created) {
@@ -279,7 +279,7 @@ describe("blueprints", { timeout: 60_000 }, () => {
         name: "My notes",
         description: "Mine",
         owner: maker.userId,
-        blueprint: `${source}@1`,
+        blueprint,
         currentVersion: null,
       },
       version: { version: 1, parent: null, author: maker.userId },
@@ -291,13 +291,9 @@ describe("blueprints", { timeout: 60_000 }, () => {
         detail.blueprint ?? null,
       ])
     ).toStrictEqual([
-      ["app.created", app.id, `${source}@1`],
+      ["app.created", app.id, blueprint],
       ["app.committed", app.id, null],
-      ...permissions.map(({ id }) => [
-        "permission.requested",
-        id,
-        `${source}@1`,
-      ]),
+      ...permissions.map(({ id }) => ["permission.requested", id, blueprint]),
     ]);
 
     // The same code and none of the data: the new App starts empty, and
@@ -318,7 +314,7 @@ describe("blueprints", { timeout: 60_000 }, () => {
       // from what the source read, which the copy has no sources for.
       files: {
         ...v1,
-        "AGENTS.md": `Created from the blueprint of ${sourceName}, version 1. Write what this App does here.\n`,
+        "AGENTS.md": `Created from the blueprint ${sourceName}. Write what this App does here.\n`,
       },
       notes: [],
       members: [],
@@ -342,33 +338,38 @@ describe("blueprints", { timeout: 60_000 }, () => {
     const staff = core.authenticate();
 
     let marks: string[] = [];
+    let id = "";
     const events = await auditedDuring(async () => {
       marks = [
+        // Grasp staff don't decide which of a client's Apps get copied.
         await outcome(staff.apps.blueprints.mark(source, 1)),
-        await outcome(staff.apps.blueprints.unmark(source, 1)),
         await outcome(user.api.apps.blueprints.mark(source, 1)),
         await outcome(builder.api.apps.blueprints.mark(source, 9)),
-        await outcome(builder.api.apps.blueprints.mark(source, 1)),
-        // Marking it again changes and records nothing.
-        await outcome(owner.api.apps.blueprints.mark(source, 1)),
       ];
+      ({ id } = await builder.api.apps.blueprints.mark(source, 1));
+      // Marking it again changes and records nothing.
+      const again = await owner.api.apps.blueprints.mark(source, 1);
+      marks.push(
+        again.id === id ? "same" : "another",
+        await outcome(staff.apps.blueprints.unmark(id)),
+        await outcome(user.api.apps.blueprints.unmark(id))
+      );
     });
     expect(marks).toStrictEqual([
-      // Grasp staff don't decide which of a client's Apps get copied.
-      "role.forbidden",
       "role.forbidden",
       "role.forbidden",
       "app.version_not_found",
-      "ok",
-      "ok",
+      "same",
+      "role.forbidden",
+      "role.forbidden",
     ]);
     await expect(
       Promise.all([
-        outcome(owner.api.apps.blueprints.create(source, 2, named)),
-        outcome(outsider.api.apps.blueprints.create(source, 1, named)),
-        outcome(user.api.apps.blueprints.create(source, 1, named)),
-        outcome(staff.apps.blueprints.create(source, 1, named)),
-        outcome(builder.api.apps.blueprints.create(source, 1, { name: " " })),
+        outcome(owner.api.apps.blueprints.create(`${id}-not`, named)),
+        outcome(outsider.api.apps.blueprints.create(id, named)),
+        outcome(user.api.apps.blueprints.create(id, named)),
+        outcome(staff.apps.blueprints.create(id, named)),
+        outcome(builder.api.apps.blueprints.create(id, { name: " " })),
       ])
     ).resolves.toStrictEqual([
       "app.blueprint_not_found",
@@ -383,14 +384,12 @@ describe("blueprints", { timeout: 60_000 }, () => {
     ).resolves.not.toContainEqual(expect.objectContaining({ app: source }));
 
     const unmarked = await auditedDuring(async () => {
-      await owner.api.apps.blueprints.unmark(source, 1);
-      await owner.api.apps.blueprints.unmark(source, 1);
+      await owner.api.apps.blueprints.unmark(id);
+      await owner.api.apps.blueprints.unmark(id);
     });
     const listed = await builder.api.apps.blueprints.list();
     expect({
-      create: await outcome(
-        builder.api.apps.blueprints.create(source, 1, named)
-      ),
+      create: await outcome(builder.api.apps.blueprints.create(id, named)),
       listed: listed.some(({ app }) => app === source),
     }).toStrictEqual({ create: "app.blueprint_not_found", listed: false });
     expect(
@@ -403,12 +402,12 @@ describe("blueprints", { timeout: 60_000 }, () => {
       {
         actor: { type: "person", userId: builder.userId },
         action: "app.blueprint.marked",
-        detail: { version: 1 },
+        detail: { version: 1, blueprint: id },
       },
       {
         actor: { type: "person", userId: owner.userId },
         action: "app.blueprint.unmarked",
-        detail: { version: 1 },
+        detail: { version: 1, blueprint: id },
       },
     ]);
   });
@@ -416,19 +415,16 @@ describe("blueprints", { timeout: 60_000 }, () => {
   it("aren't copied from a version unmarked while it was being copied", async () => {
     const owner = await personApi("builder");
     const source = await notesApp(owner);
-    await owner.api.apps.blueprints.mark(source, 1);
+    const { id } = await owner.api.apps.blueprints.mark(source, 1);
     const by = await owner.api.whoami();
-    // The version unmarked just before the batch that creates the App lands.
+    // Unmarked just before the batch that creates the App lands.
     const racing = racingDb(
       async (db) =>
-        await db
-          .prepare("DELETE FROM app_blueprints WHERE app_id = ?")
-          .bind(source)
-          .run()
+        await db.prepare("DELETE FROM blueprints WHERE id = ?").bind(id).run()
     );
 
     const refused = await outcome(
-      createFromBlueprint({ ...env, DB: racing }, by, source, 1, {
+      createFromBlueprint({ ...env, DB: racing }, by, id, {
         name: `Raced ${unique()}`,
       })
     );
@@ -444,7 +440,7 @@ describe("blueprints", { timeout: 60_000 }, () => {
     const maker = await personApi("builder");
     const source = await notesApp(owner);
     await share(owner, source, maker, "user");
-    await owner.api.apps.blueprints.mark(source, 1);
+    const { id } = await owner.api.apps.blueprints.mark(source, 1);
     const by = await maker.api.whoami();
     // Unshared just before the batch that creates the App lands.
     const racing = racingDb(
@@ -456,7 +452,7 @@ describe("blueprints", { timeout: 60_000 }, () => {
     );
 
     const refused = await outcome(
-      createFromBlueprint({ ...env, DB: racing }, by, source, 1, {
+      createFromBlueprint({ ...env, DB: racing }, by, id, {
         name: `Unshared ${unique()}`,
       })
     );
@@ -478,12 +474,15 @@ describe("blueprints", { timeout: 60_000 }, () => {
       notesApp(owner),
       notesApp(owner),
     ]);
+    const marked: string[] = [];
     for (const source of [unreadable, raced]) {
       // oxlint-disable-next-line no-await-in-loop -- two, one at a time
       await share(owner, source, maker, "user");
       // oxlint-disable-next-line no-await-in-loop -- two, one at a time
-      await owner.api.apps.blueprints.mark(source, 1);
+      const { id } = await owner.api.apps.blueprints.mark(source, 1);
+      marked.push(id);
     }
+    const [unreadableBlueprint = "", racedBlueprint = ""] = marked;
     const mailbox = await mailboxOf(owner);
     const readsMailbox = async (app: string): Promise<void> => {
       await storedGrant(
@@ -506,13 +505,12 @@ describe("blueprints", { timeout: 60_000 }, () => {
     });
 
     const refused = await outcome(
-      maker.api.apps.blueprints.create(unreadable, 1, named)
+      maker.api.apps.blueprints.create(unreadableBlueprint, named)
     );
     const copy = await createFromBlueprint(
       { ...env, DB: racing },
       by,
-      raced,
-      1,
+      racedBlueprint,
       named
     );
     const owned = await env.DB.prepare("SELECT id FROM apps WHERE owner_id = ?")
@@ -542,7 +540,7 @@ describe("blueprints", { timeout: 60_000 }, () => {
     // Version 2 marked a second before version 1, so what orders them is
     // when they were marked, not the newer version first.
     await env.DB.prepare(
-      "UPDATE app_blueprints SET marked_at = marked_at - 1000 WHERE app_id = ? AND version = 2"
+      "UPDATE blueprints SET marked_at = marked_at - 1000 WHERE app_id = ? AND version = 2"
     )
       .bind(source)
       .run();

@@ -3,7 +3,7 @@ import { z } from "zod";
 import { appLimits } from "./app-limits.ts";
 import { defineErrorFamily } from "./errors.ts";
 import { collectionIdSchema, identifierSchema } from "./ids.ts";
-import type { AppId } from "./ids.ts";
+import type { AppId, BlueprintId } from "./ids.ts";
 import { recordTypeNameSchema } from "./knowledge.ts";
 import type { DeclaredPermission, Permission } from "./permissions.ts";
 import type { TriggerDeclaration } from "./workflows.ts";
@@ -57,7 +57,7 @@ export const newAppSchema = z.strictObject({
   /**
    * A label for what the App was made from, as its creator gives it,
    * unchecked. An App made from a blueprint (`AppBlueprintsApi.create`)
-   * gets `<app>@<version>` instead.
+   * gets the blueprint's ID instead.
    */
   blueprint: identifierSchema.optional(),
 });
@@ -92,8 +92,8 @@ export interface App {
   /** The user who created it. */
   owner: string;
   /**
-   * What the App was made from: `<app>@<version>` for an App made from a
-   * blueprint, otherwise the label its creator gave, if any.
+   * What the App was made from: the blueprint's ID for an App made from
+   * one, otherwise the label its creator gave, if any.
    */
   blueprint: string | null;
   /** The version that runs; null until one is made current. */
@@ -440,17 +440,21 @@ export interface AppMembersApi {
 }
 
 /**
- * A version of an App its builders marked as a blueprint: whoever has a
- * role in the App, and builds, can create an App of their own from it.
- * Times are ISO 8601.
+ * Code to create Apps from: a version of an App its builders marked,
+ * which whoever has a role in the App and builds creates from, or one the
+ * release ships, which everyone who builds creates from. Times are
+ * ISO 8601.
  */
 export interface Blueprint {
-  app: AppId;
-  /** The App's name and description now. */
+  id: BlueprintId;
+  /** Its App's name and description as it was marked. */
   name: string;
   description: string;
-  version: number;
-  markedBy: string;
+  /** The App and version it was marked from; null for a built-in. */
+  app: AppId | null;
+  version: number | null;
+  /** Who marked it; null for a built-in. */
+  markedBy: string | null;
   markedAt: string;
   /** What each App created from it asks for, each waiting for an admin. */
   permissions: DeclaredPermission[];
@@ -464,8 +468,8 @@ export const fromBlueprintSchema = newAppSchema.pick({
 export type FromBlueprint = z.input<typeof fromBlueprintSchema>;
 
 /**
- * An App created from a blueprint: its first version holds the code at
- * the blueprint's version, but for its AGENTS.md, a stub naming the
+ * An App created from a blueprint: its first version holds the
+ * blueprint's code, but for its AGENTS.md, a stub naming the
  * blueprint (the blueprint's was written from what its App read, which
  * the copy may not have read), and `permissions` are requests, waiting for
  * an admin, for what the blueprint declares (`Blueprint.permissions`).
@@ -477,18 +481,20 @@ export interface CreatedFromBlueprint {
   permissions: Permission[];
 }
 
-/** Blueprints: App versions to create Apps from. */
+/** Blueprints: code to create Apps from. */
 export interface AppBlueprintsApi {
-  /** The blueprints of the Apps the person has a role in, newest first. */
+  /**
+   * The blueprints the person may see, newest first: those of the Apps
+   * they have a role in, and, if they build, the built-ins.
+   */
   list: () => Promise<Blueprint[]>;
   /** Marks a version of the App as a blueprint. Its builders. */
   mark: (app: string, version: number) => Promise<Blueprint>;
-  /** Stops offering a version as a blueprint. Its builders. */
-  unmark: (app: string, version: number) => Promise<void>;
+  /** Stops offering a blueprint. Its App's builders. */
+  unmark: (blueprint: string) => Promise<void>;
   /** Creates an App of the person's own from a blueprint. */
   create: (
-    app: string,
-    version: number,
+    blueprint: string,
     input: FromBlueprint
   ) => Promise<CreatedFromBlueprint>;
 }
@@ -526,7 +532,7 @@ export const appErrors = defineErrorFamily({
     "This App has read data they can't read where it comes from, such as someone else's mailbox or a collection they can't read, so it can't be shared with them.",
   "app.unreadable":
     "This App has read data you can't read where it comes from, so it isn't open to you. Ask whoever shared it.",
-  "app.blueprint_not_found": "That version of the App isn't a blueprint.",
+  "app.blueprint_not_found": "There's no such blueprint.",
   "app.version_not_found": "The App has no such version.",
   "app.too_large": "The App's files would be over its limits.",
   "app.nothing_to_commit": "The changes leave the latest version as it is.",

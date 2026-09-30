@@ -13,7 +13,7 @@ import { revokeOtherCopies } from "./playbook.ts";
 // statements are then in the Playbook, and the draft is gone. And sends
 // notes to be read by a model, following the reading on the screen.
 
-const intake = "builtin-intake";
+const intake = "intake";
 
 /**
  * How long the release's install may take to list the built-in: it runs
@@ -29,15 +29,12 @@ const intakeFor = async (admin: Person): Promise<string> => {
       .poll(
         async () => {
           const listed = await api.apps.blueprints.list();
-          return listed.some((blueprint) => blueprint.app === intake);
+          return listed.some(({ id }) => id === intake);
         },
         { timeout: installedMs }
       )
       .toBeTruthy();
-    const listed = await api.apps.blueprints.list();
-    const version =
-      listed.find((blueprint) => blueprint.app === intake)?.version ?? 1;
-    const created = await api.apps.blueprints.create(intake, version, {
+    const created = await api.apps.blueprints.create(intake, {
       name: `Intake ${crypto.randomUUID().slice(0, 8)}`,
     });
     await revokeOtherCopies(api, intake, created.app.id);

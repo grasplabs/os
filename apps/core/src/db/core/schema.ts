@@ -390,31 +390,42 @@ export const appMembers = sqliteTable(
 );
 
 /**
- * The versions of Apps marked as blueprints (src/app-blueprints.ts), to
- * create Apps from. Unmarking deletes the row; who marked and unmarked
- * which is in the audit log. A version itself never changes, so a
- * blueprint's code never does either.
+ * Blueprints (src/app-blueprints.ts), to create Apps from: code, stored
+ * under `tree` in R2 as a version's files are, and what each App created
+ * from it asks for. One is a version of an App a builder marked (`app_id`
+ * and `version`, at most one per version), or one the release ships
+ * (`blueprints/` in core), which has neither and is changed only by the
+ * install. Unmarking deletes the row; who marked, unmarked or installed
+ * which is in the audit log.
  */
-export const appBlueprints = sqliteTable(
-  "app_blueprints",
+export const blueprints = sqliteTable(
+  "blueprints",
   {
-    appId: text("app_id")
-      .notNull()
-      .references(() => apps.id),
-    version: integer().notNull(),
-    markedBy: text("marked_by").notNull(),
-    markedAt: timestamp("marked_at").notNull(),
+    /** Random for a marked version; a built-in's folder name. */
+    id: text().primaryKey(),
+    name: text().notNull(),
+    description: text().notNull(),
+    tree: text().notNull(),
+    appId: text("app_id").references(() => apps.id),
+    version: integer(),
+    /**
+     * Whether an admin approved its code: a copy's first version is
+     * approved only then (`madeCurrent`).
+     */
+    approved: integer({ mode: "boolean" }).notNull(),
     /**
      * What each App created from it asks for (JSON, `DeclaredPermission[]`),
-     * each waiting for an admin there: declared as it is marked, or by a
-     * built-in's `blueprint.json`.
+     * each waiting for an admin there.
      */
-    permissions: text({ mode: "json" })
-      .$type<DeclaredPermission[]>()
-      .notNull()
-      .default(sql`'[]'`),
+    permissions: text({ mode: "json" }).$type<DeclaredPermission[]>().notNull(),
+    /** Who marked it; null for a built-in. */
+    markedBy: text("marked_by"),
+    /** When it was marked, or last installed changed. */
+    markedAt: timestamp("marked_at").notNull(),
   },
-  (table) => [primaryKey({ columns: [table.appId, table.version] })]
+  (table) => [
+    uniqueIndex("blueprints_app_version_idx").on(table.appId, table.version),
+  ]
 );
 
 /**

@@ -31,6 +31,10 @@ const idSchema = <Brand extends string>() => identifierSchema.brand<Brand>();
 export const appIdSchema = idSchema<"AppId">();
 export type AppId = z.infer<typeof appIdSchema>;
 
+/** A blueprint to create Apps from: random, or a built-in's folder name. */
+export const blueprintIdSchema = idSchema<"BlueprintId">();
+export type BlueprintId = z.infer<typeof blueprintIdSchema>;
+
 /** A workflow inside an App. */
 export const workflowIdSchema = idSchema<"WorkflowId">();
 export type WorkflowId = z.infer<typeof workflowIdSchema>;

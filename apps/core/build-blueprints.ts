@@ -7,7 +7,7 @@
  * them), so a deploy after a test run can't ship a test's built-in.
  *
  * Each built-in is a folder under apps/core/blueprints/, named by its id,
- * which never changes: renaming the folder makes another App. In it:
+ * which never changes: renaming the folder makes another blueprint. In it:
  *
  * - `blueprint.json`: `{ "name": …, "description": … }`, as for any App,
  *   and optionally `"collections"`: the collections it keeps records in,
@@ -15,14 +15,13 @@
  *   creates if they aren't there yet (`declaredCollectionSchema`); and
  *   `"permissions"`: what each App created from it asks for, as
  *   `[{ "object": { "type": "collection", "collectionId": … }, "actions":
- *   […], "binding": … }]`, each a request an admin grants on the copy
- *   (the built-in itself never runs), and each for one of its
- *   collections;
+ *   […], "binding": … }]`, each a request an admin grants on the copy,
+ *   and each for one of its collections;
  * - `files/`: the App's files, by path, written against `@grasp-os/sdk`
  *   like any App's.
  *
  * Each is checked here as the install would check it, so a bad one fails
- * the build rather than the install: its App ID, its manifest (its
+ * the build rather than the install: its ID, its manifest (its
  * collections, and its permissions as any request's are checked, each
  * for a collection it declares), and its
  * files as any App's write checks them (paths, no hidden files, each
@@ -56,7 +55,6 @@ import { z } from "zod";
 import type { BuiltinBlueprint } from "#blueprints";
 
 import { recordTypesIn } from "./src/app-records.ts";
-import { builtinAppId } from "./src/builtin-app-id.ts";
 
 /** Where the built-ins that ship with each release are. */
 export const blueprintsDir = path.join(import.meta.dirname, "blueprints");
@@ -120,7 +118,7 @@ const manifestSchema = fromBlueprintSchema
     }
   );
 
-/** A folder name that is safe in an App ID, a URL and an audit event. */
+/** A folder name that is safe in an ID, a URL and an audit event. */
 const idSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/u);
 
 /** Every file under `dir`, by its path from `dir`, with `/` between names. */
@@ -202,11 +200,6 @@ const blueprintsIn = (dir: string): BuiltinBlueprint[] =>
       const where = `Built-in blueprint ${folder}`;
       if (!idSchema.safeParse(name).success) {
         throw new Error(`${where}: name the folder in lowercase-kebab-case`);
-      }
-      try {
-        builtinAppId(name);
-      } catch {
-        throw new Error(`${where}: its name makes no valid App ID (too long)`);
       }
       const manifest = manifestSchema.safeParse(
         JSON.parse(readFileSync(path.join(folder, "blueprint.json"), "utf-8"))
