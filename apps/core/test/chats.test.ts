@@ -376,6 +376,114 @@ describe("chats", () => {
     await settled(follower);
   });
 
+  it("tell their agent, on its next turn, how each write it had held ended: confirmed, declined or failed", async () => {
+    const ann = await person();
+    const admin = await signedInApi(idp, "admin");
+    // Three writes, each on a mail connection of its own; the third one's
+    // server refuses the mail once it is confirmed.
+    const mails = {
+      OUTCOME_SENT: await mailConnection(),
+      OUTCOME_DECLINED: await mailConnection(),
+      OUTCOME_FAILED: await mailConnection(["invalid"]),
+    };
+    for (const [binding, { id }] of Object.entries(mails)) {
+      // oxlint-disable-next-line no-await-in-loop -- one grant after the other
+      await requestGranted(idp, admin, {
+        subject: { type: "agent", agentId: chatAgentId },
+        object: { type: "connection", connectionId: id },
+        actions: ["mail.send"],
+        binding,
+      });
+    }
+    await answering(
+      ann,
+      codeStep(
+        `export default async (env) => { for (const name of ${JSON.stringify(Object.keys(mails))}) { await env.connections.call(name, "mail.send", { to: "ben@acme.test", subject: name }); } };`
+      ),
+      says("They wait for you.")
+    );
+    const chat = await ann.chats.create("Outcomes");
+    const follower = await follow(ann.chats, chat.id);
+    await ann.chats.send(chat.id, { text: "Send Ben the invoices.", model });
+    await settled(follower);
+    const waiting = await ann.api.pendingActions.list();
+    const heldOn = (connection: { id: string }) => {
+      const held = waiting.find(
+        ({ connectionId }) => connectionId === connection.id
+      );
+      if (held === undefined) {
+        throw new Error("Expected a held write on the connection");
+      }
+      return held;
+    };
+    const sent = heldOn(mails.OUTCOME_SENT);
+    const declined = heldOn(mails.OUTCOME_DECLINED);
+    const failed = heldOn(mails.OUTCOME_FAILED);
+
+    const decided = {
+      // Refused, for another input than the one shown: it waits on, and
+      // the agent hears nothing of it.
+      refused: await outcome(
+        ann.api.pendingActions.confirm(sent.id, "0".repeat(64))
+      ),
+      sent: await outcome(
+        ann.api.pendingActions.confirm(sent.id, sent.inputHash)
+      ),
+      declined: await outcome(ann.api.pendingActions.decline(declined.id)),
+      failed: await outcome(
+        ann.api.pendingActions.confirm(failed.id, failed.inputHash)
+      ),
+    };
+    // No turn started by itself; the next question's request holds each
+    // outcome, which the person isn't shown.
+    const gateway = await answering(ann, says("Noted."));
+    await ann.chats.send(chat.id, { text: "What happened?", model });
+    await vi.waitFor(
+      () => {
+        expect(follower.messages().at(-1)).toMatchObject({ text: "Noted." });
+      },
+      { timeout: 10_000 }
+    );
+    const asked = JSON.stringify(gateway.requests[0]?.body);
+
+    expect({
+      decided,
+      requests: gateway.requests.length,
+      told: [
+        `(pending ID ${sent.id}), was decided. The person confirmed it and it was carried out. Don't ask for it again.`,
+        `(pending ID ${declined.id}), was decided. The person declined it: it was not carried out and won't be.`,
+        `(pending ID ${failed.id}), was decided. The person confirmed it, but carrying it out failed`,
+      ].map((text) => asked.includes(text)),
+      // Each names the call that reads how it ended (quoted, in JSON).
+      readWith: [sent, declined, failed].map(({ id }) =>
+        asked.includes(`env.connections.outcome(\\"${id}\\")`)
+      ),
+      outcomes: asked.split("was decided.").length - 1,
+      shown: shown(follower).filter(({ text }) => text.includes("was decided"))
+        .length,
+      mail: [
+        await mails.OUTCOME_SENT.did(),
+        await mails.OUTCOME_DECLINED.did(),
+      ],
+    }).toStrictEqual({
+      decided: {
+        refused: "connect.pending_changed",
+        sent: "ok",
+        declined: "ok",
+        failed: "connect.action_failed",
+      },
+      requests: 1,
+      told: [true, true, true],
+      readWith: [true, true, true],
+      outcomes: 3,
+      shown: 0,
+      mail: [
+        { calls: 1, sent: [{ to: "ben@acme.test", subject: "OUTCOME_SENT" }] },
+        { calls: 0, sent: [] },
+      ],
+    });
+  });
+
   it("are refused to anyone but their person, as if there were none", async () => {
     const ann = await person();
     const ben = await person();

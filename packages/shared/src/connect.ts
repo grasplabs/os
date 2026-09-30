@@ -635,10 +635,14 @@ export interface PendingActionsApi {
   list: () => Promise<PendingAction[]>;
   /**
    * Runs the held action `id`, with the input whose hash is `inputHash`,
-   * once: its answer, as the call would have had it.
+   * once: its answer, as the call would have had it. A chat's agent is
+   * told, on its next turn, that its action ran, or failed once confirmed.
    */
   confirm: (id: string, inputHash: string) => Promise<ConnectResult>;
-  /** Drops the held action `id`: it never runs. */
+  /**
+   * Drops the held action `id`: it never runs. A chat's agent is told so
+   * on its next turn.
+   */
   decline: (id: string) => Promise<void>;
 }
 
