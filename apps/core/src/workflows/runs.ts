@@ -53,7 +53,7 @@ import { failureNoticed } from "../notifications.ts";
 import { hasWorkflow } from "./code.ts";
 import { runEngine } from "./engine.ts";
 import type { WaitReason } from "./host.ts";
-import { removedText } from "./retention.ts";
+import { detailsRemoved, removedText } from "./retention.ts";
 import { tellScreens } from "./run-changes.ts";
 import type { TriggerType } from "./trigger-registry.ts";
 
@@ -131,8 +131,11 @@ type RunFields = Pick<
   | "detailsRemovedAt"
 >;
 
-/** A run as its row has it; `status` names what the row last saw. */
-const toRun = (row: RunFields): WorkflowRun => ({
+/**
+ * A run as its row has it; `status` names what the row last saw. It says
+ * so once its details are removed (`detailsRemoved`, retention.ts).
+ */
+const toRun = (env: Env, row: RunFields): WorkflowRun => ({
   id: runIdSchema.parse(row.id),
   app: appIdSchema.parse(row.appId),
   workflow: workflowIdSchema.parse(row.workflowId),
@@ -144,7 +147,7 @@ const toRun = (row: RunFields): WorkflowRun => ({
   status: shownStatus(row.status),
   createdAt: row.createdAt.toISOString(),
   endedAt: iso(row.endedAt),
-  ...(row.detailsRemovedAt === null ? {} : { detailsRemoved: true }),
+  ...(detailsRemoved(env, row) ? { detailsRemoved: true } : {}),
 });
 
 /** What runs need of their App: its current version and its owner. */
@@ -571,7 +574,7 @@ export const startRun = async (
       throw new Error(`No run has the trigger key of run ${row.id}`);
     }
     await restartOrphan(env, started, input);
-    return toRun(started);
+    return toRun(env, started);
   }
   try {
     await runEngine(env).create({
@@ -607,7 +610,7 @@ export const startRun = async (
   }
   // Only now: a screen told of the run reads it from the engine too.
   await tellScreens(env, row);
-  return toRun(row);
+  return toRun(env, row);
 };
 
 /**
@@ -657,8 +660,9 @@ const foundRun = async (env: Env, run: unknown): Promise<RunRow> => {
 
 /**
  * A run, with its failure report when `by` sees its details. Once its
- * details were removed (retention.ts) the report's message, which went
- * with them, says so, and how long the deployment keeps them now.
+ * details are removed (retention.ts) the report's message says so, and
+ * how long the deployment keeps them now, and its step is named without
+ * its key: as the sweep leaves the row, whether it has reached it or not.
  */
 export const runFor = (
   env: Env,
@@ -666,17 +670,22 @@ export const runFor = (
   row: RunRow,
   ownerId: string
 ): WorkflowRun => {
+  const run = toRun(env, row);
   if (row.failure === null || !seesDetails(by, row, ownerId)) {
-    return toRun(row);
+    return run;
   }
-  const failure: RunFailure =
-    row.detailsRemovedAt === null
-      ? row.failure
-      : {
-          ...row.failure,
-          error: { ...row.failure.error, message: removedText(env) },
-        };
-  return { ...toRun(row), failure };
+  if (!run.detailsRemoved) {
+    return { ...run, failure: row.failure };
+  }
+  const { step, error } = row.failure;
+  return {
+    ...run,
+    failure: {
+      ...row.failure,
+      step: step === null ? null : (step.split(":", 1)[0] ?? step),
+      error: { ...error, message: removedText(env) },
+    },
+  };
 };
 
 /**
@@ -715,22 +724,10 @@ export const runStatus = async (
     (row.status === "starting" || row.status === "running") && live
       ? liveStatuses[live.status]
       : shownStatus(row.status);
-  // Its details were removed when its row says so, and also when it
-  // completed (so it had an instance) and the engine has none any more:
-  // the engine removes its record on its own clock, which may be moments
-  // ahead of the sweep that marks the row (retention.ts). Said on the
-  // read, and stored nowhere: never a run answered as if it returned
-  // nothing. Once the row says so, nothing the engine may still have of
-  // it for a while is shown.
-  const removed =
-    row.detailsRemovedAt !== null ||
-    (live === undefined && row.status === "completed");
-  const found: WorkflowRun = {
-    ...runFor(env, by, row, ownerId),
-    status,
-    ...(removed ? { detailsRemoved: true } : {}),
-  };
-  if (removed || !(live && seesDetails(by, row, ownerId))) {
+  const found = { ...runFor(env, by, row, ownerId), status };
+  // Once its details are removed, nothing the engine may still have of it
+  // is shown: the list, the overview and screens show none either.
+  if (found.detailsRemoved || !(live && seesDetails(by, row, ownerId))) {
     return found;
   }
   const output = z.json().safeParse(live.output);
@@ -786,10 +783,10 @@ export const cancelRun = async (
   if (row.status === "cancelled") {
     await runEngine(env).terminate(row.id);
     await forgetWrites(env, row);
-    return toRun(row);
+    return toRun(env, row);
   }
   if (!unended.includes(row.status)) {
-    return toRun(row);
+    return toRun(env, row);
   }
   const db = drizzle(env.DB);
   const [[cancelled]] = await auditedBatch(env, db, [
@@ -812,7 +809,7 @@ export const cancelRun = async (
     await runEngine(env).terminate(row.id);
     await forgetWrites(env, now);
   }
-  return toRun(now);
+  return toRun(env, now);
 };
 
 /** What a run that stopped reports: where it stopped, and why. */

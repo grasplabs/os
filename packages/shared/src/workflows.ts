@@ -459,10 +459,10 @@ export interface WorkflowRun {
    */
   failure?: RunFailure;
   /**
-   * Set once its details were removed, its retention over: an ended run
+   * Set once its details are removed, its retention over: an ended run
    * keeps them for the deployment's `RUN_RETENTION_DAYS`, 30 days unless
-   * set. The run itself stays: what it was, how it ended, when and for
-   * whom.
+   * set, counted from when it ended. The same wherever the run is read.
+   * The run itself stays: what it was, how it ended, when and for whom.
    */
   detailsRemoved?: true;
 }

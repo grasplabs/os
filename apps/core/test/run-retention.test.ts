@@ -187,6 +187,25 @@ const sweptOf = async (runs: readonly string[]): Promise<number> => {
   return runs.filter((id) => swept.has(id)).length;
 };
 
+/** What a read says of a run's details. */
+const detailsOf = ({
+  output,
+  error,
+  failure,
+  detailsRemoved,
+}: {
+  output?: unknown;
+  error?: unknown;
+  failure?: { step: string | null; error: { message: string } };
+  detailsRemoved?: boolean;
+}) => ({
+  output,
+  error,
+  step: failure?.step,
+  message: failure?.error.message,
+  detailsRemoved,
+});
+
 describe("run retention", { timeout: 60_000 }, () => {
   afterEach(endLiveRuns);
 
@@ -407,31 +426,56 @@ describe("run retention", { timeout: 60_000 }, () => {
     ]);
   });
 
-  it("says a completed run's details were removed once the engine has dropped its record, on the read, storing nothing", async () => {
+  it("reads the same everywhere once its retention is over, swept or not: details removed, and nothing it returned or said", async () => {
     const builder = await personApi("builder");
-    const app = await appWith(builder, keeps);
+    const app = await appWith(builder, { ...keeps, ...fails });
     const done = await endedRun(builder, app, "keeps");
+    const failed = await endedRun(builder, app, "fails");
     const before = await builder.api.workflows.status(done.id);
 
-    // As the engine does when the run's retention is over, which may be
-    // moments before the sweep marks its row.
-    const instance = await env.WORKFLOWS.get(done.id);
-    await instance.delete();
-    const read = await builder.api.workflows.status(done.id);
-    const row = await rowOf(done.id);
+    // Their retention is over, and the sweep hasn't reached them: the
+    // engine and their rows still have all of both.
+    await env.DB.prepare(
+      "UPDATE workflow_runs SET ended_at = ? WHERE id IN (?, ?)"
+    )
+      .bind(Date.now() - 31 * day, done.id, failed.id)
+      .run();
+    const status = {
+      done: await builder.api.workflows.status(done.id),
+      failed: await builder.api.workflows.status(failed.id),
+    };
+    const listed = await builder.api.workflows.list(app);
+    const { runs: page } = await builder.api.workflows.runs({ app });
+    const onScreen = [
+      await builder.api.screens.run(app, done.id),
+      await builder.api.screens.run(app, failed.id),
+      ...(await builder.api.screens.runs(app, "keeps")),
+      ...(await builder.api.screens.runs(app, "fails")),
+    ];
+    const gone = {
+      output: undefined,
+      error: undefined,
+      step: undefined,
+      message: undefined,
+      detailsRemoved: true,
+    };
+    const goneFailed = { ...gone, step: "read", message: removed(30) };
 
     expect({
       before: { output: before.output, removed: before.detailsRemoved },
-      read: {
-        status: read.status,
-        output: read.output,
-        removed: read.detailsRemoved,
-      },
-      stored: row?.details_removed_at,
+      status: [detailsOf(status.done), detailsOf(status.failed)],
+      listed: listed.map(detailsOf),
+      page: page.map(detailsOf),
+      onScreen: onScreen.map(detailsOf),
+      swept: await sweptOf([done.id, failed.id]),
     }).toStrictEqual({
       before: { output: { read: transcript }, removed: undefined },
-      read: { status: "completed", output: undefined, removed: true },
-      stored: null,
+      status: [gone, goneFailed],
+      // Newest first: the failed run, then the one that completed.
+      listed: [goneFailed, gone],
+      page: [goneFailed, gone],
+      onScreen: [gone, goneFailed, gone, goneFailed],
+      swept: 0,
     });
   });
 

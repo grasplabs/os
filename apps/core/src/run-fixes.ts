@@ -8,6 +8,7 @@ import type { RunFailure } from "@grasp-os/shared/workflows";
 import { sourcesOf } from "./app-provenance.ts";
 import { appFor } from "./apps.ts";
 import { appHost } from "./durable-objects.ts";
+import { detailsRemoved } from "./workflows/retention.ts";
 import { findRun, seesDetails } from "./workflows/runs.ts";
 import type { RunToFix } from "./workspace.ts";
 
@@ -71,7 +72,7 @@ export const runToFix = async (
   ) {
     throw notFound();
   }
-  if (row.detailsRemovedAt !== null) {
+  if (detailsRemoved(env, row)) {
     throw workflowErrors.create("workflow.run_details_removed");
   }
   const [sources, restricted] = await Promise.all([

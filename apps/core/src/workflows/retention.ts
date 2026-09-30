@@ -76,18 +76,20 @@ import { runEngine, runRetentionDays } from "./engine.ts";
 //   between leaves the run due, and the next removes what is left and
 //   marks it: removing what is gone removes nothing. Marking is
 //   conditional on the row not being marked, so two passes mark it once.
-// - The engine's clock and the sweep's not agreeing. The engine counts
-//   from when the instance ended, the sweep from when the row did, a
-//   moment apart, and the sweep runs every 15 minutes. A completed run
-//   the engine has nothing of says its details were removed from then on,
-//   on the read (`runStatus`); one whose row is marked shows nothing the
-//   engine may still have.
+// - The engine's clock, the sweep's and a reader's not agreeing. The
+//   engine counts from when the instance ended, the sweep from when the
+//   row did, a moment apart, and the sweep runs every 15 minutes. So
+//   readers go by neither: a run's details are removed once its row is
+//   marked or its retention is over by its row's own time
+//   (`detailsRemoved`), one rule for every read of a run, and from then
+//   on nothing the row or the engine may still have of it is shown.
 // - The retention changed. A run's instance keeps the retention it was
-//   created with: shortening `RUN_RETENTION_DAYS` applies to the engine's
-//   record of runs started from then on, and to rows and readers at once,
-//   so nothing of an earlier run is shown past the new retention, though
-//   the engine holds its record until the old one is over (30 days at
-//   most).
+//   created with. Shortened, `RUN_RETENTION_DAYS` applies to rows and
+//   readers at once, so nothing of an earlier run is shown past the new
+//   retention, though the engine holds its record until the old one is
+//   over (30 days at most). Lengthened, an earlier run's record still
+//   goes from the engine when the old one is over: it then reads as a run
+//   that returned nothing until the new one is over too.
 // - A deployment's config that doesn't parse. Nothing is removed, and it
 //   is logged (`config.invalid`): never a guess at how long to keep. Runs
 //   started meanwhile get no retention of their own, so the engine keeps
@@ -106,6 +108,29 @@ export const batchesPerSweep = 10;
 
 /** The statuses of a run that has ended. */
 const ended = ["completed", "failed", "cancelled"] as const;
+
+/**
+ * Whether a run's details are removed, as every reader of a run asks: its
+ * row is marked, or it has ended and its retention, as the deployment has
+ * it now, is over. By the row and the setting alone, so a run reads the
+ * same wherever it is read, whether the sweep has reached it yet or not,
+ * and whatever the engine still has of it.
+ */
+export const detailsRemoved = (
+  env: Pick<Env, "RUN_RETENTION_DAYS">,
+  row: { endedAt: Date | null; detailsRemovedAt: Date | null },
+  now = Date.now()
+): boolean => {
+  if (row.detailsRemovedAt !== null) {
+    return true;
+  }
+  const days = runRetentionDays(env);
+  return (
+    days !== undefined &&
+    row.endedAt !== null &&
+    row.endedAt.getTime() + days * dayMs <= now
+  );
+};
 
 /**
  * What readers say where a swept run's own words were (its failure's
