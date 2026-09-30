@@ -444,6 +444,28 @@ export type CatalogToolsRequest = z.input<typeof catalogToolsRequestSchema>;
 // session, as for connecting accounts, and signs the confirmed call's
 // capability after checking the permission and the context again.
 
+/**
+ * A held action as its tool describes it (a native connector's `describe`),
+ * for the person to read before they decide: what it does, and the parts
+ * of its input that matter. Nothing here is summarised or reworded: each
+ * value is the input's own.
+ */
+export interface ActionDescription {
+  /** What the action does, such as "Send an email". */
+  title: string;
+  /**
+   * The input's properties the tool shows, those the input holds, each
+   * under its label: a string as it is, a list of strings as it is, any
+   * other value as its JSON text.
+   */
+  fields: { label: string; value: string | string[] }[];
+  /**
+   * Whether `fields` show every property the input holds. When not, say
+   * so: the exact input (`PendingAction.input`) holds more.
+   */
+  complete: boolean;
+}
+
 /** A held action, as the person it waits for sees it. */
 export interface PendingAction {
   id: string;
@@ -465,11 +487,25 @@ export interface PendingAction {
   /** The permission that allowed it. */
   permissionId: string;
   connectionId: string;
+  /**
+   * The connection as people know it, by what it reaches and its account,
+   * such as "Microsoft 365 (anna@acme.test)"; a Composio connection by its
+   * toolkit. `null` when connect no longer has the connection.
+   */
+  connectionName: string | null;
   resource: string | null;
   action: string;
+  /**
+   * The call as its tool describes it. Absent for a tool that describes
+   * none (every Composio tool): show the action's name and `input`.
+   */
+  description?: ActionDescription;
   /** The key its answer is kept under: a repeat of the call gets it. */
   idempotencyKey: string;
-  /** The exact input it runs with once confirmed, as JSON text. */
+  /**
+   * The exact input it runs with once confirmed, as JSON text: always
+   * there for the person to see, whatever `description` shows.
+   */
   input: string;
   /**
    * SHA-256 of its resource and input: confirming names it, so only what

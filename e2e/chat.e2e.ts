@@ -6,8 +6,9 @@ import { pageOf, peopleIn } from "./people.ts";
 import type { Person } from "./people.ts";
 
 // The Chat page: a person asks in a new chat and follows the answer as it
-// comes in, renames the chat, and confirms and rejects a write its agent
-// holds for them, and sees nothing of held writes while they are switched
+// comes in, renames the chat, reads the writes its agent holds for them
+// (one as its tool describes it, one by its raw input), confirms and
+// rejects them, and sees nothing of held writes while they are switched
 // off. The local stack reaches no model, so the answer is the
 // gateway's failure; streaming, resuming and the person check themselves
 // are core's tests (apps/core/test/chats.test.ts).
@@ -19,14 +20,20 @@ const quoted = (text: string): string => `'${text.replaceAll("'", "''")}'`;
  * written straight into connect's local database, as a call from the
  * chat's code would leave it (held-writes are core's tests too).
  */
-const holdWrite = async (person: Person, chatId: string): Promise<void> => {
+const holdWrite = async (
+  person: Person,
+  chatId: string,
+  {
+    connectionId = crypto.randomUUID(),
+    input = { to: "ben@acme.test", subject: "Invoice" },
+  }: { connectionId?: string; input?: Record<string, unknown> } = {}
+): Promise<void> => {
   const context = JSON.stringify({
     type: "chat",
     // The person's own chats' object, and the organization's agent.
     workspaceId: `person:${person.userId}`,
     chatId,
   });
-  const input = JSON.stringify({ to: "ben@acme.test", subject: "Invoice" });
   const values = [
     quoted(crypto.randomUUID()),
     quoted("agent"),
@@ -34,12 +41,12 @@ const holdWrite = async (person: Person, chatId: string): Promise<void> => {
     quoted(person.userId),
     quoted("interactive"),
     "NULL",
-    quoted(crypto.randomUUID()),
+    quoted(connectionId),
     "NULL",
     "NULL",
     quoted("mail.send"),
     quoted(`chat:${crypto.randomUUID()}`),
-    quoted(input),
+    quoted(JSON.stringify(input)),
     quoted("0".repeat(64)),
     quoted(crypto.randomUUID()),
     quoted(context),
@@ -51,7 +58,38 @@ const holdWrite = async (person: Person, chatId: string): Promise<void> => {
   );
 };
 
-test("a person asks in a new chat, follows the answer, renames it, and decides a write it holds", async ({
+/**
+ * `person`'s own Microsoft 365 connection, as connect keeps one: its ID.
+ * Its connector's tools describe their writes, so one held on it reads as
+ * its tool says.
+ */
+const connectMail = async (
+  person: Person,
+  account: string
+): Promise<string> => {
+  const id = crypto.randomUUID();
+  const now = String(Date.now());
+  const values = [
+    quoted(id),
+    quoted("microsoft"),
+    quoted("personal"),
+    quoted(person.userId),
+    quoted("active"),
+    quoted("native"),
+    quoted("microsoft-365"),
+    quoted(`account-${id}`),
+    quoted(account),
+    quoted(person.userId),
+    now,
+    now,
+  ];
+  await execute(
+    `INSERT INTO connections (id, provider, scope, owner_user_id, status, server_kind, server, account_id, account_name, connected_by, created_at, updated_at) VALUES (${values.join(", ")})`
+  );
+  return id;
+};
+
+test("a person asks in a new chat, follows the answer, renames it, and reads and decides the writes it holds", async ({
   browser,
 }) => {
   const { user } = peopleIn("chat");
@@ -82,24 +120,55 @@ test("a person asks in a new chat, follows the answer, renames it, and decides a
   await expect(chats.getByRole("link", { name: title })).toBeVisible();
 
   const chatId = new URL(page.url()).searchParams.get("chat") ?? "";
+  const account = `mail-${tag}@acme.test`;
+  const connectionId = await connectMail(user, account);
+  // One on a connection connect doesn't know, one on the person's mailbox.
   await holdWrite(user, chatId);
+  await holdWrite(user, chatId, {
+    connectionId,
+    input: {
+      mailbox: account,
+      to: ["cleo@acme.test"],
+      subject: `Invoice ${tag}`,
+      body: "The invoice is attached.",
+    },
+  });
   await page.reload();
   const waiting = page.getByRole("region", { name: "Waiting for you" });
-  await expect(waiting).toContainText("ben@acme.test");
-  // When it was asked for, so an old one isn't taken for a new one.
-  await expect(waiting.locator("time")).toHaveAttribute(
+  // The undescribed one shows its action and its exact input.
+  await expect(waiting).toContainText("Waiting for you: mail.send");
+  await expect(waiting).toContainText('"to": "ben@acme.test"');
+  // The described one reads as its tool says, on the connection by name,
+  // in the input's own values; its exact input is one click away.
+  const described = `Send an email on Microsoft 365 (${account})`;
+  await expect(waiting).toContainText("Waiting for you: Send an email");
+  await expect(waiting).toContainText(`On Microsoft 365 (${account})`);
+  await expect(
+    waiting.getByText("cleo@acme.test", { exact: true })
+  ).toBeVisible();
+  await expect(waiting.getByText("The invoice is attached.")).toBeVisible();
+  await expect(waiting).not.toContainText('"mailbox"');
+  await waiting
+    .getByRole("button", { name: "Show exactly what will be sent" })
+    .click();
+  await expect(waiting).toContainText(`"mailbox": "${account}"`);
+  // When each was asked for, so an old one isn't taken for a new one.
+  await expect(waiting.locator("time")).toHaveCount(2);
+  await expect(waiting.locator("time").first()).toHaveAttribute(
     "datetime",
     /^\d{4}-\d{2}-\d{2}T/u
   );
   // Confirming goes through core's checks again: the agent was never
   // granted this connection, so it's refused, and the write still waits.
-  await waiting.getByRole("button", { name: /^Confirm/u }).click();
+  await waiting.getByRole("button", { name: `Confirm ${described}` }).click();
   await expect(waiting.getByRole("alert")).toHaveText(
     "This App or agent has no permission to do that."
   );
-  await expect(waiting).toContainText("ben@acme.test");
-  // Rejecting it drops it.
-  await waiting.getByRole("button", { name: /^Reject/u }).click();
+  await expect(waiting).toContainText("cleo@acme.test");
+  // Rejecting each drops it.
+  await waiting.getByRole("button", { name: `Reject ${described}` }).click();
+  await expect(waiting).not.toContainText("cleo@acme.test");
+  await waiting.getByRole("button", { name: /^Reject mail\.send/u }).click();
   await expect(waiting).toHaveCount(0);
 });
 

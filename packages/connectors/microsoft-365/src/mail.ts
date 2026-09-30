@@ -440,6 +440,14 @@ const moveMessage = defineTool({
   destructive: true,
   resource: "mailbox",
   routes: [get("/mailFolders/{destination}"), post("/messages/{message}/move")],
+  describe: {
+    title: "Move an email to another folder",
+    fields: [
+      { label: "Mailbox", input: "mailbox" },
+      { label: "Message", input: "message" },
+      { label: "To folder", input: "destination" },
+    ],
+  },
   run: async ({ mailbox, message, destination }) => {
     // The destination is looked up in this mailbox first, on a route the
     // egress binds to it, and the message moved to the folder that names:
@@ -481,6 +489,21 @@ const draftInput = z.strictObject({
   replyTo: recipientsSchema.optional(),
 });
 
+/**
+ * A message as the person asked to confirm it reads it: every property of
+ * {@link draftInput}, so nothing it sends goes unshown.
+ */
+const draftFields = [
+  { label: "From", input: "mailbox" },
+  { label: "To", input: "to" },
+  { label: "Cc", input: "cc" },
+  { label: "Bcc", input: "bcc" },
+  { label: "Reply to", input: "replyTo" },
+  { label: "Subject", input: "subject" },
+  { label: "Body", input: "body" },
+  { label: "Body format", input: "bodyType" },
+] as const;
+
 /** Addresses as Graph takes them. */
 const recipients = (addresses: string[] | undefined) =>
   (addresses ?? []).map((address) => ({ emailAddress: { address } }));
@@ -513,6 +536,7 @@ const sendMail = defineTool({
   destructive: false,
   resource: "mailbox",
   routes: [post("/sendMail")],
+  describe: { title: "Send an email", fields: draftFields },
   run: async (input) => {
     const response = await graphFetch(
       graphUrl(`/users/${segment(input.mailbox)}/sendMail`),
@@ -538,6 +562,7 @@ const createDraft = defineTool({
   destructive: false,
   resource: "mailbox",
   routes: [post("/messages")],
+  describe: { title: "Create a draft email", fields: draftFields },
   run: async (input) => {
     const draft = await graphJson(
       graphUrl(`/users/${segment(input.mailbox)}/messages`),

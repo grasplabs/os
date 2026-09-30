@@ -74,6 +74,21 @@ export interface ToolDefinition<
    * call to it. At most one route writes (not GET or HEAD).
    */
   routes: readonly Route[];
+  /**
+   * How a call reads to the person asked to confirm it, for a tool that
+   * isn't read-only: a title ("Send an email") and the input properties
+   * that matter, each under a label. They see each value exactly as the
+   * call holds it, and are told when the input holds more than these show,
+   * so list every property that changes what the call does. Without it
+   * they see the action's name and the raw input.
+   */
+  describe?: {
+    title: string;
+    fields: readonly {
+      label: string;
+      input: Extract<keyof z.input<Input>, string>;
+    }[];
+  };
   run: (input: z.output<Input>) => Promise<ToolResult<z.input<Output>>>;
 }
 
@@ -307,6 +322,14 @@ export const defineTool = <
       resource: resource ?? null,
       input: Object.keys(inputSchema.properties ?? {}),
       mask: [...(definition.mask ?? [])],
+      ...(definition.describe === undefined
+        ? {}
+        : {
+            describe: {
+              title: definition.describe.title,
+              fields: [...definition.describe.fields],
+            },
+          }),
     },
     description: {
       name,

@@ -1,4 +1,7 @@
-import type { PendingAction } from "@grasp-os/shared/connect";
+import type {
+  ActionDescription,
+  PendingAction,
+} from "@grasp-os/shared/connect";
 import { featureErrors, messageOf } from "@grasp-os/shared/errors";
 import { Badge } from "@grasp-os/ui/components/badge";
 import { Button } from "@grasp-os/ui/components/button";
@@ -9,7 +12,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@grasp-os/ui/components/card";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 
 import { withSession } from "../core.ts";
 import type { Session } from "../core.ts";
@@ -19,8 +22,12 @@ import { useCoreAction } from "../use-core-action.ts";
 // The changes the chat's agent asked for in outside systems (sending,
 // booking, deleting), which connect holds until the person confirms or
 // rejects each (pending-actions.ts in core). Core lists only the person's
-// own; this shows those from this chat, with exactly the input each runs
-// with, which is what confirming names.
+// own; this shows those from this chat. A write whose tool describes it
+// reads as a title and the parts of its input that matter, each value the
+// input's own, never a summary; any other shows its action and its input.
+// Either way the exact input each runs with, which is what confirming
+// names, is one click away, and open from the start whenever the card
+// doesn't show all of it.
 
 /** What the page read of the chat's held writes. */
 type Held =
@@ -62,6 +69,69 @@ const inputOf = (input: string): string => {
   }
 };
 
+/** One value of a description, exactly as the input holds it. */
+const FieldValue = ({ value }: { value: string | string[] }) =>
+  typeof value === "string" ? (
+    <dd className="max-h-60 overflow-y-auto break-words whitespace-pre-wrap">
+      {value}
+    </dd>
+  ) : (
+    <dd>
+      <ul className="flex flex-col">
+        {value.map((item, index) => (
+          // By position: the input's own order, and values may repeat.
+          <li className="break-words" key={index}>
+            {item}
+          </li>
+        ))}
+      </ul>
+    </dd>
+  );
+
+/** The parts of the input its tool shows, each under its label. */
+const Described = ({ description }: { description: ActionDescription }) => (
+  <dl className="flex flex-col gap-2 text-sm">
+    {description.fields.map(({ label, value }) => (
+      <div className="flex flex-col" key={label}>
+        <dt className="text-muted-foreground">{label}</dt>
+        <FieldValue value={value} />
+      </div>
+    ))}
+  </dl>
+);
+
+/**
+ * The exact input the write runs with, behind a disclosure: open from the
+ * start unless the card already shows all of it (`shown`).
+ */
+const ExactInput = ({ input, shown }: { input: string; shown: boolean }) => {
+  const [open, setOpen] = useState(!shown);
+  const id = useId();
+  return (
+    <div className="flex flex-col items-start gap-2">
+      <Button
+        aria-controls={id}
+        aria-expanded={open}
+        onClick={() => {
+          setOpen(!open);
+        }}
+        size="sm"
+        variant="ghost"
+      >
+        {open ? "Hide" : "Show"} exactly what will be sent
+      </Button>
+      {open ? (
+        <pre
+          className="bg-muted w-full overflow-x-auto rounded-md p-3 text-sm"
+          id={id}
+        >
+          <code className="font-mono">{inputOf(input)}</code>
+        </pre>
+      ) : null}
+    </div>
+  );
+};
+
 const HeldWrite = ({
   action,
   onDecided,
@@ -78,17 +148,21 @@ const HeldWrite = ({
     await run(decision);
     onDecided();
   };
-  const what = `${action.action} on connection ${action.connectionId}`;
+  const { description } = action;
+  const title = description?.title ?? action.action;
+  const connection = action.connectionName ?? action.connectionId;
+  const what = `${title} on ${connection}`;
   return (
     <Card size="sm">
       <CardHeader>
-        <CardTitle>Waiting for you: {action.action}</CardTitle>
+        <CardTitle>Waiting for you: {title}</CardTitle>
       </CardHeader>
       <CardContent>
         <div className="flex flex-col gap-2">
           <p className="text-muted-foreground text-sm">
-            On connection {action.connectionId}
+            On {connection}
             {action.resource === null ? "" : `, ${action.resource}`}
+            {description === undefined ? "" : ` (${action.action})`}
           </p>
           <p className="text-muted-foreground text-sm">
             Asked for{" "}
@@ -101,9 +175,19 @@ const HeldWrite = ({
               This chat read restricted data: this may send it out
             </Badge>
           ) : null}
-          <pre className="bg-muted overflow-x-auto rounded-md p-3 text-sm">
-            <code className="font-mono">{inputOf(action.input)}</code>
-          </pre>
+          {description === undefined ? null : (
+            <Described description={description} />
+          )}
+          {description?.complete === false ? (
+            <p className="text-sm" role="note">
+              More will be sent than is shown above. Read exactly what will be
+              sent before you confirm.
+            </p>
+          ) : null}
+          <ExactInput
+            input={action.input}
+            shown={description?.complete === true}
+          />
           <ErrorText>{failure}</ErrorText>
         </div>
       </CardContent>
