@@ -1,6 +1,7 @@
 import { agentErrors } from "@grasp-os/shared/agent";
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import { featureErrors } from "@grasp-os/shared/errors";
+import { memoryMaxLimit } from "@grasp-os/shared/memory";
 import { modelErrors } from "@grasp-os/shared/models";
 import { permissionErrors } from "@grasp-os/shared/permissions";
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
@@ -9,10 +10,10 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
 import {
-  historyChars,
   maxRunsPerResponse,
   maxRunsPerTurn,
   maxSteps,
+  requestChars,
 } from "../src/agent.ts";
 import { codeLimits } from "../src/code-mode.ts";
 import {
@@ -26,16 +27,82 @@ import {
   says,
   transcript,
 } from "./agent-chat.ts";
+import type { WorkspaceStub } from "./agent-chat.ts";
 import { fakeGateway } from "./ai-gateway.ts";
 import type { GatewayReply } from "./ai-gateway.ts";
 import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
-import { signedInWithRole } from "./sign-in.ts";
+import { signedInApi, signedInWithRole } from "./sign-in.ts";
 
 // A chat's agent, through the Workspace object: the loop, the code it runs
 // in isolates of their own, and the model gateway, all real (agent-chat.ts).
 
 const idp = mockIdp();
+
+/**
+ * Models of different context windows, as pi's catalog gives them: the
+ * tests' own, of 1,000,000 tokens, one of 200,000 and one of 24,000. Each
+ * request keeps 16,384 of them for the answer.
+ */
+const smallModel = "anthropic/claude-haiku-4-5";
+const tinyModel = "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+const answerTokens = 16_384;
+const inputTokens = {
+  large: 1_000_000 - answerTokens,
+  small: 200_000 - answerTokens,
+};
+
+/** A deployment that allows them all. */
+const bothModels = {
+  ...gatewayConfig,
+  models: [model, smallModel, tinyModel],
+};
+
+/**
+ * Adds `count` turns to the chat as the object keeps them: questions of
+ * `chars` characters (30,000 unless given), each answered.
+ */
+const addTurns = async (
+  stub: WorkspaceStub,
+  chatId: string,
+  count: number,
+  chars = 30_000
+): Promise<void> => {
+  const question = JSON.stringify({
+    role: "user",
+    content: "q".repeat(chars),
+    timestamp: 1,
+  });
+  const answer = JSON.stringify({
+    role: "assistant",
+    content: [{ type: "text", text: "Answered." }],
+    api: "anthropic-messages",
+    provider: "anthropic",
+    model: "claude-sonnet-4-5",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "stop",
+    timestamp: 1,
+  });
+  await runInDurableObject(stub, (_instance, state) => {
+    for (let i = 0; i < count; i += 1) {
+      for (const message of [question, answer]) {
+        state.storage.sql.exec(
+          "INSERT INTO chat_messages (chat_id, message, created_at) VALUES (?, ?, ?)",
+          chatId,
+          message,
+          Date.now()
+        );
+      }
+    }
+  });
+};
 
 /** A new chat for a person no other test uses, answered by `replies`. */
 const newChat = async (...replies: GatewayReply[]) => {
@@ -666,9 +733,10 @@ describe("chat agent turns", () => {
     expect(gateway.requests).toStrictEqual([]);
   });
 
-  it("shortens a long turn's oldest code results to fit, keeping its latest and every call's result", async () => {
-    const { stub, chat, gateway, ask } = await newChat(
-      // 30 code runs of a result the model reads cut to 32 KiB each.
+  it("shortens a long turn's oldest code results to fit the model's window, keeping its latest and every call's result", async () => {
+    const { stub, chat, gateway } = await newChat(
+      // 30 code runs of a result the model reads cut to 32 KiB each: more
+      // than the small model takes.
       ...Array.from({ length: maxRunsPerTurn / maxRunsPerResponse }, () =>
         codeStep(
           "export default async () => 'r'.repeat(40_000);",
@@ -677,10 +745,11 @@ describe("chat agent turns", () => {
       ),
       says("Done.")
     );
+    await pointAtGateway(stub, gateway, { config: bothModels });
 
-    await expect(ask("Run it all.")).resolves.toMatchObject({
-      outcome: "answered",
-    });
+    await expect(
+      stub.ask(chat.id, { text: "Run it all.", model: smallModel })
+    ).resolves.toMatchObject({ outcome: "answered" });
 
     // What the last request sent, in Anthropic's wire format.
     const blockSchema = z.looseObject({
@@ -712,7 +781,8 @@ describe("chat agent turns", () => {
     const latest = results.at(-1);
     expect({
       calls: calls.length,
-      withinWindow: JSON.stringify(last).length < historyChars + 50_000,
+      withinWindow:
+        JSON.stringify(last).length < requestChars(inputTokens.small),
       // Every call still has its result, in the same order.
       pairs: results.map(({ tool_use_id: id }) => id),
       someShortened: shortened.length > 0,
@@ -731,74 +801,181 @@ describe("chat agent turns", () => {
     });
   });
 
-  it("sends only a long chat's recent turns, and stops a chat that is too long", async () => {
+  it("sends as much of a long chat as the model's window takes, and stops a chat that is too long", async () => {
     const { stub, chat, gateway, ask } = await newChat(
       codeStep("export default async () => 'early' + '-result';"),
       says("Noted."),
-      says("Still here.")
+      says("Still here."),
+      says("All here.")
     );
+    await pointAtGateway(stub, gateway, { config: bothModels });
     await ask("Remember this.");
-    // A long chat since: questions of 30,000 characters, each answered.
-    const answer = JSON.stringify({
-      role: "assistant",
-      content: [{ type: "text", text: "Answered." }],
-      api: "anthropic-messages",
-      provider: "anthropic",
-      model: "claude-sonnet-4-5",
-      usage: {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 0,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    // A long chat since, of 1.2 million characters: more than the small
+    // model takes, and well within the large one's window.
+    await addTurns(stub, chat.id, 40);
+    /** What the request for `question` sent of the chat, to `to`. */
+    const sentTo = async (to: string, question: string, answered: string) => {
+      await expect(
+        stub.ask(chat.id, { text: question, model: to })
+      ).resolves.toMatchObject({ outcome: "answered", answer: answered });
+      const sent = JSON.stringify(gateway.requests.at(-1)?.body);
+      return {
+        // The first turn: its question, and what its code returned.
+        early: [sent.includes("Remember this."), sent.includes("early-result")],
+        note: sent.includes("Earlier messages of this chat are left out"),
+        question: sent.includes(question),
+        // The instructions always go along.
+        instructions: sent.includes("You are the Grasp assistant"),
+        chars: sent.length,
+      };
+    };
+
+    const small = await sentTo(smallModel, "And now?", "Still here.");
+    const large = await sentTo(model, "And again?", "All here.");
+
+    expect({
+      small: { ...small, chars: undefined },
+      smallWithinWindow: small.chars < requestChars(inputTokens.small),
+      large: { ...large, chars: undefined },
+      largeWithinWindow: large.chars < requestChars(inputTokens.large),
+    }).toStrictEqual({
+      small: {
+        early: [false, false],
+        note: true,
+        question: true,
+        instructions: true,
+        chars: undefined,
       },
-      stopReason: "stop",
-      timestamp: 1,
+      smallWithinWindow: true,
+      // The same chat, whole: the first turn and all since.
+      large: {
+        early: [true, true],
+        note: false,
+        question: true,
+        instructions: true,
+        chars: undefined,
+      },
+      largeWithinWindow: true,
     });
-    const addTurns = async (count: number) => {
-      await runInDurableObject(stub, (_instance, state) => {
-        const question = JSON.stringify({
-          role: "user",
-          content: "q".repeat(30_000),
-          timestamp: 1,
-        });
-        for (let i = 0; i < count; i += 1) {
-          for (const message of [question, answer]) {
-            state.storage.sql.exec(
-              "INSERT INTO chat_messages (chat_id, message, created_at) VALUES (?, ?, ?)",
-              chat.id,
-              message,
-              Date.now()
-            );
-          }
-        }
+
+    await addTurns(stub, chat.id, 100);
+    await expect(codeOf(ask("More?"))).resolves.toBe("agent.chat_full");
+  });
+
+  it("leaves a long chat's turns only the room the memory it carries doesn't take", async () => {
+    const admin = await signedInApi(idp, "admin");
+    const { memory } = await admin.api.memory.collections();
+    if (memory === null) {
+      throw new Error("An admin gets the Memory collection");
+    }
+    const { stub, chat, gateway } = await newChat(says("Still here."));
+    /** Saves the company's AGENTS.md, over what is there. */
+    const saveRules = async (text: string) => {
+      const { documents } = await admin.api.knowledge.listDocuments(memory);
+      const current = documents.find(({ path }) => path === "AGENTS.md");
+      await admin.api.knowledge.saveDocument({
+        collectionId: memory,
+        path: "AGENTS.md",
+        text,
+        ifVersion: current?.currentVersion ?? 0,
       });
     };
-    await addTurns(40);
+    // The largest a deployment may let a memory file be: 128,000
+    // characters, which every request of the chat carries.
+    const limits = env.MEMORY_LIMITS;
+    const raised = { "AGENTS.md": memoryMaxLimit };
+    const rules = `# Rules\n\n${"m".repeat(127_000)} the last rule`;
+    let sent = "";
+    try {
+      Reflect.set(env, "MEMORY_LIMITS", raised);
+      await pointAtGateway(stub, gateway, {
+        config: bothModels,
+        memoryLimits: raised,
+      });
+      await saveRules(rules);
+      await addTurns(stub, chat.id, 40);
 
-    await expect(ask("And now?")).resolves.toMatchObject({
-      outcome: "answered",
-      answer: "Still here.",
-    });
-    const sent = JSON.stringify(gateway.requests.at(-1)?.body);
+      await expect(
+        stub.ask(chat.id, { text: "And now?", model: smallModel })
+      ).resolves.toMatchObject({ outcome: "answered" });
+      sent = JSON.stringify(gateway.requests.at(-1)?.body);
+    } finally {
+      Reflect.set(env, "MEMORY_LIMITS", limits);
+      // The company's memory is every later chat's too.
+      await saveRules("# Rules");
+    }
+
     expect({
-      early: sent.includes("Remember this.") || sent.includes("early-result"),
+      // The memory whole, the recent turns, and no more than the model
+      // takes of both together.
+      memory: sent.includes("the last rule"),
       note: sent.includes("Earlier messages of this chat are left out"),
       question: sent.includes("And now?"),
-      // The instructions always go along.
-      instructions: sent.includes("You are the Grasp assistant"),
-      withinWindow: sent.length < historyChars + 50_000,
+      withinWindow: sent.length < requestChars(inputTokens.small),
+      // Most of the room that is left is used: ten turns and more.
+      turns: sent.split("q".repeat(30_000)).length > 10,
     }).toStrictEqual({
-      early: false,
+      memory: true,
       note: true,
       question: true,
-      instructions: true,
+      withinWindow: true,
+      turns: true,
+    });
+  });
+
+  it("keeps a request that nearly fills the model's window within it, its note and tool declaration included", async () => {
+    const { stub, chat, gateway } = await newChat(says("Still here."));
+    await pointAtGateway(stub, gateway, { config: bothModels });
+    // Turns of 5,000 characters, more than twice what the small model
+    // takes: those sent fill its window to within one of them.
+    await addTurns(stub, chat.id, 250, 5000);
+
+    await expect(
+      stub.ask(chat.id, { text: "And now?", model: smallModel })
+    ).resolves.toMatchObject({ outcome: "answered" });
+
+    // The whole request as the provider got it: instructions, the tool's
+    // declaration, the note and the turns.
+    const sent = JSON.stringify(gateway.requests.at(-1)?.body);
+    const windowChars = requestChars(inputTokens.small);
+    expect({
+      tool: sent.includes('"name":"executeCode"'),
+      note: sent.includes("Earlier messages of this chat are left out"),
+      question: sent.includes("And now?"),
+      nearlyFull: sent.length > windowChars * 0.9,
+      withinWindow: sent.length <= windowChars,
+    }).toStrictEqual({
+      tool: true,
+      note: true,
+      question: true,
+      nearlyFull: true,
       withinWindow: true,
     });
+  });
 
-    await addTurns(100);
-    await expect(codeOf(ask("More?"))).resolves.toBe("agent.chat_full");
+  it("refuses a question too long for the model, before anything is kept or sent", async () => {
+    const { stub, chat, gateway } = await newChat(says("Hi."));
+    await pointAtGateway(stub, gateway, { config: bothModels });
+
+    // 50,000 characters, to a model that takes 7,616 tokens.
+    await expect(
+      codeOf(stub.ask(chat.id, { text: "q".repeat(50_000), model: tinyModel }))
+    ).resolves.toBe("agent.question_too_long");
+    expect(gateway.requests).toStrictEqual([]);
+    await expect(transcript(stub, chat.id)).resolves.toStrictEqual([]);
+
+    // The same question to a model that takes it.
+    await expect(
+      stub.ask(chat.id, { text: "q".repeat(50_000), model })
+    ).resolves.toMatchObject({ outcome: "answered", answer: "Hi." });
+  });
+
+  it("sizes a chat to a fixed number of characters when the model's window is unknown", () => {
+    expect([
+      requestChars(),
+      requestChars(0),
+      requestChars(inputTokens.small) < requestChars(inputTokens.large),
+    ]).toStrictEqual([300_000, 0, true]);
   });
 
   it.each([

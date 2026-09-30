@@ -164,7 +164,8 @@ const afterSchema = z.int().nonnegative().nullable();
 /**
  * Most characters a chat's transcript may hold: a chat past it takes no
  * more questions, so loading one never parses more than this and one turn.
- * The model reads only its most recent part (`recentHistory` in agent.ts).
+ * The model reads as much of it, newest first, as its window takes
+ * (`recentHistory` in agent.ts), which for every model is less than this.
  */
 export const maxChatChars = 4_000_000;
 

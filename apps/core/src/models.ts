@@ -122,6 +122,10 @@ const workersAiMaxTokens = 32_768;
  */
 const defaultMaxTokens = 16_384;
 
+/** The most tokens a request's answer may take, as the request says it. */
+const answerTokens = (call: { maxTokens?: number }, model: Model<Api>) =>
+  Math.min(call.maxTokens ?? defaultMaxTokens, model.maxTokens);
+
 /**
  * How long a call may take, retries included, when it doesn't say; and the
  * most it may ask for.
@@ -553,7 +557,7 @@ const open = (
   const events = adapter(model, context, {
     fetch: measured,
     headers: gatewayHeaders(call),
-    maxTokens: Math.min(call.maxTokens ?? defaultMaxTokens, model.maxTokens),
+    maxTokens: answerTokens(call, model),
     maxRetries,
     // Reasoning at a middle effort where the model has it: without a level
     // pi turns it off.
@@ -1263,6 +1267,12 @@ export interface AgentModel {
   /** The model at the deployment's gateway, as the loop names it. */
   model: Model<Api>;
   /**
+   * The tokens a request may send: the model's context window, as pi's
+   * catalog gives it, less what each request keeps for the answer.
+   * `undefined` when the catalog gives the model no window.
+   */
+  inputTokens: number | undefined;
+  /**
    * Streams one request, with the tools its transcript declares. Whatever
    * model the loop passes, the request goes to this one, through the
    * gateway. Never throws: a failure is the stream's last event.
@@ -1290,6 +1300,10 @@ const agentModel = async (
   const { model } = await admit(env, session);
   return {
     model,
+    inputTokens:
+      model.contextWindow > 0
+        ? Math.max(model.contextWindow - answerTokens(session, model), 0)
+        : undefined,
     stream: (_model, context, options) => {
       const out = createAssistantMessageEventStream();
       // What fed this request: whatever the loop has read by now.

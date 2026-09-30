@@ -22,7 +22,7 @@ test("an admin reads the allowed models, the rules and the budgets, and nobody e
 
   await expect(page.getByText("To change them, contact Grasp.")).toBeVisible();
   const allowed = sectionOf(page, "Allowed models").getByRole("row", {
-    name: /llama-3\.3-70b-instruct-fp8-fast/u,
+    name: /gpt-oss-120b/u,
   });
   await expect(allowed).toContainText("Hosted in the EU");
   await expect(allowed).not.toContainText("Takes sensitive data");

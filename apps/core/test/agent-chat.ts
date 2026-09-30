@@ -58,7 +58,8 @@ export const gatewayConfig = { gateway: "grasp-os-test", models: [model] };
 /**
  * Points the object's model gateway at a fake AI Gateway, with `config`,
  * and switches the agent on or off, the other flags as the tests' env
- * sets them (the client's model rules on). Objects may share their env,
+ * sets them (the client's model rules on), and the memory files' limits
+ * when given. Objects may share their env,
  * so every test sets both; a restarted object may get a new one, so it is
  * pointed again.
  */
@@ -68,7 +69,8 @@ export const pointAtGateway = async (
   {
     agentOn = true,
     config = gatewayConfig,
-  }: { agentOn?: boolean; config?: object } = {}
+    memoryLimits,
+  }: { agentOn?: boolean; config?: object; memoryLimits?: object } = {}
 ) => {
   await runInDurableObject(stub, (instance) => {
     const objectEnv: unknown = Reflect.get(instance, "env");
@@ -78,6 +80,7 @@ export const pointAtGateway = async (
     Object.assign(objectEnv, {
       AI: gateway.binding,
       MODEL_GATEWAY: config,
+      ...(memoryLimits === undefined ? {} : { MEMORY_LIMITS: memoryLimits }),
       FEATURES: {
         ...z.record(z.string(), z.boolean()).parse(env.FEATURES),
         agent: agentOn,

@@ -14,6 +14,8 @@ export const agentErrors = defineErrorFamily({
     "You have 500 chats, the most a person keeps. Delete one to start another.",
   "agent.too_many_watches":
     "Too many of your pages follow chats at once. Close some, then try again.",
+  "agent.question_too_long":
+    "This question, with what the agent reads before it, is too long for this model. Shorten it, or choose a model that reads more.",
   "agent.chat_full":
     "This chat is too long to go on. Start a new chat to ask more.",
   "agent.run_ended":
