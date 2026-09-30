@@ -316,6 +316,12 @@ const actorOf = (
       id: actor.runId,
     };
   }
+  if (actor.type === "guest") {
+    return {
+      label: `Guest of ${appName(directory, actor.appId)}, invited for ${personName(directory, actor.invitedBy)}`,
+      id: actor.chatId,
+    };
+  }
   return { label: "Grasp" };
 };
 

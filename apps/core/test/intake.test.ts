@@ -13,7 +13,7 @@ import { fakeGateway } from "./ai-gateway.ts";
 import { grantReviewed, revokeOtherCopies, serverBuilt } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
 import { endLiveRuns, finished as runEnded } from "./runs.ts";
-import { outcome, signedInApi, unique } from "./sign-in.ts";
+import { outcome, routed, signedInApi, unique } from "./sign-in.ts";
 
 // The intake, the built-in App (apps/core/blueprints/intake/): an App
 // created from it asks for the Playbook, and once an admin grants it,
@@ -111,11 +111,10 @@ const copyOf = async (admin: Awaited<ReturnType<typeof signedInApi>>) => {
   await serverBuilt(created.app.id, 1);
   return {
     app: appIdSchema.parse(created.app.id),
-    asked: created.permissions.map(({ object, actions, binding }) => ({
-      object,
-      actions,
-      binding,
-    })),
+    // By binding: the order they are listed in isn't theirs.
+    asked: created.permissions
+      .map(({ object, actions, binding }) => ({ object, actions, binding }))
+      .toSorted((a, b) => a.binding.localeCompare(b.binding)),
   };
 };
 
@@ -316,6 +315,11 @@ describe("the intake", { timeout: 60_000 }, () => {
     }).toStrictEqual({
       asked: [
         {
+          object: { type: "platform" },
+          actions: ["guests"],
+          binding: "GUESTS",
+        },
+        {
           object: { type: "collection", collectionId: playbook },
           actions: ["read", "write"],
           binding: "PLAYBOOK",
@@ -483,7 +487,9 @@ describe("the intake", { timeout: 60_000 }, () => {
         z.object({ version: z.number(), status: z.string() })
       ),
     }).toStrictEqual({
-      overview: { ok: { access: "ok", writable: false, drafts: [] } },
+      overview: {
+        ok: { access: "ok", writable: false, drafts: [], guests: null },
+      },
       create: { error: "knowledge.forbidden" },
       draft: { error: "knowledge.forbidden" },
       keep: { error: "knowledge.forbidden" },
@@ -1033,6 +1039,219 @@ describe("reading notes", { timeout: 60_000 }, () => {
       listed: 2,
       fromScreen: { error: "intake.invalid" },
       unkeyed: { error: "intake.invalid" },
+    });
+  });
+});
+
+/** A guest's page's request to core, and core's answer. */
+const guest = async (body: unknown): Promise<unknown> => {
+  const response = await routed("/api/guest", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return await response.json();
+};
+
+describe("stakeholder chats", { timeout: 90_000 }, () => {
+  afterEach(endLiveRuns);
+
+  it("invites a stakeholder whose chat, once they finished it, a model takes statements out of, as a guest's draft reviewed before it is saved", async () => {
+    const { admin, app } = await setUp();
+    await admin.api.workflows.params.set(app, "extract", "model", testModel);
+    const name = `Ben ${unique()}`;
+    const invited = z
+      .object({ ok: z.object({ id: z.string(), link: z.string() }) })
+      .parse(await call(app, admin.userId, "invite", { name })).ok;
+    const token = new URL(invited.link).hash.slice(1);
+    const found = {
+      statements: [
+        {
+          text: "Invoices wait a week for approval.",
+          tags: ["blocker", "time_sink"],
+          quote: "They wait a week for the second signature.",
+        },
+      ],
+    };
+    const gateway = fakeGateway(
+      { text: "What slows your work down?", inputTokens: 40, outputTokens: 8 },
+      { text: "Thank you. Press Finish.", inputTokens: 60, outputTokens: 6 },
+      { text: JSON.stringify(found), inputTokens: 200, outputTokens: 60 }
+    );
+    const ai: AiBinding = env.AI;
+    const answering = vi
+      .spyOn(ai, "fetch")
+      .mockImplementation(gateway.binding.fetch);
+    let listed: unknown;
+    let run: { id: string };
+    try {
+      await guest({ action: "open", token });
+      await guest({ action: "send", token, text: "I approve invoices." });
+      await guest({
+        action: "send",
+        token,
+        text: "They wait a week for the second signature.",
+      });
+      await guest({ action: "finish", token });
+      listed = await call(app, admin.userId, "overview");
+      run = await admin.api.screens.startRun(app, "extract", {
+        chat: invited.id,
+      });
+      await runEnded(run.id);
+    } finally {
+      answering.mockRestore();
+    }
+    const ran = await admin.api.screens.run(app, run.id);
+    const { draft: draftId } = z
+      .object({ draft: z.string() })
+      .parse(ran.output);
+    const opened = okOf(
+      await call(app, admin.userId, "draft", draftId),
+      z.object({
+        origin: z.string(),
+        version: z.number(),
+        draft: z.object({
+          source: z.record(z.string(), z.unknown()),
+          statements: z.array(z.record(z.string(), z.unknown())),
+        }),
+      })
+    );
+    const saved = okOf(
+      await call(app, admin.userId, "save", {
+        id: draftId,
+        ifVersion: opened.version,
+        draft: opened.draft,
+      }),
+      savedSchema
+    );
+    const [source] = await documentsAt(admin, saved.source);
+    const statementPath = `${saved.source.replace(/^sources\//u, "statements/").replace(/\.md$/u, "")}-1.md`;
+    const [statement] = await documentsAt(admin, statementPath);
+    const extraction = JSON.stringify(gateway.requests[2]?.body);
+    // Someone editing either by hand: without the mark, or through another
+    // type, which would drop it.
+    const edited = async (path: string, text: string, drop: string) =>
+      await outcome(
+        admin.api.knowledge.saveDocument({
+          collectionId: playbook,
+          path,
+          text: text
+            .split("\n")
+            .filter((line) => line !== drop)
+            .join("\n"),
+          ifVersion: 1,
+        })
+      );
+    const unmarking = {
+      source: await edited(saved.source, source?.text ?? "", "guest: true"),
+      sourceUntyped: await edited(
+        saved.source,
+        source?.text ?? "",
+        "type: source"
+      ),
+      statement: await edited(
+        statementPath,
+        statement?.text ?? "",
+        "guest: true"
+      ),
+      statementUntyped: await edited(
+        statementPath,
+        statement?.text ?? "",
+        "type: statement"
+      ),
+    };
+
+    expect({
+      listed: z
+        .object({
+          ok: z.object({
+            guests: z.array(
+              z.object({
+                id: z.string(),
+                status: z.string(),
+                turns: z.number(),
+              })
+            ),
+          }),
+        })
+        .parse(listed)
+        .ok.guests.filter(({ id }) => id === invited.id),
+      origin: opened.origin,
+      source: {
+        title: opened.draft.source.title,
+        medium: opened.draft.source.medium,
+        from: opened.draft.source.from,
+      },
+      // The chat, read as notes: the questions and the guest's answers.
+      notes: opened.draft.source.notes,
+      // The chat's lines, as data, each said by whom.
+      read: extraction.includes(
+        '{\\"role\\":\\"guest\\",\\"text\\":\\"They wait a week for the second signature.\\"}'
+      ),
+      statements: opened.draft.statements,
+      // Saved marked as a guest's words, which only the intake's save sets.
+      guest: [
+        source?.text.includes("guest: true"),
+        statement?.text.includes("guest: true"),
+      ],
+      unmarking,
+    }).toStrictEqual({
+      listed: [{ id: invited.id, status: "finished", turns: 2 }],
+      origin: "guest",
+      source: { title: `Chat with ${name}`, medium: "chat", from: name },
+      notes: [
+        `${name}: I approve invoices.`,
+        "Question: What slows your work down?",
+        `${name}: They wait a week for the second signature.`,
+        "Question: Thank you. Press Finish.",
+      ].join("\n\n"),
+      read: true,
+      statements: found.statements,
+      guest: [true, true],
+      unmarking: {
+        source: "knowledge.invalid",
+        sourceUntyped: "knowledge.invalid",
+        statement: "knowledge.invalid",
+        statementUntyped: "knowledge.invalid",
+      },
+    });
+  });
+
+  it("marks no source a guest's but the intake's save, whoever edits it", async () => {
+    const { admin, app } = await setUp();
+    const draft = interview(`Marked ${unique()}`);
+    const { id } = okOf(
+      await call(app, admin.userId, "create", draft),
+      createdSchema
+    );
+    const saved = okOf(
+      await call(app, admin.userId, "save", { id, ifVersion: 1, draft }),
+      savedSchema
+    );
+    const fields = [
+      "type: source",
+      `title: ${draft.source.title}`,
+      "medium: interview",
+      "date: 2026-09-21",
+      `draft: ${id}`,
+    ];
+    const edit = async (extra: string[], path = saved.source, ifVersion = 1) =>
+      await outcome(
+        admin.api.knowledge.saveDocument({
+          collectionId: playbook,
+          path,
+          text: recordText([...fields, ...extra]),
+          ifVersion,
+        })
+      );
+    expect({
+      markedByHand: await edit(["guest: true"]),
+      byHand: await edit(["guest: true"], byHand("sources"), 0),
+      unmarked: await edit([]),
+    }).toStrictEqual({
+      markedByHand: "knowledge.invalid",
+      byHand: "knowledge.invalid",
+      unmarked: "ok",
     });
   });
 });

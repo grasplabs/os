@@ -2,6 +2,8 @@ import { DurableObject } from "cloudflare:workers";
 
 import { draftOf, refuse } from "./draft.ts";
 import type { Draft } from "./draft.ts";
+import { interviewSkill, linesOf, notesOf, sourceOf } from "./guests.ts";
+import type { GuestChat, Guests } from "./guests.ts";
 
 // The intake's server: drafts of a source and the statements taken from
 // it, kept here while someone reviews and edits them, and saved to the
@@ -13,7 +15,8 @@ import type { Draft } from "./draft.ts";
 // Intake is theirs, so every method but `overview` refuses anyone else
 // (`knowledge.forbidden`), and `overview` shows them nothing. Drafts are
 // typed in by hand, or proposed by a run of the `extract` workflow, which
-// takes the statements out of someone's notes.
+// takes the statements out of someone's notes, or out of a stakeholder's
+// chat (app/guests.ts).
 
 /**
  * Whoever the method runs for, as the platform passes it: with its step's
@@ -53,16 +56,19 @@ const savedTypes = ["source", "statement"] as const;
 
 interface Env {
   PLAYBOOK?: Playbook;
+  GUESTS?: Guests;
 }
 
 /** Why a call was refused, by its code, or what it answered. */
 type Outcome<T> = { ok: T } | { error: string };
 
 /**
- * Where a draft came from: typed in by hand, or taken out of notes by a
- * model (`extract`). Kept with it, so the review says what it reviews.
+ * Where a draft came from: typed in by hand, or taken out by a model
+ * (`extract`) of notes, or of a stakeholder's chat, whose words are
+ * untrusted. Kept with it, so the review says what it reviews, and a
+ * guest's source is saved marked as theirs.
  */
-type Origin = "manual" | "notes";
+type Origin = "manual" | "notes" | "guest";
 
 /**
  * A draft being reviewed (`open`), or being saved (`saving`): once a save
@@ -253,15 +259,24 @@ export class App extends DurableObject<Env> {
       access: "none" | "ok";
       writable: boolean;
       drafts: DraftSummary[];
+      /** Stakeholder chats; null while the App can't invite anyone. */
+      guests: GuestChat[] | null;
     }>
   > {
     const playbook = this.env.PLAYBOOK;
     if (!playbook) {
-      return { ok: { access: "none", writable: false, drafts: [] } };
+      return {
+        ok: { access: "none", writable: false, drafts: [], guests: null },
+      };
     }
     return await outcome(async () => {
       if (!(await playbook.canWrite(caller))) {
-        return { access: "ok" as const, writable: false, drafts: [] };
+        return {
+          access: "ok" as const,
+          writable: false,
+          drafts: [],
+          guests: null,
+        };
       }
       const drafts = this.ctx.storage.sql
         .exec<Row>(
@@ -270,7 +285,66 @@ export class App extends DurableObject<Env> {
         )
         .toArray()
         .map((row) => summaryOf(row, storedDraft(row)));
-      return { access: "ok" as const, writable: true, drafts };
+      // Only a hint: without the permission, or while guest chats are off,
+      // the intake offers no chats and still lists its drafts.
+      const guests =
+        (await this.env.GUESTS?.list(caller).catch(() => null)) ?? null;
+      return { access: "ok" as const, writable: true, drafts, guests };
+    });
+  }
+
+  /**
+   * Invites a stakeholder, by name, to a chat about their work for `days`
+   * (7 unless said): the answer holds its link, shown once.
+   */
+  async invite(
+    caller: Caller,
+    input: { name: string; days?: number }
+  ): Promise<Outcome<GuestChat & { link: string }>> {
+    return await outcome(async () => {
+      await this.#requireWriter(caller);
+      return await this.#guests().invite(caller, {
+        name: input.name,
+        skill: interviewSkill,
+        ...(input.days === undefined ? {} : { days: input.days }),
+      });
+    });
+  }
+
+  /** Stops a stakeholder chat's link, open, finished or expired: nothing of it opens after. */
+  async revokeChat(caller: Caller, id: string): Promise<Outcome<GuestChat>> {
+    return await outcome(async () => {
+      await this.#requireWriter(caller);
+      return await this.#guests().revoke(caller, id);
+    });
+  }
+
+  /**
+   * A stakeholder chat as notes to read, and the source it is: for the
+   * `extract` workflow. One nobody wrote in yet is refused
+   * (`intake.empty_chat`).
+   */
+  async chatNotes(
+    caller: Caller,
+    id: string
+  ): Promise<
+    Outcome<{
+      source: ReturnType<typeof sourceOf>;
+      notes: string;
+      lines: ReturnType<typeof linesOf>;
+    }>
+  > {
+    return await outcome(async () => {
+      await this.#requireWriter(caller);
+      const chat = await this.#guests().read(caller, id);
+      if (!chat.messages.some(({ role }) => role === "guest")) {
+        refuse("intake.empty_chat", "Nobody wrote in this chat yet.");
+      }
+      return {
+        source: sourceOf(chat),
+        notes: notesOf(chat),
+        lines: linesOf(chat),
+      };
     });
   }
 
@@ -313,6 +387,12 @@ export class App extends DurableObject<Env> {
         caller.idempotencyKey ??
         refuse("intake.invalid", "Only a workflow run proposes a draft.");
       const draft = draftOf(input);
+      // Taken out of a stakeholder's chat (`chatNotes`): their words.
+      const fromGuest =
+        typeof input === "object" &&
+        input !== null &&
+        "guest" in input &&
+        input.guest === true;
       const [known] = this.ctx.storage.sql
         .exec<{ draft_id: string }>(
           "SELECT draft_id FROM proposals WHERE key = ?",
@@ -323,7 +403,7 @@ export class App extends DurableObject<Env> {
         return { id: known.draft_id };
       }
       const id = crypto.randomUUID();
-      this.#insert(id, "notes", draft, caller);
+      this.#insert(id, fromGuest ? "guest" : "notes", draft, caller);
       this.ctx.storage.sql.exec(
         "INSERT INTO proposals (key, draft_id) VALUES (?, ?)",
         key,
@@ -434,6 +514,8 @@ export class App extends DurableObject<Env> {
         }
       };
       const { source, statements } = draft;
+      // A stakeholder's words, and what was taken from them: untrusted.
+      const guestMark = row.origin === "guest" ? { guest: true } : {};
       stillSaving();
       await saveNew(playbook, caller, input.id, {
         path: paths.source,
@@ -443,6 +525,7 @@ export class App extends DurableObject<Env> {
           medium: source.medium,
           date: source.date,
           ...(source.from === "" ? {} : { from: source.from }),
+          ...guestMark,
         },
         body: source.notes === "" ? "" : `${source.notes}\n`,
       });
@@ -454,6 +537,7 @@ export class App extends DurableObject<Env> {
           record: {
             type: "statement",
             title: statement.text,
+            ...guestMark,
             source: paths.source,
             date: source.date,
             tags: statement.tags,
@@ -487,6 +571,14 @@ export class App extends DurableObject<Env> {
       JSON.stringify(draft),
       caller.userId,
       Date.now()
+    );
+  }
+
+  /** Guest chats, as the App's permission gives them. */
+  #guests(): Guests {
+    return (
+      this.env.GUESTS ??
+      refuse("permission.denied", "The App has no permission to invite guests.")
     );
   }
 

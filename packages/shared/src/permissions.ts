@@ -65,12 +65,17 @@ const collectionObjectSchema = z.strictObject({
 });
 
 /**
- * The platform's own statistics, as a permission's object: the measures
- * the platform publishes of Apps' runs (`platformMeasures` in
- * `@grasp-os/shared/statistics`), which an App reads only once an admin
- * grants it this, and then only of Apps whose runs the person it acts for
- * may see. Its one action is `statistics`. An App's own statistics need
- * no permission.
+ * What the platform itself offers an App, as a permission's object, one
+ * action per permission (its stub does that one thing):
+ *
+ * - `statistics`: the measures the platform publishes of Apps' runs
+ *   (`platformMeasures` in `@grasp-os/shared/statistics`), which an App
+ *   reads only once an admin grants it this, and then only of Apps whose
+ *   runs the person it acts for may see. An App's own statistics need no
+ *   permission.
+ * - `guests`: inviting people who aren't members to a short chat with a
+ *   model, through a link, and reading back what they wrote
+ *   (`@grasp-os/shared/guests`).
  */
 const platformObjectSchema = z.strictObject({ type: z.literal("platform") });
 
@@ -119,7 +124,7 @@ const connectionActionPattern = /^[A-Za-z][\w.-]{0,63}$/u;
 const platformActions = {
   collection: ["read", "write"],
   workflow: ["read", "start"],
-  platform: ["statistics"],
+  platform: ["statistics", "guests"],
 } as const;
 
 /** One action a permission allows. */
@@ -239,6 +244,14 @@ const checkGrant = (
       });
     }
   }
+  // A platform permission's stub does one thing: the action names it.
+  if (object.type === "platform" && actions.length !== 1) {
+    context.addIssue({
+      code: "custom",
+      path: ["actions"],
+      message: "A platform permission has one action",
+    });
+  }
   // The audit log records the actions as one identifier-sized value.
   if (actions.join(" ").length > identifierMaxLength) {
     context.addIssue({
@@ -269,8 +282,9 @@ export type PermissionRequest = z.input<typeof permissionRequestSchema>;
  * A permission a built-in blueprint declares (its `blueprint.json`): a
  * request without its subject, which is every App created from it. Only
  * a collection one of its blueprints declares (`declaredCollectionSchema`
- * in `@grasp-os/shared/knowledge`), or the platform's statistics: the
- * things a built-in can name the same way in every deployment, where
+ * in `@grasp-os/shared/knowledge`), or what the platform offers (its
+ * statistics, guest chats): the things a built-in can name the same way
+ * in every deployment, where
  * connections have IDs of their own in each.
  */
 export const declaredPermissionSchema = z

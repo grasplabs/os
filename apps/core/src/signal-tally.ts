@@ -61,6 +61,9 @@ export const askerOf = (actor: AuditActor): string => {
     case "workflow": {
       return `run:${actor.runId}`;
     }
+    case "guest": {
+      return `guest:${actor.chatId}`;
+    }
     case "system": {
       return "system";
     }

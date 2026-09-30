@@ -79,6 +79,18 @@ export interface AccountState {
   notices: unknown[];
   /** The status its core answers notices with instead, as an older core would. */
   noticeStatus?: number;
+  /**
+   * What the analytics API reports for it (`/graphql`): its Workers'
+   * requests and CPU time this month, its AI Gateway's spend, and its
+   * requests and errors over the last day. Unset, it reports nothing.
+   */
+  usage?: {
+    monthRequests: number;
+    monthCpuTimeUs: number;
+    monthAiCost: number;
+    dayRequests: number;
+    dayErrors: number;
+  };
 }
 
 /** A call the fake got. */

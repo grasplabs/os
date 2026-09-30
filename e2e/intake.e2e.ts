@@ -180,3 +180,66 @@ test("an admin sends notes to be read, and follows the reading to its end", asyn
   await expect(reading).toHaveCount(0);
   await expect(screen.getByText(title)).toHaveCount(0);
 });
+
+test("an admin invites a stakeholder, who opens the link without an account, writes, and finishes the chat", async ({
+  browser,
+}) => {
+  const { admin } = peopleIn("intake");
+  const name = `Ben ${crypto.randomUUID().slice(0, 8)}`;
+  const app = await intakeFor(admin);
+  const page = await pageOf(browser, admin);
+  const screen = await openIntake(page, app);
+
+  const chats = screen;
+  await chats.getByLabel("Name").fill(name);
+  await chats.getByRole("button", { name: "Invite" }).click();
+  const linkField = chats.getByLabel(`Link for ${name}`);
+  await expect(linkField).toBeVisible();
+  const link = await linkField.inputValue();
+  expect(new URL(link).pathname).toBe("/guest");
+
+  // The guest: a browser with nobody signed in.
+  const context = await browser.newContext();
+  const guestPage = await context.newPage();
+  await guestPage.goto(link);
+  await expect(
+    guestPage.getByRole("heading", { name: `Hi ${name}` })
+  ).toBeVisible();
+  await guestPage.getByLabel("Your message").fill("I approve invoices.");
+  await guestPage.getByRole("button", { name: "Send" }).click();
+  // The local stack reaches no model: the message isn't taken, and says
+  // so, and what was typed stays to send again.
+  await expect(guestPage.getByRole("alert")).toHaveText(
+    "The chat can't answer right now. Try sending it again in a while."
+  );
+  await expect(guestPage.getByLabel("Your message")).toHaveValue(
+    "I approve invoices."
+  );
+  await guestPage.getByRole("button", { name: "Finish" }).click();
+  await expect(guestPage.getByRole("status")).toHaveText(
+    "You finished this chat. Thank you for your time."
+  );
+  await expect(guestPage.getByRole("button", { name: "Send" })).toHaveCount(0);
+
+  // Another link pasted over this one opens that one, never this chat
+  // with its secret: a made-up one opens nothing.
+  await guestPage.evaluate((made) => {
+    window.location.hash = made;
+  }, "A".repeat(43));
+  await expect(
+    guestPage.getByRole("heading", { name: `Hi ${name}` })
+  ).toHaveCount(0);
+  await expect(guestPage.getByRole("alert")).toHaveText(
+    "This link doesn't work. Ask whoever sent it for a new one."
+  );
+  await context.close();
+
+  // Back on the intake: the chat has ended.
+  await page.reload();
+  const again = await openIntake(page, app);
+  const row = again
+    .getByRole("table", { name: "Stakeholder chats" })
+    .getByRole("row")
+    .filter({ hasText: name });
+  await expect(row.getByRole("cell").nth(1)).toHaveText("finished");
+});

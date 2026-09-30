@@ -1,5 +1,5 @@
 /** Reading clients and their provisioning, as the client pages show them. */
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 
 import { consoleDatabase } from "../db/act.ts";
@@ -9,28 +9,6 @@ import { latestDeployOf } from "../deploy/deploy.ts";
 import { currentRun, isReplaceable } from "../runners.ts";
 import type { RunStatus } from "../runners.ts";
 import { workersPaidConfirmedAt } from "./workflow.ts";
-
-/** A client as the list shows it. */
-export interface ClientSummary {
-  id: string;
-  name: string;
-  status: "provisioning" | "active" | "offboarded";
-  ring: number;
-  accountId: string;
-}
-
-/** Every client, by id. */
-export const listClients = async (env: Env): Promise<ClientSummary[]> =>
-  await consoleDatabase(env.DB)
-    .select({
-      id: clients.id,
-      name: clients.name,
-      status: clients.status,
-      ring: clients.ring,
-      accountId: clients.accountId,
-    })
-    .from(clients)
-    .orderBy(asc(clients.id));
 
 /**
  * Where a client's provisioning is, as its page tells staff what to do:
@@ -60,7 +38,7 @@ export interface ProvisioningView {
     name: string;
     accountId: string;
     ring: number;
-    status: ClientSummary["status"];
+    status: "provisioning" | "active" | "offboarded";
     createdBy: string | null;
     createdAt: Date;
     /** The release rollouts leave it on, if it's pinned (src/rollout/control.ts). */

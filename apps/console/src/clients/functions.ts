@@ -11,6 +11,7 @@ import { z } from "zod";
 
 import { consoleDatabase } from "../db/act.ts";
 import { applySettings } from "./apply.ts";
+import { clientGrid, gridLive } from "./grid.ts";
 import { clientHistory, clientSettings } from "./queries.ts";
 import {
   featureInputSchema,
@@ -43,6 +44,19 @@ const change = async (
     throw error;
   }
 };
+
+/** Every client, as the grid shows it at once: what the console recorded. */
+export const fetchClientGrid = createServerFn({ method: "GET" }).handler(
+  async () => await clientGrid(env)
+);
+
+/**
+ * Each active client's live columns, by id, read after the grid shows
+ * (`gridLive`): a few at a time, each within a deadline, kept a minute.
+ */
+export const fetchGridLive = createServerFn({ method: "GET" }).handler(
+  async () => await gridLive(env, new Date())
+);
 
 /** A client's settings and its latest console actions; null settings for no such client. */
 export const fetchClientSettings = createServerFn({ method: "GET" })

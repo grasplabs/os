@@ -1,6 +1,6 @@
 {
   "name": "Intake",
-  "description": "Turns what people say about their work into the statements a baseline rests on: each a claim from a source, tagged as a goal, a blocker, a time sink, a handover, a tool or a rule. A model takes them out of pasted notes, or they are typed in. Statements are reviewed and edited before they are saved to the Playbook.",
+  "description": "Turns what people say about their work into the statements a baseline rests on: each a claim from a source, tagged as a goal, a blocker, a time sink, a handover, a tool or a rule. A model takes them out of pasted notes, or of a chat a stakeholder is invited to by link, or they are typed in. Statements are reviewed and edited before they are saved to the Playbook.",
   "collections": [
     {
       "id": "playbook",
@@ -13,6 +13,11 @@
       "object": { "type": "collection", "collectionId": "playbook" },
       "actions": ["read", "write"],
       "binding": "PLAYBOOK"
+    },
+    {
+      "object": { "type": "platform" },
+      "actions": ["guests"],
+      "binding": "GUESTS"
     }
   ]
 }

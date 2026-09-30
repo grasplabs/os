@@ -493,12 +493,15 @@ export const requestPermission = async (
     await requireAppRole(object.appId, "user");
   }
   if (object.type === "platform") {
-    // Only an App's code reads the platform's statistics, and only while
-    // they are on.
-    requireFeature(env, "statistics");
+    // Only an App's code reads the platform's statistics or invites
+    // guests, and only while that is on.
+    requireFeature(
+      env,
+      actions.includes("guests") ? "guest_chats" : "statistics"
+    );
     if (subject.type !== "app") {
       throw permissionErrors.create("permission.invalid", {
-        issues: ["subject: Only an App reads the platform's statistics."],
+        issues: ["subject: Only an App uses what the platform offers."],
       });
     }
   }

@@ -122,6 +122,13 @@ const typeRules: readonly {
   // An App reading a measure the platform publishes of an App's runs
   // (src/statistics.ts): counts and sums only.
   { action: "statistics.read", type: "read" },
+  // Guest chats (core's src/guests.ts): an App inviting someone, revoking
+  // the link, and reading back what they wrote; the guest opening the
+  // chat, sending a message and finishing it.
+  { action: "guest.read", type: "read" },
+  { action: "guest.invited", type: "permission" },
+  { action: "guest.revoked", type: "permission" },
+  { action: "guest", type: "action" },
   // The log's own events, each named, so an `audit` action added later has
   // no type until it gets a rule: retention moving events out and purging
   // them, gaps (outbox rows the log can't take, moved aside), then reading
@@ -166,6 +173,7 @@ const actorTypes = [
   "app",
   "workflow",
   "staff",
+  "guest",
   "system",
 ] as const satisfies readonly AuditActor["type"][];
 

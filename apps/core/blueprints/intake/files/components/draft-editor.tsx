@@ -260,6 +260,14 @@ export const DraftEditor = ({
       </CardHeader>
       <CardContent>
         <div className="flex flex-col gap-4">
+          {opened?.origin === "guest" ? (
+            <p className="text-sm">
+              Taken out of what a stakeholder wrote in a chat by link: their
+              words, not checked by anyone yet. Check each statement against the
+              notes, and clear from the notes anything that shouldn&apos;t be
+              kept: they are saved as the source&apos;s text.
+            </p>
+          ) : null}
           {saving ? (
             <p className="text-sm">
               Saving this draft started and didn&apos;t finish. Finish saving it

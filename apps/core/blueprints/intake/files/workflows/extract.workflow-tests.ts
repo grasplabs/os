@@ -35,10 +35,45 @@ export default workflowTests(extract, [
           input: {
             source: { ...input.source, notes: input.notes },
             statements: found.statements,
+            guest: false,
           },
         },
       ],
     },
+  },
+  {
+    name: "reads a stakeholder's chat as notes, and keeps a guest's draft",
+    input: { chat: "chat-1" },
+    mocks: {
+      "read-chat": {
+        ok: {
+          source: input.source,
+          notes: input.notes,
+          lines: [{ role: "guest", text: input.notes }],
+        },
+      },
+      extract: found,
+      propose: { ok: { id: "draft-2" } },
+    },
+    expect: {
+      output: { draft: "draft-2", statements: 1 },
+      sideEffects: [
+        {
+          name: "propose",
+          input: {
+            source: { ...input.source, notes: input.notes },
+            statements: found.statements,
+            guest: true,
+          },
+        },
+      ],
+    },
+  },
+  {
+    name: "fails when the chat isn't read",
+    input: { chat: "chat-1" },
+    mocks: { "read-chat": { error: "intake.empty_chat" } },
+    expect: { error: "The chat wasn't read: intake.empty_chat" },
   },
   {
     name: "fails when the draft isn't kept",
