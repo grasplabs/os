@@ -11,7 +11,7 @@ import {
 import { z } from "../src/workflow.ts";
 import type { DecisionRequest } from "../src/workflow.ts";
 import { createFakeEngine, invoice } from "./fakes.ts";
-import { outlineOf } from "./outline.ts";
+import { asDefaultExport, outlineOf } from "./outline.ts";
 import { invoiceWorkflow } from "./workflows/invoice-approval.ts";
 import type { InvoiceSystems } from "./workflows/invoice-approval.ts";
 // oxlint-disable-next-line import/default -- Vite's `?raw` import; typed in raw.d.ts
@@ -54,7 +54,7 @@ describe("the sample invoice workflow", () => {
   });
 
   it("lists its steps from the code, with the review nested under its condition", () => {
-    expect(outlineOf(invoiceSource)).toStrictEqual([
+    expect(outlineOf(asDefaultExport(invoiceSource))).toStrictEqual([
       {
         type: "step",
         name: "match-po",

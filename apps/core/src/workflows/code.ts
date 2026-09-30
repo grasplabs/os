@@ -193,22 +193,28 @@ const settled = async (run) => {
 `;
 
 /**
- * The main module of a run of workflow `id`: the engine the SDK runs on,
- * each of its calls sent to core's host (host.ts), and each error in plain
- * data both ways. Its connections and its App go through the host too,
- * which knows the step running. A binding the run doesn't have (a permission revoked
- * since, or never granted) fails with a permission error, not `undefined`.
+ * What a run's main module builds its bindings with, as a module of its
+ * own that the main module imports before the workflow's. A module's
+ * imports load in the order written, so this one has run before any of
+ * the App's code has: the built-ins it keeps here (`Proxy`, `Error`,
+ * `Object.hasOwn`) are the runtime's, whatever the workflow's module
+ * puts in their place as it loads, and it builds with nothing else a
+ * module could replace (no array or object method, and no assignment a
+ * setter on `Object.prototype` would see). So nothing the App's code does
+ * at load is handed the bindings as they are wrapped. It is the isolate's
+ * own convenience all the same: every call a binding makes is checked and
+ * audited on core's side of the RPC, whatever code makes it.
  */
-const runMain = (
-  id: WorkflowId
-): string => `import { WorkerEntrypoint } from "cloudflare:workers";
-import definition from ${JSON.stringify(appModuleName(workflowPaths(id).workflow))};
-${settling}
-const unwrapped = (result) => {
+const runBindingsModule = "grasp-run-bindings.js";
+const runBindings = `const ProxyOf = Proxy;
+const ErrorOf = Error;
+const hasOwn = Object.hasOwn;
+
+export const unwrapped = (result) => {
   if (result.ok) {
     return result.value;
   }
-  const error = new Error(result.error.message);
+  const error = new ErrorOf(result.error.message);
   error.name = result.error.name;
   if (result.error.code !== undefined) {
     error.code = result.error.code;
@@ -216,43 +222,59 @@ const unwrapped = (result) => {
   throw error;
 };
 
-const bindings = (env) =>
-  new Proxy(env, {
+const guarded = (env) =>
+  new ProxyOf(env, {
     get: (target, name) => {
-      if (typeof name !== "string" || name === "then" || Object.hasOwn(target, name)) {
+      if (typeof name !== "string" || name === "then" || hasOwn(target, name)) {
         return target[name];
       }
-      const error = new Error(\`This workflow has no permission named \${name}: it was never granted, or it was revoked.\`);
+      const error = new ErrorOf(\`This workflow has no permission named \${name}: it was never granted, or it was revoked.\`);
       error.name = "PermissionError";
       error.code = "permission.denied";
       throw error;
     },
   });
 
-const withConnections = (env, host, connections, apps) => ({
-  ...env,
-  APP: {
-    call: async (method, ...args) => unwrapped(await host.callApp(method, args)),
-  },
-  ...Object.fromEntries(
-    connections.map((name) => [
-      name,
-      {
-        call: async (action, input, options) =>
-          unwrapped(await host.callConnection(name, [action, input, options])),
-      },
-    ])
-  ),
-  ...Object.fromEntries(
-    apps.map((name) => [
-      name,
-      {
-        call: async (method, input) =>
-          unwrapped(await host.callExport(name, method, input)),
-      },
-    ])
-  ),
-});
+export const bindings = (env, host, connections, apps) => {
+  const all = {
+    __proto__: null,
+    ...env,
+    APP: {
+      call: async (method, ...args) => unwrapped(await host.callApp(method, args)),
+    },
+  };
+  for (let index = 0; index < connections.length; index += 1) {
+    const name = connections[index];
+    all[name] = {
+      call: async (action, input, options) =>
+        unwrapped(await host.callConnection(name, [action, input, options])),
+    };
+  }
+  for (let index = 0; index < apps.length; index += 1) {
+    const name = apps[index];
+    all[name] = {
+      call: async (method, input) => unwrapped(await host.callExport(name, method, input)),
+    };
+  }
+  return guarded(all);
+};
+`;
+
+/**
+ * The main module of a run of workflow `id`: the engine the SDK runs on,
+ * each of its calls sent to core's host (host.ts), and each error in plain
+ * data both ways. Its connections and its App go through the host too,
+ * which knows the step running. A binding the run doesn't have (a permission revoked
+ * since, or never granted) fails with a permission error, not `undefined`.
+ * It imports what builds the bindings (`runBindings`) before the
+ * workflow's module, so that is built from the runtime's own built-ins.
+ */
+const runMain = (
+  id: WorkflowId
+): string => `import { WorkerEntrypoint } from "cloudflare:workers";
+import { bindings, unwrapped } from ${JSON.stringify(runBindingsModule)};
+import definition from ${JSON.stringify(appModuleName(workflowPaths(id).workflow))};
+${settling}
 
 export class Run extends WorkerEntrypoint {
   async run(host, { runId, params, input, connections, apps }) {
@@ -263,7 +285,7 @@ export class Run extends WorkerEntrypoint {
       const engine = {
         runId,
         params,
-        env: bindings(withConnections(this.env, host, connections, apps)),
+        env: bindings(this.env, host, connections, apps),
         do: async (name, options, fn) => unwrapped(await host.do(name, options, async () => await settled(fn))),
         sleep: async (name, milliseconds) => unwrapped(await host.sleep(name, milliseconds)),
         waitForEvent: async (name, options) => unwrapped(await host.waitForEvent(name, options)),
@@ -412,6 +434,7 @@ export const loadRun = (
     mainModule: runModule,
     modules: {
       ...(await modulesOf(env, version, files)),
+      [runBindingsModule]: runBindings,
       [runModule]: runMain(workflow),
     },
     env: runEnv,
