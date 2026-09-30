@@ -224,7 +224,9 @@ export interface ConnectionOwner {
  * provider URL to send the browser to; the provider sends it back to
  * core's callback, which returns it to `returnTo` (a path on this origin)
  * with `connection=<id>` once it finished, or to the Connections page with
- * `connectionError=<code>` when it didn't.
+ * `connectionError=<code>` when it didn't. Reconnecting a connection that
+ * needs it (`needs_reauth`) is starting one for its provider and scope:
+ * finished with the account it holds, it is that connection again.
  */
 export interface ConnectionsApi {
   start: (request: {
@@ -615,7 +617,13 @@ export interface ConnectApi {
   call: (call: ConnectCall) => Promise<ConnectResult>;
   /** The provider URL to send the person's browser to. */
   startConnection: (request: StartConnection) => Promise<{ url: string }>;
-  /** Finishes a flow the same person started: the new connection. */
+  /**
+   * Finishes a flow the same person started: the new connection, or the
+   * one that needed connecting again (`needs_reauth`) and holds the account
+   * the flow came back with, which keeps its ID and its permissions. That
+   * one only for its owner, or, if shared, an admin; anyone else, or any
+   * other connection holding the account, is `connection.already_connected`.
+   */
   finishConnection: (
     request: FinishConnection
   ) => Promise<{ connectionId: string; returnTo: string }>;

@@ -66,6 +66,17 @@ const Connections = () => {
         ])
       : []
   );
+  // The entries people are offered: an admin sees hidden ones too, marked;
+  // anyone else isn't listed them at all. Unknown while the catalog isn't
+  // read, and then core alone says.
+  const offered =
+    catalog.state === "ready"
+      ? new Set(
+          catalog.data.entries
+            .filter((entry) => entry.offered)
+            .map(({ source, id }) => `${source}:${id}`)
+        )
+      : undefined;
   const listed = connections.state === "ready" ? connections.data : [];
   // Only a connection the page lists: anyone can put an ID in a link.
   const connected =
@@ -87,6 +98,7 @@ const Connections = () => {
           <ConnectionList
             connections={listed.filter(({ scope }) => scope === "personal")}
             names={names}
+            offered={offered}
             held={held}
             identity={identity}
             empty="You haven't connected an account of your own yet."
@@ -102,6 +114,7 @@ const Connections = () => {
           <ConnectionList
             connections={listed.filter(({ scope }) => scope === "shared")}
             names={names}
+            offered={offered}
             held={held}
             identity={identity}
             empty="Your organization has no shared connections yet."

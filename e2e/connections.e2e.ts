@@ -31,10 +31,10 @@ const cardOf = (
     }),
   });
 
-test("a person comes back from connecting Microsoft 365, sees it with its scope, and disconnects one that needs connecting again", async ({
+test("a person comes back from connecting Microsoft 365, sees it with its scope, and is offered to reconnect or disconnect one that needs connecting again", async ({
   browser,
 }) => {
-  const { user } = peopleIn("connections");
+  const { admin, user } = peopleIn("connections");
   const { mine, expired } = seededConnections();
   const page = await pageOf(browser, user);
   // A link can name any ID: only a connection the page lists is news.
@@ -58,12 +58,45 @@ test("a person comes back from connecting Microsoft 365, sees it with its scope,
     /\S/u,
   ]);
 
-  // Still holding its account, it offers Disconnect, and says why.
+  // Its access ran out: it offers Reconnect, which starts the provider's
+  // flow again. The test stack has no Microsoft tenant set up, so core
+  // refuses the start, and the card says so.
   const expiredCard = cardOf(own, "Microsoft 365", expired);
   await expect(expiredCard.getByText("Needs connecting again")).toBeVisible();
+  await expiredCard
+    .getByRole("button", {
+      name: `Reconnect Microsoft 365 (${expired.account})`,
+    })
+    .click();
+  await expect(expiredCard.getByRole("alert")).toHaveText(
+    "Connecting this provider isn't set up for this deployment."
+  );
+  // While an admin doesn't offer Microsoft 365, core refuses every start:
+  // the card offers no Reconnect, and says what has to happen first. The
+  // catalog no longer lists the entry to this person, so its ID stands in
+  // for its name.
+  const { core, api } = apiOf(admin);
+  try {
+    await api.connections.setOffered("native", "microsoft", false);
+    await page.reload();
+    const hiddenCard = cardOf(own, "microsoft", expired);
+    await expect(
+      hiddenCard.getByText(
+        "An admin must offer this connector again before it can be reconnected."
+      )
+    ).toBeVisible();
+    await expect(
+      hiddenCard.getByRole("button", { name: /^Reconnect/u })
+    ).toHaveCount(0);
+  } finally {
+    await api.connections.setOffered("native", "microsoft", true);
+    core[Symbol.dispose]();
+  }
+  await page.reload();
   await expect(
-    expiredCard.getByText("Disconnect it, then connect it again.")
+    expiredCard.getByRole("button", { name: /^Reconnect/u })
   ).toBeVisible();
+  // It can be disconnected instead.
   await expiredCard
     .getByRole("button", {
       name: `Disconnect Microsoft 365 (${expired.account})`,
@@ -79,8 +112,8 @@ test("a person comes back from connecting Microsoft 365, sees it with its scope,
   await expect(page.getByRole("status")).toHaveCount(0);
   expect(new URL(page.url()).search).toBe("");
 
-  // Connecting it again before disconnecting comes back refused, and says
-  // what to do; a code nobody knows says only the page's own words.
+  // Connecting an account a connection already holds comes back refused,
+  // and says what to do; a code nobody knows says only the page's own words.
   await page.goto("/connections?connectionError=connection.already_connected");
   await expect(page.getByRole("alert")).toHaveText(
     "That account is already connected here. Disconnect it first to connect it again."

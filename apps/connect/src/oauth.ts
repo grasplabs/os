@@ -71,6 +71,13 @@ import type { Vault } from "./vault.ts";
 // bits, single-use and valid for ten minutes; only its hash is stored. The
 // PKCE verifier never leaves connect, so the code alone, which core sees on
 // the callback, is useless (CN3).
+//
+// Connecting again is the same flow. A connection whose grant ran out
+// (`needs_reauth`) keeps its account, and a flow that comes back with that
+// account, finished by someone who could have connected it as it is, gives
+// it its new tokens: the same connection, so every permission on it stands.
+// Nothing names the connection to reconnect: the account the provider
+// vouches for does, so signing in to another account never reaches it.
 
 /**
  * Whether `account` is the person's own: the account they sign in with at
@@ -91,14 +98,17 @@ const isOwnAccount = (
   return account.email?.toLowerCase() === person.email.toLowerCase();
 };
 
+type ConnectionRow = typeof connections.$inferSelect;
+type FlowRow = typeof oauthFlows.$inferSelect;
+
 /** The live connection that already holds `accountId`, if any. */
 const connectionHolding = async (
   env: Env,
   provider: string,
   accountId: string
-): Promise<string | undefined> => {
-  const held = await drizzle(env.DB)
-    .select({ id: connections.id })
+): Promise<ConnectionRow | undefined> =>
+  await drizzle(env.DB)
+    .select()
     .from(connections)
     .where(
       and(
@@ -108,8 +118,22 @@ const connectionHolding = async (
       )
     )
     .get();
-  return held?.id;
-};
+
+/**
+ * Whether finishing `flow` as `person` reconnects `held`, the connection
+ * holding the account the flow came back with: only one whose grant ran
+ * out, of the scope the flow asked for, and, if personal, the person's own.
+ * A shared one is any admin's to reconnect, as it is to disconnect; the
+ * caller checked the role.
+ */
+const reconnects = (
+  held: ConnectionRow,
+  flow: FlowRow,
+  person: ConnectionPerson
+): boolean =>
+  held.status === "needs_reauth" &&
+  held.scope === flow.scope &&
+  (held.scope === "shared" || held.ownerUserId === person.userId);
 
 /** Only admins connect or disconnect what the organization shares. */
 const mayManage = (person: ConnectionPerson, scope: ConnectionScope): boolean =>
@@ -245,8 +269,9 @@ export const abandonFlow = async (env: Env, state: unknown): Promise<void> => {
 
 /**
  * Drops tokens minted for a connection that won't be made, revoking them
- * unless a live connection holds the same account: at Google, revoking any
- * token of a grant revokes all of it.
+ * unless an active connection holds the same account: at Google, revoking
+ * any token of a grant revokes all of it. One that needs connecting again
+ * has no grant to lose, so what was minted for its account is revoked.
  */
 const dropMint = async (
   env: Env,
@@ -258,7 +283,7 @@ const dropMint = async (
     accountId === undefined
       ? undefined
       : await connectionHolding(env, provider.id, accountId);
-  if (held === undefined) {
+  if (held?.status !== "active") {
     await discardMint(provider, client, tokens);
   }
 };
@@ -273,7 +298,7 @@ const isDuplicate = (error: unknown): boolean =>
 const storeConnection = async (
   env: Env,
   { provider, vault }: Ready,
-  flow: typeof oauthFlows.$inferSelect,
+  flow: FlowRow,
   person: ConnectionPerson,
   account: ProviderAccount,
   tokens: TokenSet & { refreshToken: string }
@@ -316,9 +341,156 @@ const storeConnection = async (
 };
 
 /**
+ * Gives `held`, whose grant ran out, the tokens of a new one and makes it
+ * active again, in one write with its event. Only while it still needs
+ * them: of two reconnects at once one does it, and one that a disconnect
+ * got ahead of does nothing. Its ID if this call did, and `undefined` if
+ * it didn't or there was none to reconnect.
+ */
+const reconnect = async (
+  env: Env,
+  { provider, vault }: Ready,
+  flow: FlowRow,
+  person: ConnectionPerson,
+  held: ConnectionRow | undefined,
+  account: ProviderAccount,
+  tokens: TokenSet & { refreshToken: string }
+): Promise<string | undefined> => {
+  if (held === undefined) {
+    return undefined;
+  }
+  const now = new Date();
+  const db = drizzle(env.DB);
+  const row = await firstTokens(vault, held.id, tokens, now);
+  const stillWaiting = sql`${connections.id} = ${held.id} AND ${connections.status} = 'needs_reauth'`;
+  const reconnected = await recordEventIf(
+    env,
+    connectionEvent(person, "connection.reconnected", held.id, {
+      provider: provider.id,
+      scope: held.scope,
+      outcome: "ok",
+    }),
+    { from: connections, where: stillWaiting },
+    [
+      // Before the status changes: the same condition guards both.
+      db.insert(connectionTokens).select(
+        db
+          .select({
+            connectionId: sql<string>`${row.connectionId}`.as("connection_id"),
+            sealed: sql<string>`${row.sealed}`.as("sealed"),
+            accessExpiresAt: sql<Date>`${row.accessExpiresAt.getTime()}`.as(
+              "access_expires_at"
+            ),
+            generation: sql<number>`${row.generation}`.as("generation"),
+            refreshUntil: sql<null>`NULL`.as("refresh_until"),
+            updatedAt: sql<Date>`${now.getTime()}`.as("updated_at"),
+          })
+          .from(connections)
+          .where(stillWaiting)
+      ),
+      db
+        .update(connections)
+        .set({
+          status: "active",
+          tenant: flow.tenant,
+          accountName: account.name,
+          updatedAt: now,
+        })
+        .where(stillWaiting),
+    ]
+  );
+  return reconnected ? held.id : undefined;
+};
+
+/**
+ * Records a flow that didn't finish, naming the connection that holds the
+ * account it came back with, if one does.
+ */
+type Refuse = (
+  reason: string,
+  about?: { outcome?: "refused" | "failed"; connectionId?: string }
+) => Promise<void>;
+
+/**
+ * Keeps the tokens a flow came back with, once they are known to be for an
+ * account the person may connect: in the organization's tenant, their own
+ * for a personal connection, and held by no other connection, unless by
+ * one the person may reconnect (`reconnects`), which gets them. The
+ * connection's ID. Tokens that aren't kept are dropped (`dropMint`).
+ */
+const keepTokens = async (
+  env: Env,
+  setUp: Ready,
+  flow: FlowRow,
+  person: ConnectionPerson,
+  tokens: TokenSet,
+  refuse: Refuse
+): Promise<string> => {
+  const { provider, client } = setUp;
+  const claims = idTokenClaims(tokens.idToken);
+  const account = provider.account(claims, flow.tenant, client.id);
+  const accountId = account?.id ?? provider.subject(claims);
+  const held =
+    account === null
+      ? undefined
+      : await connectionHolding(env, provider.id, account.id);
+  const refusal = async (
+    reason:
+      | "connection.wrong_account"
+      | "connection.not_own_account"
+      | "connection.already_connected"
+      | "connection.provider_refused"
+  ): Promise<never> => {
+    // Even an account refused here may be one an active connection holds.
+    await dropMint(env, setUp, tokens, accountId);
+    await refuse(reason, { connectionId: held?.id });
+    throw connectionErrors.create(reason);
+  };
+  if (account === null) {
+    return await refusal("connection.wrong_account");
+  }
+  if (
+    flow.scope === "personal" &&
+    !isOwnAccount(person, provider.id, account)
+  ) {
+    return await refusal("connection.not_own_account");
+  }
+  if (held !== undefined && !reconnects(held, flow, person)) {
+    return await refusal("connection.already_connected");
+  }
+  const { refreshToken } = tokens;
+  if (refreshToken === undefined) {
+    // Without one the connection would die within the hour.
+    return await refusal("connection.provider_refused");
+  }
+  const kept = { ...tokens, refreshToken };
+  try {
+    // Stored as new when there is nothing to reconnect, or no longer:
+    // disconnected at the same moment, the account connects as new;
+    // reconnected by another flow, it is a duplicate.
+    return (
+      (await reconnect(env, setUp, flow, person, held, account, kept)) ??
+      (await storeConnection(env, setUp, flow, person, account, kept))
+    );
+  } catch (storeError) {
+    // Connected at the same moment by another flow: the grant is theirs.
+    if (isDuplicate(storeError)) {
+      await refuse("connection.already_connected", {
+        connectionId: held?.id,
+      });
+      throw connectionErrors.create("connection.already_connected");
+    }
+    await dropMint(env, setUp, tokens, account.id);
+    throw storeError;
+  }
+};
+
+/**
  * Finishes a flow with the provider's answer, for the person who started
  * it: exchanges the code, checks the account is in the organization's
- * tenant, and stores the connection with its tokens, sealed.
+ * tenant, and stores the connection with its tokens, sealed. A connection
+ * that holds the account and needs connecting again gets the tokens
+ * instead, if the person may reconnect it (`keepTokens`).
  */
 export const finishConnection = async (
   env: Env,
@@ -335,16 +507,22 @@ export const finishConnection = async (
   }
   const { person, state, code, error } = parsed.data;
   const flow = await takeFlow(env, state);
-  const refuse = async (
-    reason: string,
-    outcome: "refused" | "failed" = "refused"
-  ): Promise<void> => {
-    await auditRefusal(env, person, "connection.connect", {
-      provider: flow?.provider ?? null,
-      scope: flow?.scope ?? null,
-      outcome,
-      reason,
-    });
+  const refuse: Refuse = async (
+    reason,
+    { outcome = "refused", connectionId } = {}
+  ) => {
+    await auditRefusal(
+      env,
+      person,
+      "connection.connect",
+      {
+        provider: flow?.provider ?? null,
+        scope: flow?.scope ?? null,
+        outcome,
+        reason,
+      },
+      connectionId
+    );
   };
   const live =
     flow !== undefined &&
@@ -364,7 +542,7 @@ export const finishConnection = async (
     throw roleErrors.create("role.forbidden");
   }
   if (code === undefined || error !== undefined) {
-    await refuse("connection.provider_refused", "failed");
+    await refuse("connection.provider_refused", { outcome: "failed" });
     throw connectionErrors.create("connection.provider_refused");
   }
   const setUp = await ready(env, flow.provider);
@@ -382,63 +560,19 @@ export const finishConnection = async (
       provider: provider.id,
       ...errorFields(exchangeError),
     });
-    await refuse("connection.provider_refused", "failed");
+    await refuse("connection.provider_refused", { outcome: "failed" });
     throw connectionErrors.create("connection.provider_refused");
   }
 
-  const claims = idTokenClaims(tokens.idToken);
-  const account = provider.account(claims, flow.tenant, client.id);
-  const refusal = async (
-    reason:
-      | "connection.wrong_account"
-      | "connection.not_own_account"
-      | "connection.already_connected"
-      | "connection.provider_refused"
-  ): Promise<never> => {
-    // Even an account refused here may be one a live connection holds.
-    await dropMint(env, setUp, tokens, account?.id ?? provider.subject(claims));
-    await refuse(reason);
-    throw connectionErrors.create(reason);
-  };
-  if (account === null) {
-    return await refusal("connection.wrong_account");
-  }
-  if (
-    flow.scope === "personal" &&
-    !isOwnAccount(person, provider.id, account)
-  ) {
-    return await refusal("connection.not_own_account");
-  }
-  if ((await connectionHolding(env, provider.id, account.id)) !== undefined) {
-    return await refusal("connection.already_connected");
-  }
-  const { refreshToken } = tokens;
-  if (refreshToken === undefined) {
-    // Without one the connection would die within the hour.
-    return await refusal("connection.provider_refused");
-  }
-  try {
-    const connectionId = await storeConnection(
-      env,
-      setUp,
-      flow,
-      person,
-      account,
-      {
-        ...tokens,
-        refreshToken,
-      }
-    );
-    return { connectionId, returnTo: flow.returnTo };
-  } catch (storeError) {
-    // Connected at the same moment by another flow: the grant is theirs.
-    if (isDuplicate(storeError)) {
-      await refuse("connection.already_connected");
-      throw connectionErrors.create("connection.already_connected");
-    }
-    await dropMint(env, setUp, tokens, account.id);
-    throw storeError;
-  }
+  const connectionId = await keepTokens(
+    env,
+    setUp,
+    flow,
+    person,
+    tokens,
+    refuse
+  );
+  return { connectionId, returnTo: flow.returnTo };
 };
 
 /** The person's own connections and the shared ones, never disconnected ones. */
@@ -485,7 +619,7 @@ export const listConnections = async (
  */
 const revoke = async (
   env: Env,
-  connection: typeof connections.$inferSelect
+  connection: ConnectionRow
 ): Promise<boolean> => {
   const parsed = oauthProviderSchema.safeParse(connection.provider);
   if (!parsed.success) {
@@ -514,11 +648,16 @@ const revoke = async (
  * event, then drops the actions held for it, which can no longer run.
  * Returns whether the provider revoked the grant, and whether this call
  * stopped it (a concurrent one may have first).
+ *
+ * One read while it needed connecting again had no grant to revoke, so it
+ * is stopped only while it still needs that: if it was reconnected
+ * meanwhile, it is read again and stopped as the active connection it is
+ * now, with the new grant revoked, not only deleted.
  */
 const stop = async (
   env: Env,
   person: ConnectionPerson | null,
-  connection: typeof connections.$inferSelect,
+  connection: ConnectionRow,
   detail: Record<string, AuditDetailValue> = {}
 ): Promise<{ revoked: boolean; stopped: boolean }> => {
   const db = drizzle(env.DB);
@@ -530,7 +669,10 @@ const stop = async (
   const cleanupId = crypto.randomUUID();
   const revokedGrant = composio ? false : await revoke(env, connection);
   // Recorded only by the disconnect that stops it, if two run at once.
-  const stillConnected = sql`${connections.id} = ${connection.id} AND ${connections.status} <> 'disconnected'`;
+  const waiting = connection.status === "needs_reauth";
+  const stillConnected = waiting
+    ? sql`${connections.id} = ${connection.id} AND ${connections.status} = 'needs_reauth'`
+    : sql`${connections.id} = ${connection.id} AND ${connections.status} <> 'disconnected'`;
   const stopped = await recordEventIf(
     env,
     connectionEvent(person, "connection.disconnect", connection.id, {
@@ -547,11 +689,30 @@ const stop = async (
         .update(connections)
         .set({ status: "disconnected", updatedAt: new Date() })
         .where(stillConnected),
+      // After the status: only a stopped connection's tokens go.
       db
         .delete(connectionTokens)
-        .where(eq(connectionTokens.connectionId, connection.id)),
+        .where(
+          sql`${connectionTokens.connectionId} = ${connection.id} AND EXISTS (SELECT 1 FROM ${connections} WHERE ${connections.id} = ${connection.id} AND ${connections.status} = 'disconnected')`
+        ),
     ]
   );
+  const reconnected =
+    waiting && !stopped
+      ? await db
+          .select()
+          .from(connections)
+          .where(
+            and(
+              eq(connections.id, connection.id),
+              eq(connections.status, "active")
+            )
+          )
+          .get()
+      : undefined;
+  if (reconnected !== undefined) {
+    return await stop(env, person, reconnected, detail);
+  }
   await dropPendingActions(
     env,
     eq(pendingActions.connectionId, connection.id),

@@ -42,7 +42,7 @@ import { useChange } from "./use-change.ts";
 type Entry = OfferedCatalog["entries"][number];
 
 /** Where every flow sends the browser back to: this page. */
-const returnTo = "/connections";
+export const returnTo = "/connections";
 
 /**
  * Most entries shown at once: Composio lists thousands of toolkits, so the
@@ -59,7 +59,7 @@ const matches = (entry: Entry, query: string): boolean => {
 };
 
 /** Sends the browser to the provider, once core started the flow. */
-const goTo = (started: { url: string } | undefined): void => {
+export const goTo = (started: { url: string } | undefined): void => {
   if (started !== undefined) {
     window.location.assign(started.url);
   }
