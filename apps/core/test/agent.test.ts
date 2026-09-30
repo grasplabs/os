@@ -1,6 +1,7 @@
 import { agentErrors } from "@grasp-os/shared/agent";
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import { featureErrors } from "@grasp-os/shared/errors";
+import type { WorkspaceId } from "@grasp-os/shared/ids";
 import { modelErrors } from "@grasp-os/shared/models";
 import { permissionErrors } from "@grasp-os/shared/permissions";
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
@@ -15,6 +16,7 @@ import {
   maxSteps,
 } from "../src/agent.ts";
 import { codeLimits } from "../src/code-mode.ts";
+import { workspace } from "../src/durable-objects.ts";
 import {
   chatOf,
   codeResults,
@@ -26,6 +28,7 @@ import {
   says,
   transcript,
 } from "./agent-chat.ts";
+import type { WorkspaceStub } from "./agent-chat.ts";
 import { fakeGateway } from "./ai-gateway.ts";
 import type { GatewayReply } from "./ai-gateway.ts";
 import { allEvents } from "./audit-events.ts";
@@ -813,7 +816,81 @@ describe("chat agent turns", () => {
   });
 });
 
+/**
+ * Restarts the workspace's object where it is, as a deploy does: a stub to
+ * reach it by from then on, as the one it was restarted through is broken.
+ */
+const restart = async (id: WorkspaceId): Promise<WorkspaceStub> => {
+  await runInDurableObject(workspace(env, id), (_instance, state) => {
+    state.abort("Restarted by the test");
+  }).catch(() => {
+    // Aborting fails the call that aborted: that is the restart.
+  });
+  return workspace(env, id);
+};
+
+/** What the chat's agent said in the chat, oldest first. */
+const saidIn = async (stub: WorkspaceStub, chatId: string) => {
+  const messages = await transcript(stub, chatId);
+  return messages.flatMap((message) =>
+    message.role === "assistant"
+      ? [
+          message.content
+            .flatMap((part) => (part.type === "text" ? [part.text] : []))
+            .join(""),
+        ]
+      : []
+  );
+};
+
+/** Whether the agent's message is the one a cut-short turn leaves. */
+const saysInterrupted = (text: string): boolean =>
+  text.startsWith("I was interrupted before I finished");
+
 describe("chat agent after a restart", () => {
+  it("says nothing of a turn that ended before the restart: answered, stopped by the person, or failed", async () => {
+    const answered = await newChat(says("Done."));
+    await answered.ask("Do it.");
+
+    const stopped = await newChat({ hang: true });
+    const cancelled = stopped.ask("Take your time.");
+    await vi.waitFor(
+      () => {
+        expect(stopped.gateway.requests).toHaveLength(1);
+      },
+      { timeout: 10_000 }
+    );
+    await stopped.stub.cancel(stopped.chat.id, stopped.personId);
+    await cancelled;
+
+    // The agent is switched off while the model answers: the turn throws.
+    const { reply, release } = pausedReply(
+      { ...codeStep("export default async () => 'done';"), text: "Running." },
+      1
+    );
+    const failed = await newChat(reply);
+    const failing = codeOf(failed.ask("Wait."));
+    await vi.waitFor(
+      () => {
+        expect(failed.gateway.requests).toHaveLength(1);
+      },
+      { timeout: 10_000 }
+    );
+    await pointAtGateway(failed.stub, failed.gateway, { agentOn: false });
+    release();
+    await expect(failing).resolves.toBe("feature.disabled");
+
+    const said: boolean[] = [];
+    for (const { id, chat } of [answered, stopped, failed]) {
+      // oxlint-disable-next-line no-await-in-loop -- one chat after the other
+      const woken = await restart(id);
+      // oxlint-disable-next-line no-await-in-loop -- one chat after the other
+      const texts = await saidIn(woken, chat.id);
+      said.push(texts.some(saysInterrupted));
+    }
+    expect(said).toStrictEqual([false, false, false]);
+  });
+
   it("continues the conversation with everything before it", async () => {
     const { stub, chat, ask } = await newChat(
       codeStep("export default async (env) => (await env.chat.info()).chatId;"),

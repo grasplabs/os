@@ -214,13 +214,50 @@ const stopReason = (chatId: ChatId, error: unknown): string => {
   return internalErrors.create("internal.unexpected").message;
 };
 
+/**
+ * Marks a chat's turn as under way in the object's storage, as
+ * `turn:<chat>`: what memory forgets when the object restarts (a deploy,
+ * say), so the next wake can say the turn was cut short.
+ */
+const turnKeyPrefix = "turn:";
+
+/**
+ * What a chat says in place of the answer a restart cut short: the person
+ * reads it, and so does the agent on the next turn. The agent's message,
+ * in core's words: no model wrote it, so it names none and cost nothing.
+ */
+const interruptedMessage = (): AssistantMessage => ({
+  role: "assistant",
+  content: [
+    {
+      type: "text",
+      text: "I was interrupted before I finished, so what I was doing may be incomplete. Ask again and I'll go on from here.",
+    },
+  ],
+  api: "grasp",
+  provider: "grasp",
+  model: "grasp",
+  usage: {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  },
+  stopReason: "stop",
+  timestamp: Date.now(),
+});
+
 /** A person's or team's workspace: chats and the Code Mode agent on Pi. */
 export class Workspace extends DurableObject<Env> {
   readonly #db = drizzle(this.ctx.storage);
 
   /**
    * The turns running now, by chat, to cancel them. Only in memory: a turn
-   * ends with the object, and the chat goes on from what it stored.
+   * ends with the object, and the chat goes on from what it stored. Each
+   * is also marked in storage while it runs (`turnKeyPrefix`), so the wake
+   * after a restart tells the chat its turn was cut short.
    */
   readonly #turns = new Map<ChatId, AbortController>();
 
@@ -299,6 +336,48 @@ export class Workspace extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     migrateOnWake(ctx, migrations);
+    this.#closeInterruptedTurns();
+  }
+
+  /**
+   * Tells each chat whose turn the last restart cut short that it was
+   * (`interruptedMessage`), and clears its mark: no turn runs yet when the
+   * object wakes, so every mark left is of one that never ended. Nothing is
+   * resumed. In one transaction, so a wake that dies here says it once.
+   */
+  #closeInterruptedTurns(): void {
+    const { kv } = this.ctx.storage;
+    this.ctx.storage.transactionSync(() => {
+      // Read whole first: the marks are deleted while going through them.
+      const marks = Array.from(
+        kv.list({ prefix: turnKeyPrefix }),
+        ([key]) => key
+      );
+      for (const key of marks) {
+        const chatId = chatIdSchema.parse(key.slice(turnKeyPrefix.length));
+        // Cut short before its question was kept, there is nothing to go
+        // on from, and the chat's first turn must still start it.
+        if (this.#storedChars(chatId) > 0) {
+          this.#keep(chatId, interruptedMessage());
+        }
+        kv.delete(key);
+      }
+    });
+  }
+
+  /** Stores `message` as the chat's next, and shows it to its watchers. */
+  #keep(chatId: ChatId, message: Message): void {
+    const { id, createdAt } = this.#db
+      .insert(chatMessages)
+      .values({
+        chatId,
+        message: JSON.stringify(message),
+        createdAt: new Date(),
+      })
+      .returning({ id: chatMessages.id, createdAt: chatMessages.createdAt })
+      .get();
+    const shown = chatMessageOf(id, message, createdAt);
+    this.#changed(chatId, shown === undefined ? [] : [shown]);
   }
 
   /**
@@ -585,6 +664,8 @@ export class Workspace extends DurableObject<Env> {
     // and the chat isn't deleted under it (`deleteChat`).
     const cancel = new AbortController();
     this.#turns.set(chat.id, cancel);
+    // Marked in storage as long as it is in `#turns`, however it ends.
+    this.ctx.storage.kv.put(`${turnKeyPrefix}${chat.id}`, true);
     try {
       if (!(await memberRole(this.env.DB, personId))) {
         throw permissionErrors.create("permission.person_inactive");
@@ -653,23 +734,10 @@ export class Workspace extends DurableObject<Env> {
         loader: this.env.LOADER,
         signal: cancel.signal,
         keep: (message) => {
-          const { id, createdAt } = this.#db
-            .insert(chatMessages)
-            .values({
-              chatId: chat.id,
-              message: JSON.stringify(message),
-              createdAt: new Date(),
-            })
-            .returning({
-              id: chatMessages.id,
-              createdAt: chatMessages.createdAt,
-            })
-            .get();
           if (message.role === "assistant") {
             this.#partials.delete(chat.id);
           }
-          const shown = chatMessageOf(id, message, createdAt);
-          this.#changed(chat.id, shown === undefined ? [] : [shown]);
+          this.#keep(chat.id, message);
         },
         write: (partial) => {
           this.#partials.set(chat.id, partial);
@@ -684,6 +752,7 @@ export class Workspace extends DurableObject<Env> {
         },
       };
     } finally {
+      this.ctx.storage.kv.delete(`${turnKeyPrefix}${chat.id}`);
       this.#turns.delete(chat.id);
       this.#partials.delete(chat.id);
       this.#changed(chat.id);
@@ -752,7 +821,8 @@ export class Workspace extends DurableObject<Env> {
    * object runs while an event of its own does, so it isn't evicted under
    * a turn nobody waits on. An alarm may run 15 minutes; a turn that takes
    * longer goes on while the object stays up. After a restart there are
-   * none: the chat goes on from what it stored.
+   * none: the chat goes on from what it stored, told that its turn was cut
+   * short (`#closeInterruptedTurns`).
    */
   override async alarm(): Promise<void> {
     // Audit events the log didn't take yet go first: a turn may run long.
