@@ -1,7 +1,8 @@
 import { z } from "zod";
 
 import type { OutboxedAuditEvent, OutboxRejected } from "./audit.ts";
-import { defineErrorFamily } from "./errors.ts";
+import { defineErrorFamily, isExpectedError } from "./errors.ts";
+import type { CodedError } from "./errors.ts";
 import {
   chatIdSchema,
   connectionIdSchema,
@@ -635,10 +636,14 @@ export interface PendingActionsApi {
   list: () => Promise<PendingAction[]>;
   /**
    * Runs the held action `id`, with the input whose hash is `inputHash`,
-   * once: its answer, as the call would have had it.
+   * once: its answer, as the call would have had it. A chat's agent is
+   * told, on its next turn, that its action ran, or failed once confirmed.
    */
   confirm: (id: string, inputHash: string) => Promise<ConnectResult>;
-  /** Drops the held action `id`: it never runs. */
+  /**
+   * Drops the held action `id`: it never runs. A chat's agent is told so
+   * on its next turn.
+   */
   decline: (id: string) => Promise<void>;
 }
 
@@ -942,3 +947,34 @@ export const connectErrors = defineErrorFamily({
   "connect.catalog_unavailable":
     "Composio's toolkits can't be listed right now. Try again shortly.",
 });
+
+/**
+ * An error of a held action's confirmation that came after connect took the
+ * action (`confirmAction`), so it no longer waits and it failed: marked in
+ * its details, which cross RPC with it. A refusal before connect took it,
+ * which leaves it waiting, never is. Only a confirmation that took the
+ * action tells anyone it failed, so a refused one racing it can't. An
+ * unexpected error goes as `connect.action_failed`, marked too, so every
+ * failure after the take reaches core marked; its internals stay with
+ * connect, which logs them.
+ */
+export const markTaken = (error: unknown): CodedError => {
+  const coded = isExpectedError(error)
+    ? error
+    : connectErrors.create("connect.action_failed");
+  coded.details = { ...coded.details, taken: true };
+  return coded;
+};
+
+/** Whether `error` is one `markTaken` marked. */
+export const wasTaken = (error: unknown): boolean => {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+  const details: unknown = Reflect.get(error, "details");
+  return (
+    typeof details === "object" &&
+    details !== null &&
+    Reflect.get(details, "taken") === true
+  );
+};

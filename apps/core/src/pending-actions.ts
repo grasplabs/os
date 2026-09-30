@@ -1,4 +1,4 @@
-import { connectErrors } from "@grasp-os/shared/connect";
+import { connectErrors, wasTaken } from "@grasp-os/shared/connect";
 import type {
   ConnectResult,
   PendingAction,
@@ -22,9 +22,11 @@ import { z } from "zod";
 import { signedCall } from "./bindings.ts";
 import { personOf } from "./connections.ts";
 import { workflowRuns } from "./db/core/schema.ts";
+import { workspace } from "./durable-objects.ts";
 import { isRestricted } from "./restricted.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
+import type { HeldOutcome } from "./workspace.ts";
 
 // Side effects that connect holds for their person (threat model R7, R12):
 // from chat, from a person using an App, and every one of a context that
@@ -69,12 +71,41 @@ const runEnded = async (env: Env, held: PendingAction): Promise<boolean> => {
 };
 
 /**
+ * Tells the chat a held action came from how it ended, for its agent's
+ * next turn (`Workspace.heldDecided`): only the agent that asked for it, in
+ * the chat it asked from, and only that chat's own person's decision. Right
+ * after the decision, which connect keeps: the two can't be one write. A
+ * failure is logged, and the decision stands.
+ */
+const tellChat = async (
+  env: Env,
+  held: PendingAction,
+  userId: string,
+  outcome: HeldOutcome
+): Promise<void> => {
+  if (held.context.type !== "chat") {
+    return;
+  }
+  const { workspaceId, chatId } = held.context;
+  try {
+    await workspace(env, workspaceId).heldDecided(
+      chatId,
+      userId,
+      { id: held.id, action: held.action },
+      outcome
+    );
+  } catch (error) {
+    log.warn("chat.held_outcome_failed", { chatId, ...errorFields(error) });
+  }
+};
+
+/**
  * Runs the held action `id` for the signed-in person it waits for, with
  * the input they were shown (`inputHash`): its answer, as the call would
  * have had it. Refused like any call once the App's or agent's permission
  * is gone, its context is restricted, or the person has left; and by
  * connect for anyone the action doesn't wait for, Grasp staff included,
- * which it records.
+ * which it records. A chat's agent is told how it ended (`tellChat`).
  */
 export const confirmPendingAction = async (
   env: Env,
@@ -144,7 +175,40 @@ export const confirmPendingAction = async (
     });
     throw error;
   }
-  return await env.CONNECT.confirmAction({ ...request, capability });
+  let result: ConnectResult;
+  try {
+    result = await env.CONNECT.confirmAction({ ...request, capability });
+  } catch (error) {
+    // Only when this confirmation took it (`markTaken`): a refused one
+    // tells nothing, whatever another decision did meanwhile.
+    if (wasTaken(error)) {
+      await tellChat(env, held, identity.userId, "failed");
+    }
+    throw error;
+  }
+  await tellChat(env, held, identity.userId, "confirmed");
+  return result;
+};
+
+/**
+ * Drops the held action `id` for the signed-in person it waits for: it
+ * never runs. Connect refuses anyone the action doesn't wait for, and
+ * records it. A chat's agent is told (`tellChat`).
+ */
+const declinePendingAction = async (
+  env: Env,
+  identity: Identity,
+  id: string
+): Promise<void> => {
+  const person = await personOf(env, identity);
+  // Read before it goes, to know which chat to tell: only the person's own.
+  const held = z.uuid().safeParse(id).success
+    ? await env.CONNECT.pendingAction({ person, id })
+    : null;
+  await env.CONNECT.declineAction({ person, id });
+  if (held !== null) {
+    await tellChat(env, held, identity.userId, "declined");
+  }
 };
 
 /** `isRestricted`, or `true` for a context that can no longer be read. */
@@ -240,11 +304,7 @@ export class PendingActionsRpc extends RpcTarget implements PendingActionsApi {
 
   async decline(id: string): Promise<void> {
     await withPerson(this.#check, async (person) => {
-      // Connect refuses anyone the action doesn't wait for, and records it.
-      await this.#env.CONNECT.declineAction({
-        person: await personOf(this.#env, person),
-        id,
-      });
+      await declinePendingAction(this.#env, person, id);
     });
   }
 }

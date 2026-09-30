@@ -32,7 +32,10 @@ import {
 import type { ChatId } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
 import { modelErrors } from "@grasp-os/shared/models";
-import { permissionErrors } from "@grasp-os/shared/permissions";
+import {
+  permissionActionSchema,
+  permissionErrors,
+} from "@grasp-os/shared/permissions";
 import type { ScreenProblem } from "@grasp-os/shared/screens";
 import type { RunFailure } from "@grasp-os/shared/workflows";
 import { DurableObject } from "cloudflare:workers";
@@ -244,6 +247,31 @@ const interruptedMessage = (): AssistantMessage => ({
   stopReason: "stop",
   timestamp: Date.now(),
 });
+
+/** How a write a chat's agent had held for its person ended. */
+export type HeldOutcome = "confirmed" | "declined" | "failed";
+
+/** A held write, as its chat's agent knows it: the ID its call answered with. */
+const heldSchema = z.strictObject({
+  id: z.uuid(),
+  action: permissionActionSchema,
+});
+
+/**
+ * What the agent is told of each outcome. Nothing of the action's answer:
+ * that is an outside system's data, which the agent reads as a call's
+ * result (`env.connections.outcome`, which the note names), never as one
+ * of its instructions. Each says not to ask for the write again: a repeat
+ * would be another write.
+ */
+const heldOutcomes: Record<HeldOutcome, string> = {
+  confirmed:
+    "The person confirmed it and it was carried out. Don't ask for it again.",
+  declined:
+    "The person declined it: it was not carried out and won't be. Don't ask for it again unless they say so.",
+  failed:
+    "The person confirmed it, but carrying it out failed, so it may not have been done. It no longer waits for them; don't ask for it again unless they say so.",
+};
 
 /** A person's or team's workspace: chats and the Code Mode agent on Pi. */
 export class Workspace extends DurableObject<Env> {
@@ -1165,6 +1193,36 @@ export class Workspace extends DurableObject<Env> {
   heldChanged(chatId: ChatId): void {
     this.#heldVersions.set(chatId, (this.#heldVersions.get(chatId) ?? 0) + 1);
     this.#changed(chatId);
+  }
+
+  /**
+   * Tells the agent of `personId`'s own chat how a write it had held for
+   * them ended (pending-actions.ts), which it otherwise never learns: kept
+   * as a system message, so every later request of the chat carries it,
+   * and one landing in the middle of a turn never parts a code step from
+   * its result. The person isn't shown it: they decided it. No turn starts.
+   */
+  heldDecided(
+    chatId: unknown,
+    personId: string,
+    held: { id: string; action: string },
+    outcome: HeldOutcome
+  ): void {
+    const chat = this.#ownChat(chatId, personId);
+    const { id, action } = heldSchema.parse(held);
+    const message: Message = {
+      role: "system",
+      content: `The change you asked for, "${action}" (pending ID ${id}), was decided. ${heldOutcomes[outcome]} Read how it ended, with what it returned, with \`env.connections.outcome("${id}")\`.`,
+      timestamp: Date.now(),
+    };
+    this.#db
+      .insert(chatMessages)
+      .values({
+        chatId: chat.id,
+        message: JSON.stringify(message),
+        createdAt: new Date(),
+      })
+      .run();
   }
 
   // A chat's drafts of Apps (agent-builds.ts). Only core calls these, for
