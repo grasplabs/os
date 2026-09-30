@@ -11,6 +11,7 @@ import { saveDocument } from "../src/knowledge/documents.ts";
 import { saveRecordAsDelegate } from "../src/knowledge/records.ts";
 import { restrict } from "../src/restricted.ts";
 import { grantReviewed, release, requestGranted, serverBuilt } from "./apps.ts";
+import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
 import { fullScan, planOf, recordedQueries } from "./query-plans.ts";
 import {
@@ -31,13 +32,16 @@ import {
 // field is changed by anyone but the method that owns it (a person, the
 // App's other methods, another App declaring the same type), dropped by a
 // save that leaves it out, or laundered through a version of another
-// type, while its type is declared or while nobody declares it (its
-// owner's version unapproved, the flag off); another App takes a type over, or blocks it with a schema of its
-// own; a purge is refused because a record's type is no longer declared
-// or its text no longer fits; the stub writes without a permission to
-// write, for someone who couldn't write themselves, or from a context
-// that read restricted data; the write isn't traced to the App, the
-// person and how; and finding the types reads a table whole.
+// type: a plain doc, another App's type whose own method sets a field of
+// that name, or any type while nobody declares the record's (its owner's
+// version unapproved, the flag off); a record of a type no App has any
+// more is stuck as it is for good; another App takes a type over, or
+// blocks it with a schema of its own; a purge is refused because a
+// record's type is no longer declared or its text no longer fits; the
+// stub writes without a permission to write, for someone who couldn't
+// write themselves, or from a context that read restricted data; the
+// write isn't traced to the App, the person and how; and finding the
+// types reads a table whole.
 
 const idp = mockIdp();
 
@@ -584,7 +588,7 @@ describe("record types an App declares", { timeout: 60_000 }, () => {
     });
   });
 
-  it("keep a kept field while nobody declares their type: a record stays of it through a version nobody approved yet, and with the flag off", async () => {
+  it("keep a kept field while nobody declares their type: a record stays of it through a version nobody approved yet, and with the flag off, until no App has the type and an admin makes it a doc", async () => {
     const admin = await signedInApi(idp, "admin");
     const builder = await signedInApi(idp, "builder");
     const { id: collectionId } = await admin.api.knowledge.createCollection({
@@ -650,6 +654,23 @@ describe("record types an App declares", { timeout: 60_000 }, () => {
         sealed.ok.id,
       ])
     );
+    // Its owner may no longer write the collection: no App has the type
+    // any more, and nothing would make the record writable again. An
+    // admin, and only an admin, makes it a plain doc, and the log says so.
+    await admin.api.permissions.revoke(ownerGrant);
+    const released = {
+      // The collection's owner, who may write it, as a builder.
+      byBuilder: await outcome(
+        saveDocument(
+          env,
+          { ...(await admin.api.whoami()), role: "builder" },
+          { collectionId, path, text: asDoc, ifVersion: 1 }
+        )
+      ),
+      toDecision: await plain("---\ntype: decision\n---\nDecided.\n"),
+      toDoc: await plain(asDoc),
+    };
+    const events = await allEvents();
     const refused = {
       toDoc: "knowledge.invalid",
       unsealed: "knowledge.invalid",
@@ -660,12 +681,32 @@ describe("record types an App declares", { timeout: 60_000 }, () => {
       approved,
       version: sealed.ok.currentVersion,
       seal: read.ok.record.seal,
+      released,
+      audited: events
+        .filter(
+          ({ action, target }) =>
+            action === "knowledge.document.saved" && target?.id === sealed.ok.id
+        )
+        .map(({ actor, detail }) => [
+          actor.type === "person" ? actor.userId : actor.type,
+          detail.version,
+          detail.releasedType ?? null,
+        ]),
     }).toStrictEqual({
       unapproved: refused,
       off: "knowledge.invalid",
       approved: refused,
       version: 1,
       seal: "signed",
+      released: {
+        byBuilder: "knowledge.invalid",
+        toDecision: "knowledge.invalid",
+        toDoc: "ok",
+      },
+      audited: [
+        ["app", 1, null],
+        [admin.userId, 2, "task"],
+      ],
     });
   });
 
@@ -740,6 +781,59 @@ describe("record types an App declares", { timeout: 60_000 }, () => {
         ifVersion: 1,
       })
     );
+    // A third App's type that keeps a `seal` too, set by its own method:
+    // that method sets its own type's seal, never the task's, so its save
+    // over a sealed task, with a seal or with none, drops nothing.
+    const memos = await recordsApp(
+      admin,
+      JSON.stringify({
+        memo: {
+          collection: collectionId,
+          schema: {
+            type: "object",
+            properties: { seal: { type: "string", maxLength: 64 } },
+          },
+          kept: [{ method: "seal", fields: ["seal"] }],
+        },
+      })
+    );
+    await requestGranted(idp, admin, collectionFor(memos, collectionId));
+    const sealedPath = `tasks/${unique()}.md`;
+    const sealed = savedSchema.parse(
+      await callApp(
+        env,
+        app,
+        as(admin.userId),
+        "seal",
+        saveArgs(sealedPath, { type: "task", status: "open", seal: "signed" })
+      )
+    );
+    const asMemo = async (record: Record<string, unknown>) =>
+      await callApp(
+        env,
+        memos,
+        as(admin.userId),
+        "seal",
+        saveArgs(sealedPath, { type: "memo", ...record }, 1)
+      );
+    const memoOverTask = {
+      unset: await asMemo({ seal: undefined }),
+      forged: await asMemo({ seal: "forged" }),
+    };
+    const stillSealed = recordSchema.parse(
+      await callApp(env, app, as(admin.userId), "record", [
+        "TASKS",
+        sealed.ok.id,
+      ])
+    );
+    // Over a task without a seal, its own method does set the memo's.
+    const memoOverUnsealed = await callApp(
+      env,
+      memos,
+      as(admin.userId),
+      "seal",
+      saveArgs(other, { type: "memo", seal: "stamped" }, 2)
+    );
     expect({
       asDoc,
       toTask,
@@ -747,6 +841,9 @@ describe("record types an App declares", { timeout: 60_000 }, () => {
       seal: read.ok.record.seal,
       asNote,
       noteToTask,
+      memoOverTask,
+      stillSealed: [stillSealed.ok.record.type, stillSealed.ok.record.seal],
+      memoOverUnsealed: savedSchema.safeParse(memoOverUnsealed).success,
     }).toStrictEqual({
       asDoc: "ok",
       toTask: "knowledge.invalid",
@@ -754,6 +851,12 @@ describe("record types an App declares", { timeout: 60_000 }, () => {
       seal: undefined,
       asNote: "ok",
       noteToTask: "knowledge.invalid",
+      memoOverTask: {
+        unset: { error: "knowledge.invalid" },
+        forged: { error: "knowledge.invalid" },
+      },
+      stillSealed: ["task", "signed"],
+      memoOverUnsealed: true,
     });
   });
 
@@ -1111,6 +1214,24 @@ describe("record types an App declares", { timeout: 60_000 }, () => {
       })
     );
     expect(texts).toStrictEqual([false, false]);
+
+    // A term that is the type's own name goes from the frontmatter too: the
+    // record is then of a type nobody can declare, which an admin's save
+    // as a plain doc takes it out of.
+    const typeName = { ...input, terms: ["task"] };
+    const typePlan = await admin.api.knowledge.preparePurge(typeName);
+    await admin.api.knowledge.purge(typeName, typePlan.token);
+    const purged = await admin.api.knowledge.getDocument(fits.id);
+    const asDoc = await admin.api.knowledge.saveDocument({
+      collectionId,
+      path: purged.path,
+      text: "---\ntype: doc\n---\nNo longer a task.\n",
+      ifVersion: purged.currentVersion,
+    });
+    expect({
+      purged: [purged.type, purged.version.text.split("\n")[1]],
+      asDoc: asDoc.type,
+    }).toStrictEqual({ purged: ["doc", "type: (removed)"], asDoc: "doc" });
   });
 
   it("are found by the index of permissions by their object, not by reading a table whole", async () => {
