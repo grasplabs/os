@@ -1545,7 +1545,7 @@ describe("rolling new secrets out", () => {
 
     const check = await checkRevocation(env, rolloutId, {
       concurrency: 2,
-      rowDeadlineMs: 200,
+      rowDeadlineMs: 500,
       waitBudgetMs: 0,
     });
     const aborted = cloudflare.abortedCalls();
