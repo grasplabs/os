@@ -3,8 +3,8 @@ import { buttonVariants } from "@grasp-os/ui/components/button";
 import { Link, useRouter } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 
+import { readWithin } from "../core-connection.ts";
 import type { CoreConnection } from "../core-connection.ts";
-import { withTimeout } from "../core.ts";
 import { useCore } from "../use-core.ts";
 
 // The nav's way to the person's notifications, with how many are unread,
@@ -20,8 +20,9 @@ const readUnread = async (
   core: CoreConnection
 ): Promise<number | undefined> => {
   try {
-    const { unread } = await withTimeout(
-      core.withSession(async (session) => await session.notifications.list())
+    const { unread } = await readWithin(
+      core,
+      async (session) => await session.notifications.list()
     );
     return unread;
   } catch {

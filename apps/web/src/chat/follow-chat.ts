@@ -9,7 +9,7 @@ import { messageOf } from "@grasp-os/shared/errors";
 import { RpcStub } from "capnweb";
 
 import type { CoreConnection } from "../core-connection.ts";
-import { retrying } from "../core.ts";
+import { CoreTimeoutError, isTransient, retrying } from "../core.ts";
 
 // Following one chat as it streams (`chats.watch` in core), on the tab's
 // connection, which connects again when it drops. After a drop, the watch starts
@@ -66,7 +66,8 @@ export const applyUpdate = (view: ChatView, update: ChatUpdate): ChatView => {
 /**
  * The pauses before trying again to start following while core fails: only
  * a few, so a chat whose core keeps failing says so. A try made while the
- * tab's connection is down waits for the next connection first.
+ * tab's connection is down waits a few seconds for the next connection,
+ * and says core can't be reached if none comes.
  */
 const startRetryMs = [1000, 2000, 4000] as const;
 
@@ -110,7 +111,11 @@ export const followChat = (
             async (session) =>
               await session.chats.watch(chatId, after, received)
           ),
-        startRetryMs
+        startRetryMs,
+        // No connection came in its few seconds: say so, rather than wait
+        // on, as a page does when core is out of reach.
+        (failure) =>
+          isTransient(failure) && !(failure instanceof CoreTimeoutError)
       );
       release = () => {
         void releaseQuietly(subscription);

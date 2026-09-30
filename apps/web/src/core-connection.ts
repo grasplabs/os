@@ -7,8 +7,10 @@ import type { RpcStub } from "capnweb";
 import {
   connectCore,
   CoreTimeoutError,
+  deadline,
   isTransient,
   retrying,
+  unlessAborted,
   wait,
   withTimeout,
 } from "./core.ts";
@@ -104,28 +106,40 @@ export class CoreConnection {
     this.#onSessionEnded = onSessionEnded;
   }
 
-  /** Core's API for anyone, signed in or not. */
-  async api(): Promise<RpcStub<CoreApi>> {
-    const { api } = await this.#current();
+  /**
+   * Core's API for anyone, signed in or not, once the connection is there:
+   * waited for no longer than `signal` allows (a few seconds unless given),
+   * then refused with its reason.
+   */
+  async api(signal = deadline()): Promise<RpcStub<CoreApi>> {
+    const { api } = await this.#current(signal);
     return api;
   }
 
   /**
-   * The signed-in person's API, once the connection is there. Ask again
-   * for each call: one kept from before a drop is of the connection that
-   * dropped. Refused as core refuses it when nobody is signed in.
+   * The signed-in person's API, once the connection is there, waited for
+   * as `api` is. Ask again for each call: one kept from before a drop is of
+   * the connection that dropped. Refused as core refuses it when nobody is
+   * signed in.
    */
-  async session(): Promise<Session> {
-    const { session } = await this.#current();
+  async session(signal = deadline()): Promise<Session> {
+    const { session } = await this.#current(signal);
     if (session === undefined) {
       throw authErrors.create("auth.unauthenticated");
     }
     return session;
   }
 
-  /** Runs `run` with the signed-in person's API ({@link session}). */
-  async withSession<T>(run: (session: Session) => Promise<T>): Promise<T> {
-    return await run(await this.session());
+  /**
+   * Runs `run` with the signed-in person's API ({@link session}). Given up
+   * on while it waits for the connection, `run` never runs, so nothing it
+   * would call is sent once core is back.
+   */
+  async withSession<T>(
+    run: (session: Session) => Promise<T>,
+    signal = deadline()
+  ): Promise<T> {
+    return await run(await this.session(signal));
   }
 
   /** Closes the connection for good: whoever waits for it, or asks later, is refused. */
@@ -137,7 +151,17 @@ export class CoreConnection {
     }
   }
 
-  async #current(): Promise<Connected> {
+  /**
+   * The connection, unless `signal` gives up first. Checked again once it
+   * is there, so what gave up in the same moment isn't sent either.
+   */
+  async #current(signal: AbortSignal): Promise<Connected> {
+    const connected = await unlessAborted(this.#opened(), signal);
+    signal.throwIfAborted();
+    return connected;
+  }
+
+  async #opened(): Promise<Connected> {
     if (this.#connected === undefined) {
       this.#connected = this.#connect(0);
       document.addEventListener("visibilitychange", () => {
@@ -238,10 +262,14 @@ export interface CoreStatus {
 
 /** Who is signed in on `core` now, or `undefined` for nobody. */
 const signedInAs = async (
-  core: CoreConnection
+  core: CoreConnection,
+  signal: AbortSignal
 ): Promise<Identity | undefined> => {
   try {
-    return await core.withSession(async (session) => await session.whoami());
+    return await core.withSession(
+      async (session) => await session.whoami(),
+      signal
+    );
   } catch (error) {
     if (authErrors.codeOf(error) === "auth.unauthenticated") {
       return undefined;
@@ -250,13 +278,16 @@ const signedInAs = async (
   }
 };
 
-/** Asks core once. */
-const askCoreStatus = async (core: CoreConnection): Promise<CoreStatus> => {
-  const api = await core.api();
+/** Asks core once, as long as `signal` allows. */
+const askCoreStatus = async (
+  core: CoreConnection,
+  signal: AbortSignal
+): Promise<CoreStatus> => {
+  const api = await core.api(signal);
   const [pong, signInOptions, identity] = await Promise.all([
     api.ping(),
     api.signInOptions(),
-    signedInAs(core),
+    signedInAs(core, signal),
   ]);
   return { connected: pong === "pong", signInOptions, identity };
 };
@@ -276,7 +307,10 @@ export const loadCoreStatus = async (
 ): Promise<CoreStatus> => {
   try {
     return await retrying(
-      async () => await withTimeout(askCoreStatus(core)),
+      async () => {
+        const signal = deadline();
+        return await unlessAborted(askCoreStatus(core, signal), signal);
+      },
       statusRetryMs,
       (failure) =>
         isTransient(failure) && !(failure instanceof CoreTimeoutError)
@@ -285,6 +319,20 @@ export const loadCoreStatus = async (
     return { connected: false, signInOptions: [] };
   }
 };
+
+/**
+ * `read` on the signed-in person's API over `core`, within a few seconds
+ * all told (or as long as `signal` allows): the wait for a connection and
+ * for the answer. Given up on while it waits for the connection, `read`
+ * never runs, so it is never sent once core is back; sent already, only
+ * its answer is no longer waited for.
+ */
+export const readWithin = async <T>(
+  core: CoreConnection,
+  read: (session: Session) => Promise<T>,
+  signal = deadline()
+): Promise<T> => await unlessAborted(core.withSession(read, signal), signal);
+
 /**
  * Ends this browser's session and the tab's connection, then reloads the
  * page signed out.

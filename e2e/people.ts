@@ -140,6 +140,7 @@ const cast = {
   membersUnreachable: { admin: "admin" },
   membersRecover: { admin: "admin" },
   sessionEnded: { member: "user" },
+  readsGivenUp: { member: "user" },
   connections: { admin: "admin", user: "user" },
   knowledge: { one: "user", two: "user" },
   knowledgeUploads: { one: "user" },

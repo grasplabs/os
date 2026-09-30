@@ -14,9 +14,9 @@ import { Textarea } from "@grasp-os/ui/components/textarea";
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 
-import { loadCoreStatus } from "../core-connection.ts";
+import { loadCoreStatus, readWithin } from "../core-connection.ts";
 import type { CoreConnection } from "../core-connection.ts";
-import { CoreTimeoutError, withTimeout } from "../core.ts";
+import { CoreTimeoutError } from "../core.ts";
 import { ErrorText } from "../error-text.tsx";
 import { signInErrorSearch } from "../sign-in-errors.ts";
 import { SignInOptions } from "../sign-in-options.tsx";
@@ -46,8 +46,9 @@ const loadDecision = async (
   }
   try {
     // A connection that answered the status check can still hang here.
-    const found = await withTimeout(
-      core.withSession(async (session) => await session.decisions.get(decision))
+    const found = await readWithin(
+      core,
+      async (session) => await session.decisions.get(decision)
     );
     return { state: "ready", name: identity.name, decision: found };
   } catch (error) {

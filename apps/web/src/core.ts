@@ -22,10 +22,19 @@ export const connectCore = (): RpcStub<CoreApi> => {
 /** How long a read from core may take before core counts as unreachable. */
 export const timeoutMs = 5000;
 
-/** Core didn't answer in time: a hanging connection, not a refusal. */
+/** What the page says when core can't be reached. */
+const unreachable = "Grasp can't be reached right now. Try again in a moment.";
+
+/**
+ * Core didn't answer in time, or no connection to it came in time: out of
+ * reach, not a refusal. Its message is what the person reads.
+ */
 export class CoreTimeoutError extends Error {
+  readonly ms: number;
+
   constructor(ms: number) {
-    super(`Timed out after ${ms} ms`);
+    super(unreachable);
+    this.ms = ms;
     this.name = "CoreTimeoutError";
   }
 }
@@ -49,6 +58,39 @@ export const withTimeout = async <T>(
     return await Promise.race([promise, timeout]);
   } finally {
     clearTimeout(timer);
+  }
+};
+
+/**
+ * A signal that gives up after `ms` (a few seconds unless given), with a
+ * `CoreTimeoutError`.
+ */
+export const deadline = (ms = timeoutMs): AbortSignal => {
+  const controller = new AbortController();
+  setTimeout(() => {
+    controller.abort(new CoreTimeoutError(ms));
+  }, ms);
+  return controller.signal;
+};
+
+/**
+ * `promise`, unless `signal` gives up first: then rejects with the
+ * signal's reason. What `promise` stands for goes on either way.
+ */
+export const unlessAborted = async <T>(
+  promise: Promise<T>,
+  signal: AbortSignal
+): Promise<T> => {
+  signal.throwIfAborted();
+  const aborted = Promise.withResolvers<never>();
+  const abort = (): void => {
+    aborted.reject(signal.reason);
+  };
+  signal.addEventListener("abort", abort, { once: true });
+  try {
+    return await Promise.race([promise, aborted.promise]);
+  } finally {
+    signal.removeEventListener("abort", abort);
   }
 };
 

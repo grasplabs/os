@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import type { WebSocketRoute } from "@playwright/test";
 
 import { callGate } from "./call-gate.ts";
 import { test } from "./csp.ts";
@@ -203,4 +204,53 @@ test("sends someone whose session ended elsewhere to sign in, and back to the pa
   expect(new URL(page.url()).pathname).toBe("/sign-in");
   expect(new URL(page.url()).searchParams.get("returnTo")).toBe("/apps");
   await expect(nav).toHaveCount(0);
+});
+
+test("never sends what it gave up on while core was out of reach, once core is back", async ({
+  context,
+  page,
+}) => {
+  const { member } = peopleIn("readsGivenUp");
+  await signInTo(context, member);
+  let refusing = false;
+  let open: WebSocketRoute | undefined;
+  // What the page sends core from when core went out of reach.
+  let recording = false;
+  const sent: string[] = [];
+  await page.routeWebSocket("**/rpc", async (socket) => {
+    if (refusing) {
+      await socket.close();
+      return;
+    }
+    const server = socket.connectToServer();
+    open = socket;
+    socket.onMessage((message) => {
+      if (recording) {
+        sent.push(String(message));
+      }
+      server.send(message);
+    });
+  });
+  await page.goto("/members");
+  const nav = page.getByRole("navigation", { name: "Main" });
+  await expect(nav.getByRole("link", { name: "Knowledge" })).toBeVisible();
+
+  // Core goes out of reach: the page's connection drops, and none gets in.
+  refusing = true;
+  recording = true;
+  await open?.close();
+  await nav.getByRole("link", { name: "Knowledge" }).click();
+  await expect(
+    page.getByText("Grasp can't be reached right now. Try again in a moment.")
+  ).toBeVisible({ timeout: reconnectMs });
+
+  // Core is back. Trying again asks who is signed in once more: that is the
+  // only status read sent, not the one the page gave up on as well.
+  refusing = false;
+  await page.getByRole("button", { name: "Try again" }).click();
+  await expect(page.getByRole("heading", { name: "Knowledge" })).toBeVisible({
+    timeout: reconnectMs,
+  });
+  const pings = sent.filter((message) => message.includes('["ping"]'));
+  expect(pings).toHaveLength(1);
 });

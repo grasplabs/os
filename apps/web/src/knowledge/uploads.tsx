@@ -11,8 +11,9 @@ import { Input } from "@grasp-os/ui/components/input";
 import { Link, useRouter } from "@tanstack/react-router";
 import { useEffect, useId, useRef, useState } from "react";
 
+import { readWithin } from "../core-connection.ts";
 import type { CoreConnection } from "../core-connection.ts";
-import { isTransient, wait, withTimeout } from "../core.ts";
+import { isTransient, wait } from "../core.ts";
 import { ErrorText } from "../error-text.tsx";
 import { useCoreAction } from "../use-core-action.ts";
 import { useCore } from "../use-core.ts";
@@ -70,10 +71,9 @@ const follow = async (
     }
     try {
       // oxlint-disable-next-line no-await-in-loop -- one ask at a time
-      current = await withTimeout(
-        core.withSession(
-          async (session) => await session.uploads.get(upload.id)
-        )
+      current = await readWithin(
+        core,
+        async (session) => await session.uploads.get(upload.id)
       );
       onChange(current);
     } catch (error) {
