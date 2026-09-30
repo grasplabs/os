@@ -63,7 +63,7 @@ export default workflow("intake", { params: {}, input: z.unknown() }, async (ste
 import definition from "./intake.ts";
 
 export default workflowTests(definition, [
-  { name: "runs", mocks: { read: 1 }, events: [{ type: "go", payload: null }], expect: {} },
+  { name: "runs", mocks: { read: 1 }, expect: {} },
 ]);
 `,
 };

@@ -1,11 +1,11 @@
 /**
  * Workflow runs as tests drive them from outside: through Cloudflare
- * Workflows' own instance API, as a crash, a deploy or an event would.
+ * Workflows' own instance API, as a crash, a deploy or time passing would.
  */
+import { introspectWorkflowInstance } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { expect, vi } from "vite-plus/test";
 
-import { runEngine } from "../src/workflows/engine.ts";
 import { allEvents } from "./audit-events.ts";
 
 /** What runs a statement against the database: each fails when broken. */
@@ -80,6 +80,13 @@ export const failingGoingOn = (): {
   };
 };
 
+/** Where the engine has a run now. */
+export const liveStatus = async (run: string): Promise<string> => {
+  const instance = await env.WORKFLOWS.get(run);
+  const { status } = await instance.status();
+  return status;
+};
+
 /**
  * Stops a run's execution, as a crash or a deploy does; resuming it runs
  * the workflow again from its start, loaded anew, finished steps replayed.
@@ -104,36 +111,11 @@ export const resumed = async (run: string): Promise<void> => {
   await instance.resume();
 };
 
-/** An event for a run; each has an ID of its own unless it names one. */
-interface TestEvent {
-  type: string;
-  id?: string;
-  payload: unknown;
-}
-
-/** Sends `event` to the run, as core's senders do (`runEngine`). */
-export const sent = async (
-  run: string,
-  { id = crypto.randomUUID(), ...event }: TestEvent
-): Promise<void> => {
-  await runEngine(env).sendEvent(run, { ...event, id });
-};
-
-/**
- * Sends `event` until the run ends, as one event delivered again and
- * again: the run may not wait for it yet.
- */
-export const finished = async (
-  run: string,
-  event?: TestEvent
-): Promise<void> => {
+/** Once the run has ended, however it ended. */
+export const finished = async (run: string): Promise<void> => {
   const instance = await env.WORKFLOWS.get(run);
-  const once = event && { id: crypto.randomUUID(), ...event };
   await vi.waitFor(
     async () => {
-      if (once) {
-        await sent(run, once);
-      }
       const { status } = await instance.status();
       expect(["complete", "errored", "terminated"]).toContain(status);
     },
@@ -204,25 +186,24 @@ export const sleepingOnceResumed = async (
 };
 
 /**
- * Once the engine reports that the run began waiting for an event in
- * `step`, from its event stream as `sleeping` reads it: the local
- * engine's status says `running` then too.
+ * Ends the run's sleep `step` now, as its time passing would: a workflow
+ * under test sleeps a day where the test acts on it while it is live, and
+ * this lets it go on. The local engine skips a sleep only when an
+ * execution comes to it, so the run is stopped once it sleeps there (as
+ * it is, when a test stopped it already), told to skip the sleep, and
+ * resumed: the new execution replays the steps before it, and passes it.
  */
-export const listening = async (run: string, step: string): Promise<void> => {
-  const instance = await env.WORKFLOWS.get(run);
-  using events = await instance.subscribe({ filter: ["wait_started"] });
-  await vi.waitFor(
-    async () => {
-      const { done, value } = await events.next();
-      if (done === true) {
-        throw new Error(`Run ${run} ended before it waited in ${step}`);
-      }
-      expect(
-        value.type === "wait_started" && value.stepName.startsWith(step)
-      ).toBeTruthy();
-    },
-    { timeout: 10_000, interval: 100 }
-  );
+export const woken = async (run: string, step = "go"): Promise<void> => {
+  if ((await liveStatus(run)) !== "paused") {
+    await sleeping(run, step);
+    await stopped(run);
+  }
+  // Not disposed: disposing deletes the run's instance.
+  const instance = await introspectWorkflowInstance(env.WORKFLOWS, run);
+  await instance.modify(async (modifier) => {
+    await modifier.disableSleeps([{ name: step }]);
+  });
+  await resumed(run);
 };
 
 /** Once the run's step `step` has completed, as the audit log has it. */
@@ -293,13 +274,6 @@ export const endLiveRuns = async (): Promise<void> => {
         seenEnded.add(id);
       })
   );
-};
-
-/** Where the engine has a run now. */
-export const liveStatus = async (run: string): Promise<string> => {
-  const instance = await env.WORKFLOWS.get(run);
-  const { status } = await instance.status();
-  return status;
 };
 
 /** Removes a person from the organization; returns how to bring them back. */

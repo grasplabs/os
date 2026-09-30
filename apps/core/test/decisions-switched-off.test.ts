@@ -19,7 +19,14 @@ import {
 } from "./decisions.ts";
 import type { Ask, Person } from "./decisions.ts";
 import { mockIdp } from "./idp.ts";
-import { endLiveRuns, finished, resumed, stepDone, stopped } from "./runs.ts";
+import {
+  endLiveRuns,
+  finished,
+  resumed,
+  stepDone,
+  stopped,
+  woken,
+} from "./runs.ts";
 import { signedInApi } from "./sign-in.ts";
 
 // Decisions while their kill switches are off: a run waits, before a step
@@ -95,7 +102,7 @@ describe("decisions while switched off", { timeout: 60_000 }, () => {
     const { decision } = await engine.do("open", {}, async () =>
       await engine.openDecision({ step: "open", from: "role:admin", description: "Late", timeout: 500 })
     );
-    await engine.waitForEvent("gate", { type: "gate", timeout: 86400000 });
+    await engine.sleep("gate", 86400000);
     const before = await engine.do("before", {}, async () => await engine.decisionRecipients(decision, true));
     return before.length;
   },
@@ -103,7 +110,7 @@ describe("decisions while switched off", { timeout: 60_000 }, () => {
 `,
       "workflows/late.workflow-tests.ts": `import { workflowTests } from "@grasp-os/sdk/testing";
 import definition from "./late.ts";
-export default workflowTests(definition, [{ name: "runs", events: [{ type: "gate", payload: null }], expect: {} }]);
+export default workflowTests(definition, [{ name: "runs", expect: {} }]);
 `,
     });
     const run = await builder.api.workflows.start(app, "late");
@@ -127,7 +134,8 @@ export default workflowTests(definition, [{ name: "runs", events: [{ type: "gate
       },
       { timeout: 10_000, interval: 100 }
     );
-    await finished(run.id, { type: "gate", payload: null });
+    await woken(run.id, "gate");
+    await finished(run.id);
     const { output } = await builder.api.workflows.status(run.id);
     expect(output).toBe(0);
   });

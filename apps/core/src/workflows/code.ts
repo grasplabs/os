@@ -304,7 +304,6 @@ export class Run extends WorkerEntrypoint {
         env: bindings(this.env, host, connections, apps),
         do: async (name, options, fn) => unwrapped(await host.do(name, options, async (attempt) => await inAttempt(attempt, async () => await settled(fn)))),
         sleep: async (name, milliseconds) => unwrapped(await host.sleep(name, milliseconds)),
-        waitForEvent: async (name, options) => unwrapped(await host.waitForEvent(name, options)),
         callModel: async (request) => unwrapped(await host.callModel(request)),
         openDecision: async (request) => unwrapped(await host.openDecision(request)),
         decisionRecipients: async (decision, reminder) => unwrapped(await host.decisionRecipients(decision, reminder)),

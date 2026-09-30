@@ -71,7 +71,6 @@ const workflowErrorCodes = [
   "workflow.invalid_input",
   "workflow.invalid_param",
   "workflow.invalid_model_output",
-  "workflow.invalid_event",
 ] as const;
 export type WorkflowErrorCode = (typeof workflowErrorCodes)[number];
 
@@ -358,20 +357,6 @@ export interface SleepOptions extends StepOptions {
   duration: Duration;
 }
 
-export interface WaitForOptions<Payload extends z.ZodType> extends StepOptions {
-  /** The type of event to wait for, e.g. `document.signed`. */
-  type: string;
-  /** Stop waiting after this long. */
-  timeout: Duration;
-  /** Checks the event's payload; any payload is accepted when missing. */
-  schema?: Payload;
-}
-
-/** What `step.waitFor` ends with. */
-export type WaitResult<T> =
-  | { received: true; payload: T }
-  | { received: false };
-
 /**
  * Runs steps, one after another. Names and options are literals in the
  * code, so the step list can be read from it; a step name runs once per run
@@ -414,17 +399,6 @@ export interface StepRunner {
   decision: (name: string, options: DecisionOptions) => Promise<Decision>;
   /** Durably pauses the run. */
   sleep: (name: string, options: SleepOptions) => Promise<void>;
-  /**
-   * Durably waits for an event of `type`, e.g. from a connector. Each wait
-   * takes the first event of its type that no earlier wait took, including
-   * one sent before the wait began. An event delivered twice (a sender
-   * retrying) is taken once: its copy answers no later wait, so a workflow
-   * may wait for the same type more than once.
-   */
-  waitFor: <Payload extends z.ZodType = z.ZodUnknown>(
-    name: string,
-    options: WaitForOptions<Payload>
-  ) => Promise<WaitResult<z.output<Payload>>>;
 }
 
 // What the runner implements: the same steps, with their options checked at
@@ -440,7 +414,6 @@ interface UntypedStepRunner {
   llm: (name: string, options: unknown) => Promise<unknown>;
   decision: (name: string, options: unknown) => Promise<Decision>;
   sleep: (name: string, options: unknown) => Promise<void>;
-  waitFor: (name: string, options: unknown) => Promise<WaitResult<unknown>>;
 }
 
 /**
@@ -1159,31 +1132,6 @@ const createRunner = (
         await engine.sleep(start(name, key), duration);
       });
     },
-
-    waitFor: async (name, rawOptions) =>
-      await exclusive(`Step "${name}"`, async () => {
-        const { key, type, timeout, schema } = optionsOf(
-          stepOptionSchemas.waitFor,
-          name,
-          rawOptions
-        );
-        const event = await engine.waitForEvent(start(name, key), {
-          type,
-          timeout,
-        });
-        if (!event.received) {
-          return { received: false };
-        }
-        return {
-          received: true,
-          payload: parseOrThrow(
-            schema ?? z.unknown(),
-            event.payload,
-            "workflow.invalid_event",
-            `Event for step "${name}"`
-          ),
-        };
-      }),
   };
 
   // State is shared by all runs of a workflow, so another run can change it

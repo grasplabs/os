@@ -138,7 +138,7 @@ ${body}
 import definition from "./${id}.ts";
 
 export default workflowTests(definition, [
-  { name: "runs", mocks: ${JSON.stringify(mocks)}, events: [{ type: "go", payload: null }], expect: {} },
+  { name: "runs", mocks: ${JSON.stringify(mocks)}, expect: {} },
 ]);
 `,
 });

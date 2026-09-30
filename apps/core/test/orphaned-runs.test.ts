@@ -32,13 +32,13 @@ const day = 24 * 60 * minute;
 const sweepQuery = /from "workflow_runs" where .*"status" = \?/u;
 
 /**
- * A workflow that does one step, then waits for an event it isn't sent:
+ * A workflow that does one step, then sleeps a day:
  * a live run.
  */
 const waiting = workflowFiles(
   "waits",
   `  await step.do("work", { description: "Work" }, async () => null);
-  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+  await step.sleep("go", { description: "Wait", duration: "1 day" });
   return null;`,
   { work: null }
 );

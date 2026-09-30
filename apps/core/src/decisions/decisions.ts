@@ -559,11 +559,7 @@ export const decisionFor = async (
  */
 const wake = async (env: Env, row: DecisionRow): Promise<void> => {
   try {
-    await runEngine(env).sendEvent(row.runId, {
-      type: decisionEventType(row.id),
-      id: row.id,
-      payload: null,
-    });
+    await runEngine(env).sendEvent(row.runId, decisionEventType(row.id));
   } catch (error) {
     log.warn("decision.wake_failed", {
       decision: row.id,

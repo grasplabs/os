@@ -6,7 +6,6 @@ import {
 } from "@grasp-os/shared/deployment-config";
 import type { AppId, WorkflowId } from "@grasp-os/shared/ids";
 import type { Json } from "@grasp-os/shared/json";
-import { z } from "zod";
 
 // The engine that runs Apps' workflow runs, behind the little core asks of
 // it: create a run, see where it is, terminate it, send it an event, remove
@@ -68,16 +67,10 @@ export interface RunEngine {
    */
   terminate: (id: string) => Promise<void>;
   /**
-   * Sends the run an event, for a wait on it to see. `event.id` names the
-   * event, not the delivery: a sender that tries again sends the same ID,
-   * and the run takes an event of that type and ID once
-   * (`RunHost.waitForEvent`). The same ID under another type is another
-   * event.
+   * Sends the run an event of `type`, which ends a wait on that type: it
+   * carries nothing (`RunHost.waitForDecision`).
    */
-  sendEvent: (
-    id: string,
-    event: { type: string; id: string; payload: unknown }
-  ) => Promise<void>;
+  sendEvent: (id: string, type: string) => Promise<void>;
   /**
    * Removes the run's instance, with all the engine kept of it, whether
    * or not it has ended; one it has no instance of stays as it is. For a
@@ -120,17 +113,6 @@ const retentionOf = (
   const kept = `${days} days` as const;
   return { retention: { successRetention: kept, errorRetention: kept } };
 };
-
-/**
- * The payload of an event as the engine carries it: the event's own ID
- * next to its payload. The engine keeps a run's events by type only, with
- * no ID, so a copy of one delivered twice would otherwise pass for a new
- * event.
- */
-export const sentEventSchema = z.strictObject({
-  id: z.string().min(1),
-  payload: z.unknown(),
-});
 
 /** How Workflows says it has no instance of that ID. */
 const instanceNotFound = /\binstance\.not_found\b/u;
@@ -207,14 +189,9 @@ export const runEngine = (env: Env): RunEngine => ({
       }
     }
   },
-  sendEvent: async (id, { type, id: eventId, payload }) => {
+  sendEvent: async (id, type) => {
     const instance = await env.WORKFLOWS.get(id);
-    await instance.sendEvent({
-      type,
-      payload: { id: eventId, payload } satisfies z.input<
-        typeof sentEventSchema
-      >,
-    });
+    await instance.sendEvent({ type, payload: null });
   },
   remove: async (id) => {
     let instance: WorkflowInstance;

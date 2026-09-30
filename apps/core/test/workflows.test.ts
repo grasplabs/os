@@ -23,14 +23,13 @@ import {
   endLiveRuns,
   finished,
   leave,
-  listening,
   liveStatus,
   resumed,
-  sent,
   failingGoingOn,
   sleepingOnceResumed,
   stepDone,
   stopped,
+  woken,
 } from "./runs.ts";
 import { refusal, signedInApi } from "./sign-in.ts";
 import {
@@ -46,7 +45,7 @@ import {
 // Workflows are code the agent writes, run for real: committed to an App,
 // tested when their version is made current, and run on Cloudflare
 // Workflows by the dispatcher, each in an isolate of its own. Workflows'
-// test helpers skip sleeps and inject events; the outside systems faked
+// test helpers skip sleeps; the outside systems faked
 // here are the model provider behind AI Gateway, and a mail provider's MCP
 // server behind the real connect (test/mail-server.ts).
 //
@@ -232,6 +231,29 @@ const hitsOf = async (app: string, userId: string, name: string) =>
     [name]
   );
 
+/**
+ * A step `name` that ends once the test opens it (`openGate`): until then
+ * the run is in that step, and goes on from it in the same execution.
+ */
+const gate = (name: string): string =>
+  `  await step.do("${name}", { description: "Wait for the test" }, async () => {
+    while ((await env.APP.call("hits", "gate:${name}")) === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return null;
+  });`;
+
+/** Opens the gate `name` of the App's runs. */
+const openGate = async (app: string, userId: string, name: string) => {
+  await callApp(
+    env,
+    appIdSchema.parse(app),
+    { userId, mode: "interactive" },
+    "hit",
+    [`gate:${name}`]
+  );
+};
+
 /** A run a trigger started, which acts for the App's owner. */
 const triggered = async (app: string, workflow: string) =>
   await startRun(env, {
@@ -246,7 +268,7 @@ const triggered = async (app: string, workflow: string) =>
 const versioned = (label: number) =>
   workflowFiles(
     "pinned",
-    `  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+    `  await step.sleep("go", { description: "Wait", duration: "1 day" });
   return { version: ${label} };`
   );
 
@@ -342,10 +364,10 @@ describe("workflow runs", { timeout: 60_000 }, () => {
     await release(builder, app, versioned(2));
     const second = await builder.api.workflows.start(app, "pinned");
     // The first run loads again only now, with version 2 current.
-    await resumed(first.id);
     const outputs = await Promise.all(
       [first, second].map(async ({ id }) => {
-        await finished(id, { type: "go", payload: null });
+        await woken(id);
+        await finished(id);
         return await builder.api.workflows.status(id);
       })
     );
@@ -364,7 +386,7 @@ describe("workflow runs", { timeout: 60_000 }, () => {
       workflowFiles(
         "mailer",
         `  // ${mark}
-  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+  await step.sleep("go", { description: "Wait", duration: "1 day" });
 ${mailStep("after")}`,
         { after: "reached" }
       );
@@ -379,11 +401,12 @@ ${mailStep("after")}`,
     await release(builder, app, version("Harmless."));
     await grantReviewed(admin.api, permission);
 
-    await resumed(run.id);
-    await finished(run.id, { type: "go", payload: null });
+    await woken(run.id);
+    await finished(run.id);
     // A run on the version the admin granted for works.
     const approved = await admin.api.workflows.start(app, "mailer");
-    await finished(approved.id, { type: "go", payload: null });
+    await woken(approved.id);
+    await finished(approved.id);
     const events = await allEvents();
     const failedStep = events.find(
       ({ action, target }) =>
@@ -428,7 +451,7 @@ export class App extends DurableObject {
       ...workflowFiles(
         "saver",
         `  // ${mark}
-  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+  await step.sleep("go", { description: "Wait", duration: "1 day" });
   return await step.do("save", { description: "Save", retries: { limit: 0 } }, async () => await env.APP.call("save", ${JSON.stringify(path)}));`,
         { save: 1 }
       ),
@@ -450,10 +473,11 @@ export class App extends DurableObject {
     await release(builder, app, version("Harmless."));
     await grantReviewed(admin.api, permission);
 
-    await resumed(run.id);
-    await finished(run.id, { type: "go", payload: null });
+    await woken(run.id);
+    await finished(run.id);
     const approved = await admin.api.workflows.start(app, "saver");
-    await finished(approved.id, { type: "go", payload: null });
+    await woken(approved.id);
+    await finished(approved.id);
     const events = await allEvents();
 
     expect({
@@ -478,7 +502,7 @@ export class App extends DurableObject {
       workflowFiles(
         "mailer",
         `${mailStep("before")}
-  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+  await step.sleep("go", { description: "Wait", duration: "1 day" });
 ${mailStep("after")}`,
         { before: "reached", after: "reached" }
       )
@@ -489,8 +513,8 @@ ${mailStep("after")}`,
     await stopped(run.id);
 
     await admin.api.permissions.revoke(permission);
-    await resumed(run.id);
-    await finished(run.id, { type: "go", payload: null });
+    await woken(run.id);
+    await finished(run.id);
     const { status, error } = await admin.api.workflows.status(run.id);
     const events = await allEvents();
     const steps = events.flatMap(({ action, target, detail }) =>
@@ -581,7 +605,7 @@ ${mailStep("after")}`,
       workflowFiles(
         "triggered",
         `  await step.do("first", { description: "First" }, async () => await env.APP.call("hit", "first"));
-  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+  await step.sleep("go", { description: "Wait", duration: "1 day" });
   return await step.do("book", { description: "Book" }, async () => await env.APP.call("hit", "book"));`,
         { first: 1, book: 1 }
       )
@@ -591,7 +615,8 @@ ${mailStep("after")}`,
     const midWay = await triggered(app, "triggered");
     await stepDone(midWay.id, "first");
     const rejoin = await leave(owner.userId);
-    await finished(midWay.id, { type: "go", payload: null });
+    await woken(midWay.id);
+    await finished(midWay.id);
     await rejoin();
     const booked = await hitsOf(app, owner.userId, "book");
 
@@ -624,7 +649,7 @@ ${mailStep("after")}`,
       leaver,
       workflowFiles(
         "waiting",
-        `  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+        `  await step.sleep("go", { description: "Wait", duration: "1 day" });
   return "went on";`
       )
     );
@@ -633,8 +658,8 @@ ${mailStep("after")}`,
     await stopped(run.id);
     // Offboarded by an admin, as in the product.
     await admin.api.members.remove(leaver.userId);
-    await resumed(run.id);
-    await finished(run.id, { type: "go", payload: null });
+    await woken(run.id);
+    await finished(run.id);
     const { status, error } = await admin.api.workflows.status(run.id);
     expect({
       status,
@@ -743,7 +768,7 @@ Object.hasOwn = (target, name) => {
     }).toStrictEqual({ status: "completed", output: "nothing", hits: 0 });
   });
 
-  it("sleep durably, time out waiting, and share their workflow's state between runs", async () => {
+  it("sleep durably, and share their workflow's state between runs", async () => {
     const builder = await personApi("builder");
     const app = await appWith(
       builder,
@@ -752,8 +777,7 @@ Object.hasOwn = (target, name) => {
         `  await step.sleep("nap", { description: "Wait a day", duration: "1 day" });
   const seen = (await state.get("runs")) ?? 0;
   await state.set("runs", seen + 1);
-  const late = await step.waitFor("late", { description: "Wait a moment", type: "never", timeout: 500 });
-  return { seen, late: late.received };`
+  return { seen };`
       )
     );
     await using introspector = await introspectWorkflow(env.WORKFLOWS);
@@ -779,10 +803,7 @@ Object.hasOwn = (target, name) => {
       }
     );
     expect({ outputs, guards }).toStrictEqual({
-      outputs: [
-        { seen: 0, late: false },
-        { seen: 1, late: false },
-      ],
+      outputs: [{ seen: 0 }, { seen: 1 }],
       guards: 0,
     });
   });
@@ -954,7 +975,7 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
       builder,
       workflowFiles(
         "cancellable",
-        `  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+        `  await step.sleep("go", { description: "Wait", duration: "1 day" });
   return await step.do("after", { description: "After" }, async () => await env.APP.call("hit", "after"));`,
         { after: 1 }
       )
@@ -983,8 +1004,8 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
     )
       .bind(leftOver.id)
       .run();
-    await resumed(leftOver.id);
-    await finished(leftOver.id, { type: "go", payload: null });
+    await woken(leftOver.id);
+    await finished(leftOver.id);
     const afterLoad = await liveStatus(leftOver.id);
     await builder.api.workflows.cancel(leftOver.id);
 
@@ -1114,15 +1135,15 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
       builder,
       workflowFiles(
         "held",
-        `  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+        `${gate("go")}
   await step.do("work", { description: "Work" }, async () => await env.APP.call("hit", "work"));
-  await step.waitFor("again", { description: "Wait again", type: "again", timeout: "1 day" });
+${gate("again")}
   return await step.do("more", { description: "More" }, async () => await env.APP.call("hit", "more"));`,
-        { work: 1, more: 1 }
+        { go: null, work: 1, again: null, more: 1 }
       )
     );
     const run = await builder.api.workflows.start(app, "held");
-    // Past a step before it waits, as a run mostly is: the new execution
+    // Past a step before it is held, as a run mostly is: the new execution
     // below replays that step first.
     await stepDone(run.id, "$params");
     const { FEATURES: features } = env;
@@ -1138,7 +1159,7 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
     try {
       try {
         env.FEATURES = off;
-        await sent(run.id, { type: "go", payload: null });
+        await openGate(app, builder.userId, "go");
         await runEvents(run.id, "workflow.run.waiting");
         // Stopped and resumed while it waits, as a deploy or a crash does:
         // the new execution waits on, before the first step it replays,
@@ -1165,10 +1186,10 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
       broken.mend();
     }
     // Switched off again later, it waits again: a new wait, recorded too.
-    await listening(run.id, "again");
+    await stepDone(run.id, "work");
     try {
       env.FEATURES = off;
-      await sent(run.id, { type: "again", payload: null });
+      await openGate(app, builder.userId, "again");
       await vi.waitFor(
         async () => {
           const waits = await runEvents(run.id, "workflow.run.waiting");
@@ -1201,56 +1222,10 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
         "workflow.run.waiting switched_off workflows",
         "workflow.run.waiting switched_off workflows",
         "workflow.step.completed $params",
+        "workflow.step.completed again",
+        "workflow.step.completed go",
         "workflow.step.completed more",
         "workflow.step.completed work",
-      ],
-    });
-  });
-
-  it("hold a wait for an event while workflows are switched off, and take the event sent meanwhile once they are back on", async () => {
-    const builder = await personApi("builder");
-    const app = await appWith(
-      builder,
-      workflowFiles(
-        "gated",
-        `  await step.waitFor("ready", { description: "Ready", type: "ready", timeout: "1 day" });
-  const go = await step.waitFor("go", { description: "Go", type: "go", timeout: "1 day" });
-  return await step.do("after", { description: "After" }, async () => go);`,
-        { after: null }
-      )
-    );
-    const run = await builder.api.workflows.start(app, "gated");
-    // Past its first step, it waits for "ready".
-    await stepDone(run.id, "$params");
-    const { FEATURES: features } = env;
-    try {
-      env.FEATURES = {
-        ...z.record(z.string(), z.boolean()).parse(features),
-        workflows: false,
-      };
-      // The wait under way takes its event; the next is held before it
-      // begins, and the event sent for it meanwhile waits.
-      await sent(run.id, { type: "ready", payload: null });
-      await runEvents(run.id, "workflow.run.waiting");
-      await sent(run.id, { type: "go", payload: "sent while off" });
-    } finally {
-      env.FEATURES = features;
-    }
-    await finished(run.id);
-    const { status, output } = await builder.api.workflows.status(run.id);
-    expect({
-      status,
-      output,
-      audited: await runEvents(run.id, "workflow.run.completed"),
-    }).toStrictEqual({
-      status: "completed",
-      output: { received: true, payload: "sent while off" },
-      audited: [
-        "workflow.run.completed",
-        "workflow.run.started",
-        "workflow.run.waiting switched_off workflows",
-        "workflow.step.completed $params",
-        "workflow.step.completed after",
       ],
     });
   });
@@ -1626,62 +1601,6 @@ describe("workflow side effects and failures", { timeout: 60_000 }, () => {
         },
       },
       attempts: 1,
-    });
-  });
-
-  it("fail, recorded and reported, once a run's waits have passed over as many copies of an event as its steps allow", async () => {
-    const admin = await personApi("admin");
-    const app = await appWith(
-      admin,
-      workflowFiles(
-        "flooded",
-        `  await step.waitFor("first", { description: "Wait", type: "go", timeout: "1 day" });
-  await step.waitFor("second", { description: "Wait again", type: "go", timeout: "1 day" });`
-      )
-    );
-    const run = await admin.api.workflows.start(app, "flooded");
-    // One event, delivered more often than the run has steps: the first
-    // wait takes it, and each copy costs the second a wait of its own.
-    const event = { type: "go", id: "flood", payload: null };
-    await Promise.all(
-      Array.from({ length: 80 }, async () => {
-        await sent(run.id, event);
-      })
-    );
-    await finished(run.id);
-
-    const { status, failure } = await admin.api.workflows.status(run.id);
-    expect({
-      status,
-      row: await listedStatus(admin, app, run.id),
-      failure: failure?.error.code,
-    }).toStrictEqual({
-      status: "failed",
-      row: "failed",
-      failure: "workflow.too_many_steps",
-    });
-  });
-
-  it("fail a run, as unexpected, whose wait gets an event sent without an ID", async () => {
-    const admin = await personApi("admin");
-    const app = await appWith(
-      admin,
-      workflowFiles(
-        "unnamed",
-        `  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });`
-      )
-    );
-    const run = await admin.api.workflows.start(app, "unnamed");
-    // Straight to the engine, past core's `sendEvent`, which gives each
-    // event its ID.
-    const instance = await env.WORKFLOWS.get(run.id);
-    await instance.sendEvent({ type: "go", payload: "no ID" });
-    await finished(run.id);
-
-    const { status, failure } = await admin.api.workflows.status(run.id);
-    expect({ status, failure }).toMatchObject({
-      status: "failed",
-      failure: { error: { code: "internal.unexpected" } },
     });
   });
 

@@ -150,7 +150,7 @@ describe("test runs", () => {
     });
   });
 
-  it("answer decisions and deliver events, skip sleeps, and time out any other wait at once", async () => {
+  it("answer decisions, skip sleeps, and time out a decision without an answer at once", async () => {
     const approvals = workflow(
       "approvals",
       {
@@ -162,11 +162,6 @@ describe("test runs", () => {
         await step.sleep("cool-off", {
           description: "Wait",
           duration: "3 days",
-        });
-        const signed = await step.waitFor("signed", {
-          description: "Wait for the signature",
-          type: "document.signed",
-          timeout: "2 weeks",
         });
         const first = await step.decision("first", {
           description: "Approve",
@@ -181,19 +176,17 @@ describe("test runs", () => {
           timeout: "2 days",
           remindAfter: "1 day",
         });
-        return { signed, first, second };
+        return { first, second };
       }
     );
 
     const run = await testRun(approvals, {
-      events: [{ type: "document.signed", payload: { by: "bo" } }],
       decisions: { first: { approved: true, by: "cas" } },
     });
 
     expect(run).toMatchObject({
       status: "completed",
       output: {
-        signed: { received: true, payload: { by: "bo" } },
         first: { timedOut: false, approved: true, by: "cas", payload: null },
         second: { timedOut: true },
       },

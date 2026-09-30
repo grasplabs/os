@@ -50,7 +50,6 @@ import { models } from "../models.ts";
 import { requireActivePerson, requireApprovedVersion } from "../permissions.ts";
 import { commitStepStatistics } from "../statistic-steps.ts";
 import type { Settled, StepError } from "./code.ts";
-import { sentEventSchema } from "./engine.ts";
 import { attachmentOf, keptMessage } from "./kept-email.ts";
 
 // The engine a run's workflow code runs on, as core's side of it: the SDK's
@@ -104,9 +103,6 @@ export interface RunStep {
  * workflow's never do, so workflow code can't replay one of them.
  */
 export const coreStepPrefix = "$grasp:";
-
-/** Core's own events start with this; a workflow can't wait for one. */
-export const coreEventPrefix = "grasp-";
 
 /**
  * One attempt of a step, while its function runs: whether connect held a
@@ -197,15 +193,6 @@ const doOptionsSchema = z.object({
   sideEffect: z.boolean().optional(),
   input: z.json().optional(),
   decision: z.boolean().optional(),
-});
-
-const waitOptionsSchema = z.object({
-  type: z
-    .string()
-    .min(1)
-    .max(100)
-    .refine((type) => !type.startsWith(coreEventPrefix)),
-  timeout: milliseconds,
 });
 
 /**
@@ -383,8 +370,7 @@ const defaultStepLimit = 10_000;
  * are refused this far short of the limit; past the limit, the engine
  * would refuse core's end too. Core's steps that the run's code causes
  * without bound count as the run's own: the sleeps of a wait while a
- * feature is off ({@link offStepPrefix}) and the extra steps of a wait
- * for an event ({@link waitStepPrefix}).
+ * feature is off ({@link offStepPrefix}).
  */
 const coreStepReserve = 5;
 
@@ -394,20 +380,6 @@ const coreStepReserve = 5;
  * against the reserve, so waiting can't use up the steps core's end needs.
  */
 const offStepPrefix = `${coreStepPrefix}off:`;
-
-/**
- * The steps a wait for an event takes besides its own: its deadline, and
- * for each copy of an event it passes over, the time left and a wait
- * again. Core's, and counted as the run's own against the reserve, as the
- * sleeps above.
- *
- * Their names, `$grasp:wait:<key>:deadline`, `$grasp:wait:<key>:<n>:left`
- * and `$grasp:wait:<key>:<n>`, with `offKeyOf`'s key, are how a new
- * execution finds what earlier ones
- * recorded: never rename them, nor change `offKeyOf`, or runs under way
- * replay their waits wrong.
- */
-const waitStepPrefix = `${coreStepPrefix}wait:`;
 
 /**
  * How long a run first waits before it checks a switched-off feature
@@ -484,9 +456,7 @@ export const watchedStep = (
   const take = (name: string): void => {
     taken += 1;
     const reserved =
-      name.startsWith(coreStepPrefix) &&
-      !name.startsWith(offStepPrefix) &&
-      !name.startsWith(waitStepPrefix);
+      name.startsWith(coreStepPrefix) && !name.startsWith(offStepPrefix);
     if (!reserved && taken > stepLimit - coreStepReserve) {
       throw workflowErrors.create("workflow.too_many_steps");
     }
@@ -699,13 +669,6 @@ export class RunHost extends RpcTarget {
    * abandoned attempt that ends late can't clear a newer one's.
    */
   #running: StepAttempt | undefined;
-  /**
-   * The events this run's waits took, by type and ID, as far as this
-   * execution has come: every execution replays the waits before, in
-   * order, so a wait sees all that came before it. By type too: one ID
-   * may name events of more types, e.g. a message received and replied.
-   */
-  readonly #takenEvents = new Set<string>();
 
   constructor(env: Env, step: RunStep, run: HostedRun, hooks: HostHooks) {
     super();
@@ -1118,83 +1081,6 @@ export class RunHost extends RpcTarget {
       await this.#waitWhileOff(step, ["workflows"]);
       await this.#step.sleep(step, ms);
       return null;
-    });
-  }
-
-  /**
-   * The first event of `type` for this run that no earlier wait took, or
-   * `received: false` at the timeout. The engine keeps a run's events by
-   * type only, so a copy of an event delivered twice stays for the next
-   * wait of its type: a wait passes over an event whose type and ID an
-   * earlier one took, and waits again for what is left of its timeout.
-   * The deadline is recorded, so a wait that passes over a copy after a
-   * restart waits no longer than it would have.
-   */
-  async waitForEvent(
-    name: unknown,
-    options: unknown
-  ): Promise<
-    Settled<{ received: true; payload: unknown } | { received: false }>
-  > {
-    return await settle(async () => {
-      const step = checked(stepNameSchema, name);
-      const { type, timeout } = checked(waitOptionsSchema, options);
-      // Held before it begins, so it neither takes an event nor times out
-      // while workflows are off: an event sent meanwhile waits for it.
-      await this.#waitWhileOff(step, ["workflows"]);
-      const prefix = `${waitStepPrefix}${await offKeyOf(step)}`;
-      const deadline = z
-        .number()
-        .parse(
-          await this.#step.do(
-            `${prefix}:deadline`,
-            {},
-            async () => await Promise.resolve(Date.now() + timeout)
-          )
-        );
-      for (let copies = 0; ; copies += 1) {
-        // The first wait begins right after its deadline is recorded, so
-        // with time left: at least 1 ms, as the engine takes none as its
-        // default of a day. A wait again after a copy may begin at or past
-        // the deadline (a restart meanwhile): the wait has timed out then,
-        // and must not take an event the engine holds. What is left is
-        // recorded, so a replay decides as the first execution did.
-        const left =
-          copies === 0
-            ? Math.max(deadline - Date.now(), 1)
-            : z.number().parse(
-                // oxlint-disable-next-line no-await-in-loop -- one wait at a time
-                await this.#step.do(
-                  `${prefix}:${copies}:left`,
-                  {},
-                  async () => await Promise.resolve(deadline - Date.now())
-                )
-              );
-        if (left <= 0) {
-          return { received: false };
-        }
-        let event: { payload: unknown };
-        try {
-          // oxlint-disable-next-line no-await-in-loop -- one wait at a time
-          event = await this.#step.waitForEvent(
-            copies === 0 ? step : `${prefix}:${copies}`,
-            // A replayed wait answers as it did, whatever it's given.
-            { type, timeout: left }
-          );
-        } catch (error) {
-          if (isTimeout(error)) {
-            return { received: false };
-          }
-          throw error;
-        }
-        const { id, payload } = sentEventSchema.parse(event.payload);
-        // As JSON, so no type and ID can pass for another pair.
-        const taken = JSON.stringify([type, id]);
-        if (!this.#takenEvents.has(taken)) {
-          this.#takenEvents.add(taken);
-          return { received: true, payload };
-        }
-      }
     });
   }
 

@@ -8,7 +8,14 @@ import { z } from "zod";
 import { startRun } from "../src/workflows/runs.ts";
 import { release } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
-import { endLiveRuns, finished, resumed, stepDone, stopped } from "./runs.ts";
+import {
+  endLiveRuns,
+  finished,
+  resumed,
+  stepDone,
+  stopped,
+  woken,
+} from "./runs.ts";
 import {
   auditedDuring,
   openRpc,
@@ -88,7 +95,7 @@ const paramOf = async (person: Person, app: string, name: string) => {
 };
 
 /**
- * The invoice workflow, but waiting for an event after it has recorded
+ * The invoice workflow, but sleeping a day after it has recorded
  * its values (its first step) and before it reads the limit.
  */
 const waiting = {
@@ -103,7 +110,7 @@ export default workflow(
     },
   },
   async (step, { params }) => {
-    await step.waitFor("go", { description: "Wait to go", type: "go", timeout: "1 day" });
+    await step.sleep("go", { description: "Wait to go", duration: "1 day" });
     return await step.do("limit", { description: "Read the limit" }, async () => params.limit);
   }
 );
@@ -113,7 +120,7 @@ export default workflow(
 import definition from "./invoices.ts";
 
 export default workflowTests(definition, [
-  { name: "runs", mocks: { limit: 1 }, events: [{ type: "go", payload: null }], expect: { output: 1 } },
+  { name: "runs", mocks: { limit: 1 }, expect: { output: 1 } },
 ]);
 `,
 };
@@ -358,8 +365,8 @@ describe("runs", buildTime, () => {
       // Loaded anew, as after a deploy: the dispatcher reads the new value,
       // and the run replays the one it recorded.
       await stopped(run.id);
-      await resumed(run.id);
-      await finished(run.id, { type: "go", payload: null });
+      await woken(run.id);
+      await finished(run.id);
       const { status, output } = await builder.api.workflows.status(run.id);
       expect({ status, output }).toStrictEqual({
         status: "completed",

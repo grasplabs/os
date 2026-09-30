@@ -195,7 +195,7 @@ export const useLive = <Value>(
 
 // The App's workflows
 
-/** Where a run is: running, waiting for a decision or an event, paused, or ended. */
+/** Where a run is: running, waiting for a decision, paused, or ended. */
 export type RunStatus =
   | "running"
   | "waiting"
