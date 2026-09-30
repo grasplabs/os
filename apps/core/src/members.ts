@@ -7,7 +7,7 @@ import {
 import type { CodedError } from "@grasp-os/shared/errors";
 import { identifierSchema } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
-import { memberErrors } from "@grasp-os/shared/members";
+import { memberErrors, teamNameMaxLength } from "@grasp-os/shared/members";
 import type { Member, MembersApi } from "@grasp-os/shared/members";
 import { isAdmin, roleErrors, roleSchema } from "@grasp-os/shared/roles";
 import type { Role } from "@grasp-os/shared/roles";
@@ -16,6 +16,7 @@ import { RpcTarget } from "capnweb";
 import { and, asc, eq, gt, isNull, or, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
+import { z } from "zod";
 
 import { auditedBatch, outboxedIfChanged } from "./audit-outbox.ts";
 import {
@@ -24,7 +25,6 @@ import {
   currentMembership,
   isRemoved,
   notRemoved,
-  organizationId,
 } from "./auth/auth.ts";
 import { personOf } from "./connections.ts";
 import {
@@ -33,12 +33,16 @@ import {
   notifications,
   sessions,
   teamMembers,
+  teams,
   users,
 } from "./db/core/schema.ts";
 import { inList } from "./db/d1.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 
+// Members, roles and teams are core's own tables, changed only here, by
+// the client's admins, each change in one batch with its audit event.
+//
 // Offboarding (threat model ID4): an admin removes someone from the
 // organization, or ends their sessions. Sessions are rows Better Auth reads
 // on every request, and every `/rpc` call reads the session again
@@ -54,8 +58,8 @@ import type { SessionCheck } from "./session-check.ts";
 //
 // The organization always keeps an admin: every change of a membership or
 // a role is one conditional statement here that also requires the admin
-// making it still to be one. Better Auth's member routes are off
-// (`routes.ts`), since they read, then write.
+// making it still to be one. Team changes require the same, in the same
+// statement, so an admin demoted or removed a moment ago changes nothing.
 
 /** Logs a refusal, IDs only, and hands back the error to throw. */
 const refusal = (by: Identity, error: CodedError): CodedError => {
@@ -138,12 +142,7 @@ const listMembers = async (env: Env, by: Identity): Promise<Member[]> => {
     })
     .from(members)
     .innerJoin(users, eq(users.id, members.userId))
-    .where(
-      and(
-        eq(members.organizationId, organizationId),
-        notRemoved(members.userId)
-      )
-    )
+    .where(notRemoved(members.userId))
     .orderBy(asc(users.name), asc(users.id));
   return rows.flatMap(({ role, joinedAt, ...member }) => {
     // A role that isn't ours gives no access, so it isn't listed as one.
@@ -177,22 +176,14 @@ const recordRemoval = async (
     db
       .insert(memberRemovals)
       .select(
-        sql`SELECT ${organizationId}, ${userId}, ${Date.now()}, NULL
+        sql`SELECT ${userId}, ${Date.now()}, NULL
           WHERE ${activeMember(userId)} AND ${isActiveAdmin(by.userId)}`
       )
       .onConflictDoNothing()
       .returning({ userId: memberRemovals.userId }),
     outboxedIfChanged(db, memberEntry(by, "member.removed", memberId, userId)),
     db.delete(teamMembers).where(and(eq(teamMembers.userId, userId), removed)),
-    db
-      .delete(members)
-      .where(
-        and(
-          eq(members.organizationId, organizationId),
-          eq(members.userId, userId),
-          removed
-        )
-      ),
+    db.delete(members).where(and(eq(members.userId, userId), removed)),
     db.delete(sessions).where(and(eq(sessions.userId, userId), removed)),
     db
       .delete(notifications)
@@ -215,7 +206,6 @@ const markDisconnected = async (
     .set({ disconnectedAt: new Date() })
     .where(
       and(
-        eq(memberRemovals.organizationId, organizationId),
         inList(memberRemovals.userId, userIds),
         isNull(memberRemovals.disconnectedAt)
       )
@@ -387,6 +377,239 @@ const setMemberRole = async (
   throw refusal(by, memberErrors.create("member.last_admin"));
 };
 
+const teamNameSchema = z.string().trim().min(1).max(teamNameMaxLength);
+
+/** A team's name as the client sent it, trimmed. */
+const teamNameOf = (by: Identity, name: unknown): string => {
+  const parsed = teamNameSchema.safeParse(name);
+  if (!parsed.success) {
+    throw refusal(by, memberErrors.create("member.team_name_invalid"));
+  }
+  return parsed.data;
+};
+
+/** A team's ID as the client sent it. */
+const teamIdOf = (by: Identity, teamId: unknown): string => {
+  const parsed = identifierSchema.safeParse(teamId);
+  if (!parsed.success) {
+    throw refusal(by, memberErrors.create("member.team_not_found"));
+  }
+  return parsed.data;
+};
+
+/** That the team `teamId` exists now, as a SQL condition. */
+const teamExists = (teamId: string): SQL =>
+  sql`EXISTS (SELECT 1 FROM ${teams} WHERE ${teams.id} = ${teamId})`;
+
+/**
+ * Refuses a team change that changed nothing, saying why: the admin no
+ * longer is one, there's no such team, or (when the change names a person)
+ * no such member. Returns when there was simply nothing to change: they
+ * were in the team already, or not in it.
+ */
+const refuseTeamChange = async (
+  env: Env,
+  by: Identity,
+  teamId: string,
+  userId?: string
+): Promise<void> => {
+  const row = await drizzle(env.DB).get<{
+    admin: number;
+    team: number;
+    member: number;
+  }>(sql`SELECT
+    ${isActiveAdmin(by.userId)} AS admin,
+    ${teamExists(teamId)} AS team,
+    ${userId === undefined ? sql`1` : activeMember(userId)} AS member`);
+  if (row.admin === 0) {
+    throw refusal(by, roleErrors.create("role.forbidden"));
+  }
+  if (row.team === 0) {
+    throw refusal(by, memberErrors.create("member.team_not_found"));
+  }
+  if (row.member === 0) {
+    throw refusal(by, memberErrors.create("member.not_found"));
+  }
+};
+
+/** Makes a team, with nobody in it, while the admin still is one. */
+const createTeam = async (
+  env: Env,
+  by: Identity,
+  name: unknown
+): Promise<{ id: string }> => {
+  requireMemberAdmin(by);
+  const teamName = teamNameOf(by, name);
+  const id = crypto.randomUUID();
+  const db = drizzle(env.DB);
+  const [created] = await auditedBatch(env, db, [
+    db
+      .insert(teams)
+      .select(
+        sql`SELECT ${id}, ${teamName}, ${Date.now()}
+          WHERE ${isActiveAdmin(by.userId)}`
+      )
+      .returning({ id: teams.id }),
+    outboxedIfChanged(db, {
+      actor: actorOf(by),
+      action: "team.created",
+      target: { type: "team", id },
+    }),
+  ]);
+  if (created.length === 0) {
+    throw refusal(by, roleErrors.create("role.forbidden"));
+  }
+  return { id };
+};
+
+/** Renames a team, while the admin still is one. */
+const renameTeam = async (
+  env: Env,
+  by: Identity,
+  teamId: unknown,
+  name: unknown
+): Promise<void> => {
+  requireMemberAdmin(by);
+  const id = teamIdOf(by, teamId);
+  const teamName = teamNameOf(by, name);
+  const db = drizzle(env.DB);
+  const [renamed] = await auditedBatch(env, db, [
+    db
+      .update(teams)
+      .set({ name: teamName })
+      .where(and(eq(teams.id, id), isActiveAdmin(by.userId)))
+      .returning({ id: teams.id }),
+    outboxedIfChanged(db, {
+      actor: actorOf(by),
+      action: "team.updated",
+      target: { type: "team", id },
+    }),
+  ]);
+  if (renamed.length === 0) {
+    await refuseTeamChange(env, by, id);
+  }
+};
+
+/**
+ * Deletes a team, and with it who was in it (the rows go with their team),
+ * while the admin still is one. What names the team elsewhere (a
+ * collection, an App's sharing, a decision) reaches nobody through it:
+ * each of those reads who is in the team now.
+ */
+const deleteTeam = async (
+  env: Env,
+  by: Identity,
+  teamId: unknown
+): Promise<void> => {
+  requireMemberAdmin(by);
+  const id = teamIdOf(by, teamId);
+  const db = drizzle(env.DB);
+  const [deleted] = await auditedBatch(env, db, [
+    db
+      .delete(teams)
+      .where(and(eq(teams.id, id), isActiveAdmin(by.userId)))
+      .returning({ id: teams.id }),
+    outboxedIfChanged(db, {
+      actor: actorOf(by),
+      action: "team.deleted",
+      target: { type: "team", id },
+    }),
+  ]);
+  if (deleted.length === 0) {
+    await refuseTeamChange(env, by, id);
+  }
+};
+
+const teamMemberEntry = (
+  by: Identity,
+  action: "team.member.added" | "team.member.removed",
+  teamId: string,
+  userId: string
+): AuditEntry => ({
+  actor: actorOf(by),
+  action,
+  target: { type: "team", id: teamId },
+  detail: { userId },
+});
+
+/**
+ * Puts a member in a team: only someone who is a member now (never someone
+ * removed), in a team that exists, while the admin still is one, all
+ * checked in the insert itself. Nothing changes, and nothing is recorded,
+ * when they are in it already.
+ */
+const addTeamMember = async (
+  env: Env,
+  by: Identity,
+  teamId: unknown,
+  userId: unknown
+): Promise<void> => {
+  requireMemberAdmin(by);
+  const id = teamIdOf(by, teamId);
+  const target = identifierSchema.safeParse(userId);
+  if (!target.success) {
+    throw refusal(by, memberErrors.create("member.not_found"));
+  }
+  const db = drizzle(env.DB);
+  const [added] = await auditedBatch(env, db, [
+    db
+      .insert(teamMembers)
+      .select(
+        sql`SELECT ${id}, ${target.data}, ${Date.now()}
+          WHERE ${teamExists(id)}
+            AND ${activeMember(target.data)}
+            AND ${isActiveAdmin(by.userId)}`
+      )
+      .onConflictDoNothing()
+      .returning({ userId: teamMembers.userId }),
+    outboxedIfChanged(
+      db,
+      teamMemberEntry(by, "team.member.added", id, target.data)
+    ),
+  ]);
+  if (added.length === 0) {
+    await refuseTeamChange(env, by, id, target.data);
+  }
+};
+
+/**
+ * Takes someone out of a team, while the admin still is one. Nothing
+ * changes, and nothing is recorded, when they aren't in it.
+ */
+const removeTeamMember = async (
+  env: Env,
+  by: Identity,
+  teamId: unknown,
+  userId: unknown
+): Promise<void> => {
+  requireMemberAdmin(by);
+  const id = teamIdOf(by, teamId);
+  const target = identifierSchema.safeParse(userId);
+  if (!target.success) {
+    throw refusal(by, memberErrors.create("member.not_found"));
+  }
+  const db = drizzle(env.DB);
+  const [taken] = await auditedBatch(env, db, [
+    db
+      .delete(teamMembers)
+      .where(
+        and(
+          eq(teamMembers.teamId, id),
+          eq(teamMembers.userId, target.data),
+          isActiveAdmin(by.userId)
+        )
+      )
+      .returning({ userId: teamMembers.userId }),
+    outboxedIfChanged(
+      db,
+      teamMemberEntry(by, "team.member.removed", id, target.data)
+    ),
+  ]);
+  if (taken.length === 0) {
+    await refuseTeamChange(env, by, id);
+  }
+};
+
 /** Most `disconnectPersonal` batches the cron trigger has in flight at once. */
 const disconnectBatchesAtOnce = 4;
 
@@ -405,15 +628,9 @@ export const retryDisconnects = async (env: Env): Promise<void> => {
     .select({ userId: memberRemovals.userId })
     .from(memberRemovals)
     .where(
-      and(
-        eq(memberRemovals.organizationId, organizationId),
-        or(
-          isNull(memberRemovals.disconnectedAt),
-          gt(
-            memberRemovals.removedAt,
-            new Date(Date.now() - oauthFlowLifetimeMs)
-          )
-        )
+      or(
+        isNull(memberRemovals.disconnectedAt),
+        gt(memberRemovals.removedAt, new Date(Date.now() - oauthFlowLifetimeMs))
       )
     )
     .orderBy(asc(memberRemovals.removedAt), asc(memberRemovals.userId));
@@ -451,7 +668,7 @@ export const retryDisconnects = async (env: Env): Promise<void> => {
 };
 
 /**
- * A signed-in admin's `members`. Every call checks the session (and the
+ * A signed-in admin's `members`, teams included. Every call checks the session (and the
  * `members` flag) first, then the caller's role.
  */
 export class MembersRpc extends RpcTarget implements MembersApi {
@@ -487,6 +704,37 @@ export class MembersRpc extends RpcTarget implements MembersApi {
   async setRole(userId: string, role: Role): Promise<void> {
     await withPerson(this.#check, async (person) => {
       await setMemberRole(this.#env, person, userId, role);
+    });
+  }
+
+  async createTeam(name: string): Promise<{ id: string }> {
+    return await withPerson(
+      this.#check,
+      async (person) => await createTeam(this.#env, person, name)
+    );
+  }
+
+  async renameTeam(teamId: string, name: string): Promise<void> {
+    await withPerson(this.#check, async (person) => {
+      await renameTeam(this.#env, person, teamId, name);
+    });
+  }
+
+  async deleteTeam(teamId: string): Promise<void> {
+    await withPerson(this.#check, async (person) => {
+      await deleteTeam(this.#env, person, teamId);
+    });
+  }
+
+  async addTeamMember(teamId: string, userId: string): Promise<void> {
+    await withPerson(this.#check, async (person) => {
+      await addTeamMember(this.#env, person, teamId, userId);
+    });
+  }
+
+  async removeTeamMember(teamId: string, userId: string): Promise<void> {
+    await withPerson(this.#check, async (person) => {
+      await removeTeamMember(this.#env, person, teamId, userId);
     });
   }
 }

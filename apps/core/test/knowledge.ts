@@ -4,9 +4,8 @@ import type {
   PermissionSubjectInput,
 } from "@grasp-os/shared/permissions";
 import { env } from "cloudflare:workers";
-import { z } from "zod";
 
-import { callAuth, unique } from "./sign-in.ts";
+import { openRpc, unique } from "./sign-in.ts";
 
 const insertsVersion = /^insert into "versions"/iu;
 
@@ -42,25 +41,18 @@ export const newTeam = async (
   admin: { session: string },
   members: { userId: string }[]
 ): Promise<string> => {
-  const created = await callAuth("/organization/create-team", admin.session, {
-    name: `Team ${unique()}`,
-  });
-  const { id } = z.object({ id: z.string() }).parse(await created.json());
-  for (const member of members) {
-    // oxlint-disable-next-line no-await-in-loop -- one member at a time
-    const added = await callAuth(
-      "/organization/add-team-member",
-      admin.session,
-      {
-        teamId: id,
-        userId: member.userId,
-      }
-    );
-    if (!added.ok) {
-      throw new Error(`Adding ${member.userId} to the team failed`);
+  const { core } = await openRpc(admin.session);
+  try {
+    using session = core.authenticate();
+    const { id } = await session.members.createTeam(`Team ${unique()}`);
+    for (const member of members) {
+      // oxlint-disable-next-line no-await-in-loop -- one member at a time
+      await session.members.addTeamMember(id, member.userId);
     }
+    return id;
+  } finally {
+    core[Symbol.dispose]();
   }
-  return id;
 };
 
 /** A collection with one document, `note.md`, that links to itself. */

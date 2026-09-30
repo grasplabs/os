@@ -274,8 +274,8 @@ describe("App roles", { timeout: 60_000 }, () => {
         "DELETE FROM team_members WHERE team_id = ? AND user_id = ?"
       ).bind(team, anna.userId),
       env.DB.prepare(
-        "INSERT INTO team_members (id, team_id, user_id, created_at) VALUES (?, ?, ?, ?)"
-      ).bind(crypto.randomUUID(), team, ben.userId, Date.now()),
+        "INSERT INTO team_members (team_id, user_id, created_at) VALUES (?, ?, ?)"
+      ).bind(team, ben.userId, Date.now()),
     ]);
     await expect(
       Promise.all([

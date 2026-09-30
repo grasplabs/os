@@ -23,7 +23,6 @@ import type { ScreenProblem } from "@grasp-os/shared/screens";
 import { RpcTarget } from "capnweb";
 
 import { appFor, draftFiles, screensIn } from "./apps.ts";
-import { organizationId } from "./auth/auth.ts";
 import { personOf } from "./connections.ts";
 import { workspace } from "./durable-objects.ts";
 import { previewFeatures, requireFeature } from "./features.ts";
@@ -51,7 +50,7 @@ import { questionSchema } from "./workspace.ts";
  * admins grant to it once, whoever's chat it answers in. Named as agents
  * must be (`workspaceAgentIdSchema` in agent-scope.ts).
  */
-export const chatAgentId = organizationId;
+export const chatAgentId = "organization";
 
 /**
  * The Workspace object that holds `userId`'s chats: each person's own, so

@@ -28,7 +28,7 @@ import { drizzle } from "drizzle-orm/d1";
 import { hasSources, sourcesOf, unreadableBy } from "./app-provenance.ts";
 import { appFor } from "./apps.ts";
 import { auditedBatch, outboxed, outboxedIfChanged } from "./audit-outbox.ts";
-import { activeMember, notRemoved, organizationId } from "./auth/auth.ts";
+import { activeMember, notRemoved } from "./auth/auth.ts";
 import { memberRole } from "./auth/identity.ts";
 import {
   appMembers,
@@ -89,11 +89,7 @@ const namedMembers = async (
     )
     .leftJoin(
       teams,
-      and(
-        eq(appMembers.memberType, "team"),
-        eq(teams.id, appMembers.memberId),
-        eq(teams.organizationId, organizationId)
-      )
+      and(eq(appMembers.memberType, "team"), eq(teams.id, appMembers.memberId))
     )
     .where(
       and(
@@ -159,9 +155,7 @@ const requireSharable = async (
     const team = await drizzle(env.DB)
       .select({ id: teams.id })
       .from(teams)
-      .where(
-        and(eq(teams.id, member.id), eq(teams.organizationId, organizationId))
-      )
+      .where(eq(teams.id, member.id))
       .get();
     if (!team) {
       throw invalid("id: There's no such team.");
@@ -226,23 +220,11 @@ const checkedPeople = async (
     db
       .select({ userId: members.userId, role: members.role })
       .from(members)
-      .where(
-        and(
-          eq(members.organizationId, organizationId),
-          inList(members.userId, others),
-          notRemoved(members.userId)
-        )
-      ),
+      .where(and(inList(members.userId, others), notRemoved(members.userId))),
     db
       .select({ userId: teamMembers.userId, teamId: teamMembers.teamId })
       .from(teamMembers)
-      .innerJoin(teams, eq(teams.id, teamMembers.teamId))
-      .where(
-        and(
-          inList(teamMembers.userId, others),
-          eq(teams.organizationId, organizationId)
-        )
-      ),
+      .where(inList(teamMembers.userId, others)),
   ]);
   const teamsByPerson = new Map<string, string[]>();
   for (const { userId, teamId } of memberships) {

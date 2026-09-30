@@ -8,14 +8,7 @@ import { log } from "@grasp-os/shared/log";
 import { routerClientIpHeader } from "@grasp-os/shared/router";
 import type { SignInRefusal } from "@grasp-os/shared/sign-in";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import {
-  APIError,
-  createAuthMiddleware,
-  getSessionFromCtx,
-} from "better-auth/api";
 import { betterAuth } from "better-auth/minimal";
-import { organization } from "better-auth/plugins/organization";
-import { defaultAc } from "better-auth/plugins/organization/access";
 import { and, eq, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
@@ -29,14 +22,10 @@ import {
 } from "../audit-outbox.ts";
 import {
   accounts,
-  invitations,
   memberRemovals,
   members,
-  organizations,
   sessions,
   ssoProviders,
-  teamMembers,
-  teams,
   users,
   verifications,
 } from "../db/core/schema.ts";
@@ -47,9 +36,6 @@ import type { OidcProvider } from "./config.ts";
 
 /** Better Auth's routes, under core's API. */
 export const authBasePath = "/api/auth";
-
-/** The deployment's one organization, created on the first sign-in. */
-export const organizationId = "organization";
 
 const hour = 60 * 60 * 1000;
 /**
@@ -62,37 +48,11 @@ const sessionMs = 12 * hour;
 const staffSessionMs = hour;
 
 /**
- * Roles as the organization plugin checks them. Admins manage teams (the
- * plugin asks for `member: update` and `member: delete` to put someone on
- * a team or take them off); builders and users manage nothing here.
- * Memberships and roles aren't the plugin's: core changes them
- * (`members.ts`), each in one statement that keeps the organization an
- * admin, which the plugin's read-then-write routes can't, so those routes
- * are off. Admin is also the plugin's creator role, which the plugin
- * allows everything it offers; the route allowlist (`routes.ts`) decides
- * what that is.
+ * The tables Better Auth reads and writes. Members and teams aren't among
+ * them: they are core's own (`members.ts`), so nothing of Better Auth's can
+ * change a membership, a role or a team.
  */
-const roles = {
-  admin: defaultAc.newRole({
-    member: ["update", "delete"],
-    team: ["create", "update", "delete"],
-  }),
-  builder: defaultAc.newRole({}),
-  user: defaultAc.newRole({}),
-};
-
-const schema = {
-  users,
-  sessions,
-  accounts,
-  verifications,
-  organizations,
-  members,
-  invitations,
-  teams,
-  teamMembers,
-  ssoProviders,
-};
+const schema = { users, sessions, accounts, verifications, ssoProviders };
 
 /** Better Auth's log lines, message only: arguments can hold tokens or claims. */
 const authLogger = {
@@ -103,31 +63,26 @@ const authLogger = {
 };
 
 /**
- * That an admin hasn't removed `userId` (an ID, or the column holding one)
- * from the organization, as a SQL condition. A removal is kept after the
- * membership goes, so every read and write of a membership checks it:
- * nothing brings a removed person back.
+ * That an admin hasn't removed `userId` (an ID, or the column holding
+ * one), as a SQL condition. A removal is kept after the membership goes,
+ * so every read and write of a membership checks it: nothing brings a
+ * removed person back.
  */
 export const notRemoved = (
   userId: string | SQLiteColumn
 ): SQL => sql`NOT EXISTS (
   SELECT 1 FROM ${memberRemovals}
-  WHERE ${memberRemovals.organizationId} = ${organizationId}
-    AND ${memberRemovals.userId} = ${userId}
+  WHERE ${memberRemovals.userId} = ${userId}
 )`;
 
 /**
- * `userId`'s current membership of the organization, as a SQL condition on
- * `members`: none once an admin removed them.
+ * `userId`'s current membership, as a SQL condition on `members`: none
+ * once an admin removed them.
  */
 export const currentMembership = (userId: string): SQL | undefined =>
-  and(
-    eq(members.organizationId, organizationId),
-    eq(members.userId, userId),
-    notRemoved(userId)
-  );
+  and(eq(members.userId, userId), notRemoved(userId));
 
-/** Whether an admin removed `userId` from the organization. */
+/** Whether an admin removed `userId`. */
 export const isRemoved = async (env: Env, userId: string): Promise<boolean> => {
   const row = await drizzle(env.DB).get<{ member: number }>(
     sql`SELECT ${notRemoved(userId)} AS member`
@@ -136,28 +91,26 @@ export const isRemoved = async (env: Env, userId: string): Promise<boolean> => {
 };
 
 /**
- * That the organization has an admin now, other than `except` when given,
- * as a SQL condition.
+ * That there is an admin now, other than `except` when given, as a SQL
+ * condition.
  */
 export const activeAdminExists = (except?: string): SQL => sql`EXISTS (
   SELECT 1 FROM ${members}
-  WHERE ${members.organizationId} = ${organizationId}
-    AND ${members.role} = 'admin'
+  WHERE ${members.role} = 'admin'
     AND ${notRemoved(members.userId)}
     ${except === undefined ? sql`` : sql`AND ${members.userId} <> ${except}`}
 )`;
 
 /**
- * That `userId` (an ID, or a column holding one) is an active member of
- * the organization now, with one of `roles` if given, as a SQL condition.
+ * That `userId` (an ID, or a column holding one) is an active member now,
+ * with one of `roles` if given, as a SQL condition.
  */
 export const activeMember = (
   userId: string | SQLiteColumn,
   withRoles?: readonly string[]
 ): SQL => sql`EXISTS (
   SELECT 1 FROM ${members}
-  WHERE ${members.organizationId} = ${organizationId}
-    AND ${members.userId} = ${userId}
+  WHERE ${members.userId} = ${userId}
     ${withRoles === undefined ? sql`` : sql`AND ${inList(members.role, withRoles)}`}
     AND ${notRemoved(userId)}
 )`;
@@ -173,7 +126,7 @@ const record = async (env: Env, entry: AuditEntry): Promise<void> => {
 
 /**
  * Makes a configured admin (deployment config, from the console) an admin
- * again when the organization has none left, so a deployment can always
+ * again when there is none left, so a deployment can always
  * be recovered by signing in. Never someone removed. The change and its
  * audit event are one batch: both are kept, or neither.
  */
@@ -207,9 +160,8 @@ const restoreAdmin = async (env: Env, userId: string): Promise<void> => {
 };
 
 /**
- * Makes someone signing in from the client's IdP a member of the deployment's
- * organization, creating it on the first sign-in, unless an admin removed
- * them. Runs on every sign-in, so a membership whose creation failed is
+ * Makes someone signing in from the client's IdP a member, unless an admin
+ * removed them. Runs on every sign-in, so a membership whose creation failed is
  * created next time; an existing one, and its role, is kept, except that a
  * configured admin is made admin again when nobody else is one. Returns
  * whether they are a member.
@@ -232,19 +184,9 @@ const ensureMember = async (
   // Config emails are lowercased when parsed; Better Auth lowercases the IdP's.
   const role =
     user && config.admins.includes(user.email.toLowerCase()) ? "admin" : "user";
-  const now = new Date();
-  await db
-    .insert(organizations)
-    .values({
-      id: organizationId,
-      name: "Organization",
-      slug: organizationId,
-      createdAt: now,
-    })
-    .onConflictDoNothing();
   await db.run(sql`
-    INSERT INTO ${members} (id, organization_id, user_id, role, created_at)
-    SELECT ${crypto.randomUUID()}, ${organizationId}, ${userId}, ${role}, ${now.getTime()}
+    INSERT INTO ${members} (id, user_id, role, created_at)
+    SELECT ${crypto.randomUUID()}, ${userId}, ${role}, ${Date.now()}
     WHERE ${notRemoved(userId)}
     ON CONFLICT DO NOTHING`);
   if (role === "admin") {
@@ -255,8 +197,8 @@ const ensureMember = async (
 
 /**
  * The session a sign-in through `providerId` gets, or `false` for none.
- * Staff sessions are marked and cut short; everyone else's opens in the
- * deployment's organization, as a member.
+ * Staff sessions are marked and cut short; everyone else gets one only as
+ * a member.
  */
 const startSession = async <T extends { expiresAt: Date; userId: string }>(
   env: Env,
@@ -283,9 +225,7 @@ const startSession = async <T extends { expiresAt: Date; userId: string }>(
     // Sessions come only from an SSO callback, for members.
     return false;
   }
-  return {
-    data: { ...session, staff: false, activeOrganizationId: organizationId },
-  };
+  return { data: { ...session, staff: false } };
 };
 
 const idTokenClaimsSchema = z.looseObject({ oid: z.string().optional() });
@@ -318,51 +258,6 @@ const withoutTokens = <T extends Record<string, unknown>>(account: T) => ({
     idToken: null,
   },
 });
-
-/** The ids a member or team change names; nothing else is recorded. */
-const changeSchema = z.looseObject({
-  teamId: z.string().optional(),
-  userId: z.string().optional(),
-});
-const returnedSchema = z.looseObject({ id: z.string().optional() });
-
-type Change = z.infer<typeof changeSchema>;
-type Returned = z.infer<typeof returnedSchema>;
-
-/**
- * The team changes that are audited (R16): what each records, from the
- * request and what the route returned. Identifiers only.
- */
-const auditedChanges: Record<
-  string,
-  (
-    change: Change,
-    returned: Returned
-  ) => Pick<AuditEntry, "action" | "target" | "detail">
-> = {
-  "/organization/create-team": (_change, returned) => ({
-    action: "team.created",
-    target: { type: "team", id: returned.id ?? "unknown" },
-  }),
-  "/organization/update-team": (change) => ({
-    action: "team.updated",
-    target: { type: "team", id: change.teamId ?? "unknown" },
-  }),
-  "/organization/remove-team": (change) => ({
-    action: "team.deleted",
-    target: { type: "team", id: change.teamId ?? "unknown" },
-  }),
-  "/organization/add-team-member": (change) => ({
-    action: "team.member.added",
-    target: { type: "team", id: change.teamId ?? "unknown" },
-    detail: { userId: change.userId ?? null },
-  }),
-  "/organization/remove-team-member": (change) => ({
-    action: "team.member.removed",
-    target: { type: "team", id: change.teamId ?? "unknown" },
-    detail: { userId: change.userId ?? null },
-  }),
-};
 
 const createAuth = (
   env: Env,
@@ -484,48 +379,7 @@ const createAuth = (
         },
       },
     },
-    hooks: {
-      before: createAuthMiddleware(async (context) => {
-        if (!context.path.startsWith("/organization/")) {
-          return;
-        }
-        // A removed person's membership row may outlive the removal if
-        // deleting it failed; the organization plugin would still trust it.
-        const caller = await getSessionFromCtx(context);
-        if (caller && (await isRemoved(env, caller.user.id))) {
-          throw new APIError("FORBIDDEN", { message: "Not a member." });
-        }
-      }),
-      after: createAuthMiddleware(async (context) => {
-        const describe = auditedChanges[context.path];
-        const { returned } = context.context;
-        if (describe === undefined || returned instanceof Error) {
-          return;
-        }
-        const actor = await getSessionFromCtx(context);
-        if (!actor) {
-          return;
-        }
-        await record(env, {
-          actor: actorOf({
-            userId: actor.user.id,
-            staff: actor.session.staff === true,
-          }),
-          ...describe(
-            changeSchema.parse(context.body ?? {}),
-            returnedSchema.safeParse(returned).data ?? {}
-          ),
-        });
-      }),
-    },
     plugins: [
-      organization({
-        roles,
-        creatorRole: "admin",
-        allowUserToCreateOrganization: false,
-        disableOrganizationDeletion: true,
-        teams: { enabled: true },
-      }),
       sso({
         // Providers come only from deployment config, never from the
         // database: registering one in-product is off.

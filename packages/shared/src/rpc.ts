@@ -91,7 +91,7 @@ export interface SessionApi {
   readonly decisions: DecisionsApi;
   /** Apps' screens: their builds, their servers and their error logs. */
   readonly screens: ScreensApi;
-  /** The organization's members: offboarding. Admins only. */
+  /** The organization's members and teams: offboarding, roles and teams. Admins only. */
   readonly members: MembersApi;
   /** The audit log: search, export and chain verification. Admins only. */
   readonly audit: AuditApi;

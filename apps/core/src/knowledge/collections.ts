@@ -14,7 +14,6 @@ import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 
 import { auditedBatch, outboxed, outboxedIfChanged } from "../audit-outbox.ts";
-import { organizationId } from "../auth/auth.ts";
 import { teams } from "../db/core/schema.ts";
 import { inList } from "../db/d1.ts";
 import { collectionTeams, collections } from "../db/knowledge/schema.ts";
@@ -140,7 +139,7 @@ export const readableCollection = async (
   return row;
 };
 
-/** The IDs in `teamIds` that aren't teams of the organization. */
+/** The IDs in `teamIds` that aren't teams. */
 const unknownTeams = async (env: Env, teamIds: string[]): Promise<string[]> => {
   if (teamIds.length === 0) {
     return [];
@@ -148,9 +147,7 @@ const unknownTeams = async (env: Env, teamIds: string[]): Promise<string[]> => {
   const found = await drizzle(env.DB)
     .select({ id: teams.id })
     .from(teams)
-    .where(
-      and(eq(teams.organizationId, organizationId), inList(teams.id, teamIds))
-    );
+    .where(inList(teams.id, teamIds));
   const known = new Set(found.map(({ id }) => id));
   return teamIds.filter((id) => !known.has(id));
 };

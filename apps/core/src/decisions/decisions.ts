@@ -22,14 +22,13 @@ import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 import { z } from "zod";
 
 import { auditedBatch, outboxed, outboxedIfChanged } from "../audit-outbox.ts";
-import { notRemoved, organizationId } from "../auth/auth.ts";
+import { notRemoved } from "../auth/auth.ts";
 import { signInConfig } from "../auth/config.ts";
 import type { Member } from "../auth/identity.ts";
 import {
   apps,
   members,
   teamMembers,
-  teams,
   users,
   workflowDecisions,
   workflowRuns,
@@ -281,10 +280,8 @@ const decidersCondition = (deciders: string): SQL => {
     case "team": {
       return sql`EXISTS (
         SELECT 1 FROM ${teamMembers}
-        INNER JOIN ${teams} ON ${teams.id} = ${teamMembers.teamId}
         WHERE ${teamMembers.userId} = ${members.userId}
           AND ${teamMembers.teamId} = ${id}
-          AND ${teams.organizationId} = ${organizationId}
       )`;
     }
     default: {
@@ -304,7 +301,6 @@ const decidersCondition = (deciders: string): SQL => {
  */
 const eligibleMembers = (deciders: string, runId: string | SQLiteColumn): SQL =>
   and(
-    eq(members.organizationId, organizationId),
     notRemoved(members.userId),
     decidersCondition(deciders),
     decidersOf(deciders).kind === "person"

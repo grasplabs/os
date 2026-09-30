@@ -335,9 +335,9 @@ describe("sharing an App", () => {
 
     // Ben joins the team the App is shared with, but can't read HR.
     await env.DB.prepare(
-      "INSERT INTO team_members (id, team_id, user_id, created_at) VALUES (?, ?, ?, ?)"
+      "INSERT INTO team_members (team_id, user_id, created_at) VALUES (?, ?, ?)"
     )
-      .bind(crypto.randomUUID(), shared, ben.userId, Date.now())
+      .bind(shared, ben.userId, Date.now())
       .run();
     await expect(Promise.all([opens(anna), opens(ben)])).resolves.toStrictEqual(
       ["ok", "app.unreadable"]
@@ -399,18 +399,18 @@ describe("sharing an App", () => {
           "INSERT INTO users (id, name, email, email_verified, created_at, updated_at) VALUES (?, 'Member', ?, 1, ?, ?)"
         ).bind(id, `${id}@acme.test`, now, now),
         env.DB.prepare(
-          "INSERT INTO members (id, organization_id, user_id, role, created_at) VALUES (?, 'organization', ?, 'user', ?)"
+          "INSERT INTO members (id, user_id, role, created_at) VALUES (?, ?, 'user', ?)"
         ).bind(`membership-${id}`, id, now),
         env.DB.prepare(
-          "INSERT INTO team_members (id, team_id, user_id, created_at) VALUES (?, ?, ?, ?)"
-        ).bind(`team-${id}`, team, id, now),
+          "INSERT INTO team_members (team_id, user_id, created_at) VALUES (?, ?, ?)"
+        ).bind(team, id, now),
         // All but two of them read the collection too.
         ...(id === cannot || id === removed
           ? []
           : [
               env.DB.prepare(
-                "INSERT INTO team_members (id, team_id, user_id, created_at) VALUES (?, ?, ?, ?)"
-              ).bind(`readers-${id}`, readers, id, now),
+                "INSERT INTO team_members (team_id, user_id, created_at) VALUES (?, ?, ?)"
+              ).bind(readers, id, now),
             ]),
       ])
     );
@@ -420,11 +420,11 @@ describe("sharing an App", () => {
     const before = await shareWithTeam();
     await env.DB.batch([
       env.DB.prepare(
-        "INSERT INTO member_removals (organization_id, user_id, removed_at) VALUES ('organization', ?, ?)"
+        "INSERT INTO member_removals (user_id, removed_at) VALUES (?, ?)"
       ).bind(removed, now),
       env.DB.prepare(
-        "INSERT INTO team_members (id, team_id, user_id, created_at) VALUES (?, ?, ?, ?)"
-      ).bind(`readers-${cannot}`, readers, cannot, now),
+        "INSERT INTO team_members (team_id, user_id, created_at) VALUES (?, ?, ?)"
+      ).bind(readers, cannot, now),
     ]);
     const after = await shareWithTeam();
     expect({

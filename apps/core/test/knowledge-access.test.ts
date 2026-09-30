@@ -38,13 +38,7 @@ import {
   storedGrant,
 } from "./knowledge.ts";
 import { mailConnection } from "./mail-connection.ts";
-import {
-  auditedDuring,
-  callAuth,
-  outcome,
-  signedInApi,
-  unique,
-} from "./sign-in.ts";
+import { auditedDuring, outcome, signedInApi, unique } from "./sign-in.ts";
 
 // Knowledge as Apps and agents reach it, and restricted mode. These tests
 // start from the ways it can fail: an App or agent reads what it has no
@@ -307,10 +301,7 @@ describe("Apps and agents reading Knowledge", setUpTime, () => {
 
     // The member leaves the team while the agent holds its stub.
     const held = readerIn(await envOf(actingFor(agent, member.userId)));
-    await callAuth("/organization/remove-team-member", admin.session, {
-      teamId,
-      userId: member.userId,
-    });
+    await admin.api.members.removeTeamMember(teamId, member.userId);
     await expect(everyRead(held, finance.noteId)).resolves.toStrictEqual(
       noneFound
     );

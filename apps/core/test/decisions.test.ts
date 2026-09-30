@@ -21,7 +21,6 @@ import { newTeam } from "./knowledge.ts";
 import { endLiveRuns, finished, resumed, stopped } from "./runs.ts";
 import { acmeTenant } from "./sign-in-config.ts";
 import {
-  callAuth,
   entraPerson,
   openRpc,
   outcome,
@@ -53,12 +52,7 @@ const joinTeam = async (
   teamId: string,
   person: Person
 ): Promise<void> => {
-  const response = await callAuth(
-    "/organization/add-team-member",
-    admin.session,
-    { teamId, userId: person.userId }
-  );
-  expect(response.ok).toBeTruthy();
+  await admin.api.members.addTeamMember(teamId, person.userId);
 };
 
 const leaveTeam = async (
@@ -66,12 +60,7 @@ const leaveTeam = async (
   teamId: string,
   person: Person
 ): Promise<void> => {
-  const response = await callAuth(
-    "/organization/remove-team-member",
-    admin.session,
-    { teamId, userId: person.userId }
-  );
-  expect(response.ok).toBeTruthy();
+  await admin.api.members.removeTeamMember(teamId, person.userId);
 };
 
 /** Adds `count` new members to `team`, as the IdP would bring them in. */
@@ -84,11 +73,11 @@ const addMembers = async (team: string, count: number): Promise<void> => {
         "INSERT INTO users (id, name, email, email_verified, created_at, updated_at) VALUES (?, 'Member', ?, 1, ?, ?)"
       ).bind(id, `${id}@acme.test`, now, now),
       env.DB.prepare(
-        "INSERT INTO members (id, organization_id, user_id, role, created_at) VALUES (?, 'organization', ?, 'user', ?)"
+        "INSERT INTO members (id, user_id, role, created_at) VALUES (?, ?, 'user', ?)"
       ).bind(`membership-${id}`, id, now),
       env.DB.prepare(
-        "INSERT INTO team_members (id, team_id, user_id, created_at) VALUES (?, ?, ?, ?)"
-      ).bind(`team-member-${id}`, team, id, now),
+        "INSERT INTO team_members (team_id, user_id, created_at) VALUES (?, ?, ?)"
+      ).bind(team, id, now),
     ])
   );
 };

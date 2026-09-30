@@ -114,13 +114,23 @@ describe("signing in", () => {
     });
   });
 
-  it("makes the configured admins admins on their first sign-in", async () => {
+  it("makes the configured admins admins on their first sign-in, as one member each", async () => {
     const person = entraPerson(acmeTenant);
     // Configured in another case than the IdP sends it.
-    const session = await signedIn(idp, "microsoft", person, {
-      coreEnv: withSignIn({ admins: [String(person.email).toUpperCase()] }),
+    const coreEnv = withSignIn({
+      admins: [String(person.email).toUpperCase()],
     });
-    await expect(whoami(session)).resolves.toMatchObject({ role: "admin" });
+    const session = await signedIn(idp, "microsoft", person, { coreEnv });
+    const admin = await whoami(session);
+    expect(admin).toMatchObject({ role: "admin", teams: [], staff: false });
+
+    // Signing in again keeps the one membership; they manage members at once.
+    const again = await signedIn(idp, "microsoft", person, { coreEnv });
+    const { core } = await openRpc(again);
+    const members = await core.authenticate().members.list();
+    expect(
+      members.filter(({ userId }) => userId === admin.userId)
+    ).toStrictEqual([expect.objectContaining({ role: "admin" })]);
   });
 
   it("never links an account at the other IdP by its email", async () => {

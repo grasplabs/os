@@ -12,12 +12,13 @@ import type {
   RunFailure,
 } from "@grasp-os/shared/workflows";
 /**
- * Core D1 database: identity (Better Auth), permissions and the App registry.
+ * Core D1 database: identity, permissions and the App registry.
  *
- * The identity tables are the ones Better Auth and its organization and SSO
- * plugins expect (`src/auth/auth.ts` maps them by these export names), with
- * plural table names and snake_case columns. Better Auth fills ids and
- * timestamps itself.
+ * Users, sessions, accounts, verifications and SSO providers are the tables
+ * Better Auth and its SSO plugin expect (`src/auth/auth.ts` maps them by
+ * these export names), with plural table names and snake_case columns;
+ * Better Auth fills their ids and timestamps itself. Members and teams are
+ * core's own.
  */
 import { sql } from "drizzle-orm";
 import {
@@ -58,9 +59,7 @@ export const sessions = sqliteTable(
     updatedAt: timestamp("updated_at").notNull(),
     ipAddress: text("ip_address"),
     userAgent: text("user_agent"),
-    activeOrganizationId: text("active_organization_id"),
-    activeTeamId: text("active_team_id"),
-    /** A Grasp staff session: time-bound, and not a member of the organization. */
+    /** A Grasp staff session: time-bound, and not a member. */
     staff: integer({ mode: "boolean" }).notNull().default(false),
   },
   (table) => [index("sessions_user_id_idx").on(table.userId)]
@@ -118,122 +117,61 @@ export const verifications = sqliteTable(
   (table) => [index("verifications_identifier_idx").on(table.identifier)]
 );
 
-/** The deployment's one organization. */
-export const organizations = sqliteTable("organizations", {
+/**
+ * Someone who may use the deployment, with their role: everyone from the
+ * client's IdP gets a row when they first sign in (`src/auth/auth.ts`).
+ * Core's own table, not Better Auth's: only the members API changes it
+ * (`src/members.ts`).
+ */
+export const members = sqliteTable("members", {
   id: text().primaryKey(),
-  name: text().notNull(),
-  slug: text().notNull().unique(),
-  logo: text(),
-  metadata: text(),
+  userId: text("user_id")
+    .notNull()
+    .unique()
+    .references(() => users.id, { onDelete: "cascade" }),
+  role: text().notNull(),
   createdAt: timestamp("created_at").notNull(),
 });
 
-/** A person's place in the organization, with their role. */
-export const members = sqliteTable(
-  "members",
-  {
-    id: text().primaryKey(),
-    organizationId: text("organization_id")
-      .notNull()
-      .references(() => organizations.id, { onDelete: "cascade" }),
-    userId: text("user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    role: text().notNull(),
-    createdAt: timestamp("created_at").notNull(),
-  },
-  (table) => [
-    uniqueIndex("members_organization_user_idx").on(
-      table.organizationId,
-      table.userId
-    ),
-    index("members_user_id_idx").on(table.userId),
-  ]
-);
-
 /**
- * People an admin removed from the organization. Everyone else from the
- * client's IdP gets a membership when they sign in if they have none (also
- * repairing one whose creation failed); a removal recorded here keeps them
- * out. Kept apart from `members`, whose rows the organization plugin treats
- * as live memberships. Who removed them is in the audit log.
+ * People an admin removed. Everyone else from the client's IdP gets a
+ * membership when they sign in if they have none (also repairing one whose
+ * creation failed); a removal recorded here keeps them out, whatever
+ * `members` still holds. Who removed them is in the audit log.
  */
-export const memberRemovals = sqliteTable(
-  "member_removals",
-  {
-    organizationId: text("organization_id")
-      .notNull()
-      .references(() => organizations.id, { onDelete: "cascade" }),
-    userId: text("user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    removedAt: timestamp("removed_at").notNull(),
-    /**
-     * When connect completed disconnecting their personal connections;
-     * until then the cron trigger retries it (`retryDisconnects`).
-     */
-    disconnectedAt: timestamp("disconnected_at"),
-  },
-  (table) => [primaryKey({ columns: [table.organizationId, table.userId] })]
-);
+export const memberRemovals = sqliteTable("member_removals", {
+  userId: text("user_id")
+    .primaryKey()
+    .references(() => users.id, { onDelete: "cascade" }),
+  removedAt: timestamp("removed_at").notNull(),
+  /**
+   * When connect completed disconnecting their personal connections;
+   * until then the cron trigger retries it (`retryDisconnects`).
+   */
+  disconnectedAt: timestamp("disconnected_at"),
+});
 
-/**
- * Part of the organization plugin's model. Invitations aren't offered: people
- * join by signing in with the deployment's IdP.
- */
-export const invitations = sqliteTable(
-  "invitations",
-  {
-    id: text().primaryKey(),
-    organizationId: text("organization_id")
-      .notNull()
-      .references(() => organizations.id, { onDelete: "cascade" }),
-    email: text().notNull(),
-    role: text(),
-    teamId: text("team_id"),
-    status: text().notNull(),
-    expiresAt: timestamp("expires_at").notNull(),
-    createdAt: timestamp("created_at").notNull(),
-    inviterId: text("inviter_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-  },
-  (table) => [
-    index("invitations_organization_id_idx").on(table.organizationId),
-    index("invitations_email_idx").on(table.email),
-  ]
-);
+/** A group of members that Knowledge, Apps and decisions can name. */
+export const teams = sqliteTable("teams", {
+  id: text().primaryKey(),
+  name: text().notNull(),
+  createdAt: timestamp("created_at").notNull(),
+});
 
-export const teams = sqliteTable(
-  "teams",
-  {
-    id: text().primaryKey(),
-    name: text().notNull(),
-    memberCount: integer("member_count").notNull().default(0),
-    organizationId: text("organization_id")
-      .notNull()
-      .references(() => organizations.id, { onDelete: "cascade" }),
-    createdAt: timestamp("created_at").notNull(),
-    updatedAt: timestamp("updated_at"),
-  },
-  (table) => [index("teams_organization_id_idx").on(table.organizationId)]
-);
-
+/** Who is in a team: gone with the team, and with the person. */
 export const teamMembers = sqliteTable(
   "team_members",
   {
-    id: text().primaryKey(),
     teamId: text("team_id")
       .notNull()
       .references(() => teams.id, { onDelete: "cascade" }),
     userId: text("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    membershipKey: text("membership_key").unique(),
-    createdAt: timestamp("created_at"),
+    createdAt: timestamp("created_at").notNull(),
   },
   (table) => [
-    index("team_members_team_id_idx").on(table.teamId),
+    primaryKey({ columns: [table.teamId, table.userId] }),
     index("team_members_user_id_idx").on(table.userId),
   ]
 );

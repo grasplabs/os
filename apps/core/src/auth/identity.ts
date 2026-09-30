@@ -8,7 +8,7 @@ import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
 import { accounts, members, teamMembers, teams } from "../db/core/schema.ts";
-import { authFor, currentMembership, organizationId } from "./auth.ts";
+import { authFor, currentMembership } from "./auth.ts";
 import { providerIds, signInConfig } from "./config.ts";
 
 /**
@@ -29,7 +29,7 @@ export const memberRole = async (
   return role.success ? role.data : undefined;
 };
 
-/** The teams of the organization a person is in, read now, by name. */
+/** The teams a person is in, read now, by name. */
 export const teamsOf = async (
   database: D1Database,
   userId: string
@@ -38,12 +38,7 @@ export const teamsOf = async (
     .select({ id: teams.id, name: teams.name })
     .from(teamMembers)
     .innerJoin(teams, eq(teams.id, teamMembers.teamId))
-    .where(
-      and(
-        eq(teamMembers.userId, userId),
-        eq(teams.organizationId, organizationId)
-      )
-    )
+    .where(eq(teamMembers.userId, userId))
     .orderBy(teams.name);
 
 /**

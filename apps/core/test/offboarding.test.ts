@@ -386,18 +386,6 @@ describe("offboarding", () => {
     });
     expect(Number.isNaN(Date.parse(member?.joinedAt ?? ""))).toBeFalsy();
   });
-
-  it("goes only through core's own API, not Better Auth's member route", async () => {
-    const admin = await signedInApi(idp, "admin");
-    const person = await signedInApi(idp, "user");
-    const removed = await callAuth(
-      "/organization/remove-member",
-      admin.session,
-      { memberIdOrEmail: String(person.person.email) }
-    );
-    expect(removed.status).toBe(404);
-    await expect(person.api.whoami()).resolves.toMatchObject({ role: "user" });
-  });
 });
 
 describe("connect's offboarding call", () => {
@@ -545,7 +533,7 @@ const removedLongAgo = async (count: number, removedAt: number) => {
         "INSERT INTO users (id, name, email, email_verified, created_at, updated_at) VALUES (?, 'Removed', ?, 1, ?, ?)"
       ).bind(id, `${id}@acme.test`, now, now),
       env.DB.prepare(
-        "INSERT INTO member_removals (organization_id, user_id, removed_at) VALUES ('organization', ?, ?)"
+        "INSERT INTO member_removals (user_id, removed_at) VALUES (?, ?)"
       ).bind(id, removedAt),
     ])
   );
@@ -731,18 +719,6 @@ describe("changing a member's role", () => {
     await expect(person.api.whoami()).resolves.toMatchObject({
       role: "builder",
     });
-  });
-
-  it("goes only through core's own API, not Better Auth's member route", async () => {
-    const admin = await signedInApi(idp, "admin");
-    const person = await signedInApi(idp, "user");
-    const changed = await callAuth(
-      "/organization/update-member-role",
-      admin.session,
-      { memberId: person.userId, role: "admin" }
-    );
-    expect(changed.status).toBe(404);
-    await expect(person.api.whoami()).resolves.toMatchObject({ role: "user" });
   });
 });
 

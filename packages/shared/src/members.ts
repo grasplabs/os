@@ -11,12 +11,15 @@ export interface Member {
   joinedAt: string;
 }
 
+/** The longest a team's name may be. */
+export const teamNameMaxLength = 100;
+
 /**
- * The organization's members, over `/rpc`, for admins only (never Grasp
- * staff): offboarding. Removing someone is for good: every session they
- * have ends, their open connections close on their next call, their
- * personal connections are disconnected, and signing in again doesn't
- * bring them back.
+ * The organization's members and teams, over `/rpc`, for admins only (never
+ * Grasp staff): offboarding, roles and teams. Removing someone is for good:
+ * every session they have ends, their open connections close on their next
+ * call, their personal connections are disconnected, they leave every team,
+ * and signing in again doesn't bring them back. Every change is audited.
  */
 export interface MembersApi {
   list: () => Promise<Member[]>;
@@ -33,11 +36,29 @@ export interface MembersApi {
    * organization without an admin.
    */
   setRole: (userId: string, role: Role) => Promise<void>;
+  /**
+   * Makes a team called `name` (trimmed; at most {@link teamNameMaxLength}
+   * characters), with nobody in it yet.
+   */
+  createTeam: (name: string) => Promise<{ id: string }>;
+  /** Gives the team `teamId` another name. */
+  renameTeam: (teamId: string, name: string) => Promise<void>;
+  /**
+   * Deletes the team `teamId`. What was shared with it (Knowledge, Apps,
+   * decisions) reaches nobody through it any more.
+   */
+  deleteTeam: (teamId: string) => Promise<void>;
+  /** Puts the member `userId` in the team `teamId`; no change if they are in it. */
+  addTeamMember: (teamId: string, userId: string) => Promise<void>;
+  /** Takes `userId` out of the team `teamId`; no change if they aren't in it. */
+  removeTeamMember: (teamId: string, userId: string) => Promise<void>;
 }
 
-/** Why an admin's change to a member was refused or not finished. */
+/** Why an admin's change to a member or a team was refused or not finished. */
 export const memberErrors = defineErrorFamily({
   "member.not_found": "There's no such member.",
+  "member.team_not_found": "There's no such team.",
+  "member.team_name_invalid": `A team needs a name of at most ${teamNameMaxLength} characters.`,
   "member.self":
     "You can't remove yourself or end your own sessions here. Ask another admin, or sign out.",
   "member.connections_pending":

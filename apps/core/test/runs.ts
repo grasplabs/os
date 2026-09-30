@@ -276,7 +276,7 @@ export const endLiveRuns = async (): Promise<void> => {
   );
 };
 
-/** Removes a person from the organization; returns how to bring them back. */
+/** Takes a person's membership away; returns how to bring them back. */
 export const leave = async (userId: string): Promise<() => Promise<void>> => {
   const membership = await env.DB.prepare(
     "SELECT * FROM members WHERE user_id = ?"
@@ -288,11 +288,10 @@ export const leave = async (userId: string): Promise<() => Promise<void>> => {
     .run();
   return async () => {
     await env.DB.prepare(
-      "INSERT INTO members (id, organization_id, user_id, role, created_at) VALUES (?, ?, ?, ?, ?)"
+      "INSERT INTO members (id, user_id, role, created_at) VALUES (?, ?, ?, ?)"
     )
       .bind(
         membership?.id,
-        membership?.organization_id,
         membership?.user_id,
         membership?.role,
         membership?.created_at
