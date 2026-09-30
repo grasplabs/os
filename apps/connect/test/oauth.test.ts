@@ -10,7 +10,7 @@ import { drizzle } from "drizzle-orm/d1";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { connections, connectionTokens, oauthFlows } from "../src/db/schema.ts";
-import { finishConnection, startConnection } from "../src/oauth.ts";
+import { disconnect, finishConnection, startConnection } from "../src/oauth.ts";
 import { accessTokenFor } from "../src/tokens.ts";
 import {
   auditEvents,
@@ -43,7 +43,8 @@ import { racingDb } from "./racing-db.ts";
 // with its ID and permissions: anyone but its owner (or, if shared, an
 // admin) doing so, another account taking its place, a disconnected one
 // or a removed person's coming back, a state replayed or past its time,
-// and two reconnects, or a reconnect and a disconnect, at once.
+// two reconnects, or a reconnect and a disconnect or an offboarding, at
+// once, in either order, and a grant left behind that nobody holds.
 
 const providers = fakeProviders();
 const audit = auditEvents();
@@ -652,6 +653,37 @@ const reconnections = async (connectionId: string) => {
   );
 };
 
+/** Why each refused attempt the audit log names the connection in was. */
+const refusalsNaming = async (connectionId: string) => {
+  const audited = await audit.events();
+  return audited
+    .filter(
+      ({ action, target, detail }) =>
+        action === "connection.connect" &&
+        target?.id === connectionId &&
+        detail.outcome === "refused"
+    )
+    .map(({ detail }) => detail.reason);
+};
+
+/** Connect's database, with `race` run once, just before a write lands. */
+const racingOnce = (race: () => Promise<unknown>): D1Database => {
+  let raced = false;
+  return racingDb(async () => {
+    if (!raced) {
+      raced = true;
+      await race();
+    }
+  });
+};
+
+/** The refresh token the provider issued last. */
+const lastRefreshToken = (): string | undefined =>
+  providers.state.issued.findLast((token) => token.startsWith("refresh"));
+
+const revokedTokens = (): (string | null)[] =>
+  providers.revocations().map(({ form }) => form.get("token"));
+
 describe("reconnecting a connection whose access ran out", () => {
   it("gives it new tokens under the same ID, and records who did", async () => {
     const anna = someone();
@@ -715,6 +747,13 @@ describe("reconnecting a connection whose access ran out", () => {
     ]);
     await expect(stored(connectionId)).resolves.toStrictEqual(ranOut);
     await expect(reconnections(connectionId)).resolves.toStrictEqual([]);
+    // Each attempt that reached her account is recorded against her
+    // connection; the flow Bob took never got as far as an account.
+    await expect(refusalsNaming(connectionId)).resolves.toStrictEqual([
+      "connection.not_own_account",
+      "connection.already_connected",
+      "connection.already_connected",
+    ]);
     // Still Anna's to reconnect.
     await expect(connectAccount(providers, anna, account)).resolves.toBe(
       connectionId
@@ -739,7 +778,9 @@ describe("reconnecting a connection whose access ran out", () => {
       "connection.not_own_account",
       "role.forbidden",
     ]);
-    await expect(stored(connectionId)).resolves.toStrictEqual(ranOut);
+    await expect(
+      Promise.all([stored(connectionId), refusalsNaming(connectionId)])
+    ).resolves.toStrictEqual([ranOut, ["connection.not_own_account"]]);
     await expect(
       connectAccount(providers, second, mailbox, { scope: "shared" })
     ).resolves.toBe(connectionId);
@@ -870,13 +911,9 @@ describe("reconnecting a connection whose access ran out", () => {
     const second = await cameBack(anna, account);
     // The second flow finishes after the first found the connection
     // waiting, just before the first's write lands.
-    let raced = false;
-    const racing = racingDb(async () => {
-      if (!raced) {
-        raced = true;
-        await exports.default.finishConnection(second);
-      }
-    });
+    const racing = racingOnce(
+      async () => await exports.default.finishConnection(second)
+    );
     await expect(
       outcome(finishConnection({ ...env, DB: racing }, first))
     ).resolves.toBe("connection.already_connected");
@@ -893,7 +930,39 @@ describe("reconnecting a connection whose access ran out", () => {
       access.at(-1)
     );
     expect(providers.revocations()).toStrictEqual([]);
-    await expect(reconnections(connectionId)).resolves.toHaveLength(1);
+    // One reconnect, and the other flow recorded against the connection.
+    await expect(
+      Promise.all([reconnections(connectionId), refusalsNaming(connectionId)])
+    ).resolves.toMatchObject([
+      [{ action: "connection.reconnected" }],
+      ["connection.already_connected"],
+    ]);
+  });
+
+  it("refused, or failing to be stored, revokes what was minted: it holds no grant to lose", async () => {
+    const anna = someone();
+    const account = ownAccount(anna, "google");
+    const connectionId = await connectedThenRanOut(anna, account);
+    // An admin asks for Anna's account as a shared connection.
+    await expect(
+      outcome(
+        connectAccount(providers, someone("admin"), account, {
+          scope: "shared",
+        })
+      )
+    ).resolves.toBe("connection.already_connected");
+    const refused = lastRefreshToken();
+    // Anna's own reconnect, whose write fails.
+    const flow = await cameBack(anna, account);
+    const failing = racingDb(() => {
+      throw new Error("The database is down");
+    });
+    await expect(
+      finishConnection({ ...env, DB: failing }, flow)
+    ).rejects.toThrow("The database is down");
+    expect(revokedTokens()).toStrictEqual([refused, lastRefreshToken()]);
+    expect(providers.grantHolds(account)).toBeFalsy();
+    await expect(stored(connectionId)).resolves.toStrictEqual(ranOut);
   });
 
   it("losing to a disconnect leaves it disconnected: the account connects as new", async () => {
@@ -901,13 +970,10 @@ describe("reconnecting a connection whose access ran out", () => {
     const account = ownAccount(anna, "google");
     const connectionId = await connectedThenRanOut(anna, account);
     const flow = await cameBack(anna, account);
-    let raced = false;
-    const racing = racingDb(async () => {
-      if (!raced) {
-        raced = true;
-        await exports.default.disconnect({ person: anna, connectionId });
-      }
-    });
+    const racing = racingOnce(
+      async () =>
+        await exports.default.disconnect({ person: anna, connectionId })
+    );
     const finished = await finishConnection({ ...env, DB: racing }, flow);
     expect(finished.connectionId).not.toBe(connectionId);
     await expect(stored(connectionId)).resolves.toStrictEqual({
@@ -919,6 +985,65 @@ describe("reconnecting a connection whose access ran out", () => {
       tokens: 1,
     });
     await expect(reconnections(connectionId)).resolves.toStrictEqual([]);
+  });
+
+  it("landing after a disconnect read it is stopped with it: the new grant is revoked, not only deleted", async () => {
+    const anna = someone();
+    const account = ownAccount(anna, "google");
+    const connectionId = await connectedThenRanOut(anna, account);
+    const flow = await cameBack(anna, account);
+    // The disconnect found it waiting, with no grant to revoke; the
+    // reconnect lands just before the disconnect's write.
+    const racing = racingOnce(
+      async () => await exports.default.finishConnection(flow)
+    );
+    await expect(
+      disconnect({ ...env, DB: racing }, { person: anna, connectionId })
+    ).resolves.toStrictEqual({ revoked: true });
+    await expect(stored(connectionId)).resolves.toStrictEqual({
+      status: "disconnected",
+      tokens: 0,
+    });
+    expect(revokedTokens()).toStrictEqual([lastRefreshToken()]);
+    expect(providers.grantHolds(account)).toBeFalsy();
+    const audited = await audit.events();
+    expect(
+      audited
+        .filter(({ target }) => target?.id === connectionId)
+        .map(({ action, detail }) => [action, detail.revoked])
+        .slice(-2)
+    ).toStrictEqual([
+      ["connection.reconnected", undefined],
+      ["connection.disconnect", true],
+    ]);
+  });
+
+  it("of a person removed once their flow was already taken connects as new, which the next offboarding try stops", async () => {
+    const anna = someone();
+    const account = ownAccount(anna, "google");
+    const connectionId = await connectedThenRanOut(anna, account);
+    const flow = await cameBack(anna, account);
+    const offboard = async () =>
+      await exports.default.disconnectPersonal({
+        person: null,
+        ownerUserIds: [anna.userId],
+      });
+    // Too late to spend the flow: it is past that, about to write.
+    const finished = await finishConnection(
+      { ...env, DB: racingOnce(offboard) },
+      flow
+    );
+    expect(finished.connectionId).not.toBe(connectionId);
+    await expect(
+      Promise.all([stored(connectionId), reconnections(connectionId)])
+    ).resolves.toStrictEqual([{ status: "disconnected", tokens: 0 }, []]);
+    // Core retries until a call completes with nothing left.
+    await expect(offboard()).resolves.toStrictEqual({ disconnected: 1 });
+    await expect(stored(finished.connectionId)).resolves.toStrictEqual({
+      status: "disconnected",
+      tokens: 0,
+    });
+    expect(providers.grantHolds(account)).toBeFalsy();
   });
 });
 

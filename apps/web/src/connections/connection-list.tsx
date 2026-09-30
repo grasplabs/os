@@ -229,6 +229,20 @@ const Reconnect = ({
   );
 };
 
+/**
+ * What a connection whose access ran out says to someone who can't
+ * reconnect it: why not, and who can, if anyone. `known` is whether its
+ * provider is one this release starts a flow for.
+ */
+const ranOutText = (known: boolean, staff: boolean): string => {
+  if (!known) {
+    return "Its access ran out, and it can't be reconnected here.";
+  }
+  return staff
+    ? "Its access ran out. Grasp staff can't reconnect it: an admin of the organization can."
+    : "Its access ran out. An admin of your organization can reconnect it.";
+};
+
 const ConnectionItem = ({
   connection,
   name,
@@ -285,7 +299,10 @@ const ConnectionItem = ({
       ) : null}
       {connection.status === "needs_reauth" && !reconnectable ? (
         <p className="text-muted-foreground text-sm">
-          Its access ran out. An admin of your organization can reconnect it.
+          {ranOutText(
+            connection.source === "native" && provider.success,
+            identity.staff
+          )}
         </p>
       ) : null}
       {connection.source === "composio" ? (
