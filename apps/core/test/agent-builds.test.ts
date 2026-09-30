@@ -521,6 +521,31 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
     ]);
   });
 
+  it("runs a draft's dry runs without a count of their own, and checks it afterwards", async () => {
+    const { chat, grant } = await setUp([
+      codeStep(`export default async (env) => {
+        const app = await env.build.create({ name: ${JSON.stringify(appName)} });
+        await env.build.write(app.id, ${JSON.stringify({ "screens/desk.tsx": fixed, ...intake })});
+        const runs = [];
+        for (let count = 0; count < 12; count += 1) {
+          runs.push((await env.build.dryRun(app.id, "intake")).map(({ status }) => status));
+        }
+        return { runs, check: (await env.build.check(app.id)).passed };
+      };`),
+      says("Done."),
+    ]);
+    await grant();
+
+    await chat.ask("Build an invoice desk");
+
+    const [result] = await codeResults(chat.stub, chat.chat.id);
+    // Bounded by the turn's code runs and their calls only.
+    expect(returned(result?.text)).toStrictEqual({
+      runs: Array.from({ length: 12 }, () => ["completed"]),
+      check: true,
+    });
+  });
+
   it("keeps no change that leaves a file as the base has it", async () => {
     const ledger = `const [app] = (await env.apps.list()).filter(({ name }) => name === "Ledger");`;
     const { existing, chat, grant } = await setUp([
