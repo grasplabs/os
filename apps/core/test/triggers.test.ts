@@ -8,6 +8,7 @@ import { z } from "zod";
 import { setCurrentVersion } from "../src/apps.ts";
 import { setParam } from "../src/workflows/params.ts";
 import { startRun } from "../src/workflows/runs.ts";
+import { startDueSchedules } from "../src/workflows/triggers.ts";
 import { release } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { runCron } from "./cron.ts";
@@ -371,6 +372,54 @@ describe("a schedule whose run keeps failing to start", () => {
         actor: { type: "system" },
         detail: { workflow: "weekly", version: 1, failedStarts: 8 },
       },
+    ]);
+  });
+
+  it("is found in the audit log as an action once it stopped", async () => {
+    const builder = await personApi("builder");
+    const admin = await personApi("admin");
+    const app = await appWith(builder, weekly());
+    const due = await nextRunOf(app);
+    await whileEngineDown(async () => await triedAt(builder, app, due, tries));
+    await allEvents();
+
+    // A search by type, page after page.
+    const found: string[] = [];
+    let before;
+    do {
+      // oxlint-disable-next-line no-await-in-loop -- one page after another
+      const page = await admin.api.audit.search(
+        { type: "action", targetType: "app", targetId: app },
+        before
+      );
+      found.push(...page.records.flatMap(({ event }) => event?.action ?? []));
+      before = page.next ?? undefined;
+    } while (before !== undefined);
+
+    expect(found).toContain("workflow.schedule.stopped");
+  });
+
+  it("counts one failed start for one due time, however many deliveries try it", async () => {
+    const builder = await personApi("builder");
+    const app = await appWith(builder, weekly());
+    const due = await nextRunOf(app);
+    // A second delivery of the same minute, between this one's reading
+    // the schedule and its first write: both read it with no failed start.
+    let raced = false;
+    const racing = racingDb(async () => {
+      if (!raced) {
+        raced = true;
+        await startDueSchedules(env, due);
+      }
+    });
+
+    await whileEngineDown(async () => {
+      await startDueSchedules({ ...env, DB: racing }, due);
+    });
+
+    expect(raced).toBeTruthy();
+    await expect(schedulesOf(app)).resolves.toMatchObject([
+      { failed_starts: 1, next_run_at: due.getTime() },
     ]);
   });
 

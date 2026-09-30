@@ -51,7 +51,13 @@ const schedulesPerRun = 50;
 
 type DueSchedule = Pick<
   typeof workflowTriggers.$inferSelect,
-  "id" | "appId" | "version" | "workflowId" | "cron" | "timeZone"
+  | "id"
+  | "appId"
+  | "version"
+  | "workflowId"
+  | "cron"
+  | "timeZone"
+  | "failedStarts"
 > & { nextRunAt: Date };
 
 const minuteMs = 60_000;
@@ -71,26 +77,30 @@ const tryNow = (now: Date) =>
  * Counts a failed start of `schedule`'s run for the time it is due, and
  * stops the schedule at {@link maxFailedStarts}: it keeps no next time,
  * so nothing tries it again, and the stop is audited, once, as the
- * system's. Only over the time read, as the next time is set.
+ * system's. Only over the time and the count read: a second delivery of
+ * the same minute, whose start fails too (on the first's run, say), finds
+ * the count moved on and adds nothing, so one try counts once.
  */
 const countFailedStart = async (
   env: Env,
   schedule: DueSchedule
 ): Promise<void> => {
   const db = drizzle(env.DB);
-  const tried = and(
+  const due = and(
     eq(workflowTriggers.id, schedule.id),
     eq(workflowTriggers.nextRunAt, schedule.nextRunAt)
   );
   await auditedBatch(env, db, [
     db
       .update(workflowTriggers)
-      .set({ failedStarts: sql`${workflowTriggers.failedStarts} + 1` })
-      .where(tried),
+      .set({ failedStarts: schedule.failedStarts + 1 })
+      .where(
+        and(due, eq(workflowTriggers.failedStarts, schedule.failedStarts))
+      ),
     db
       .update(workflowTriggers)
       .set({ nextRunAt: null })
-      .where(and(tried, gte(workflowTriggers.failedStarts, maxFailedStarts))),
+      .where(and(due, gte(workflowTriggers.failedStarts, maxFailedStarts))),
     outboxedIfChanged(db, {
       actor: { type: "system" },
       action: "workflow.schedule.stopped",
@@ -183,6 +193,7 @@ export const startDueSchedules = async (
       workflowId: workflowTriggers.workflowId,
       cron: workflowTriggers.cron,
       timeZone: workflowTriggers.timeZone,
+      failedStarts: workflowTriggers.failedStarts,
       nextRunAt: workflowTriggers.nextRunAt,
     })
     .from(workflowTriggers)
