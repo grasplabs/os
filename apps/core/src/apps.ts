@@ -44,8 +44,8 @@ import {
 } from "./audit-outbox.ts";
 import type { Acting, Member } from "./auth/identity.ts";
 import { builtinOwner } from "./builtin-app-id.ts";
-import { apps, appVersions, appWorkingFiles } from "./db/core/schema.ts";
-import { inList, isUniqueViolation } from "./db/d1.ts";
+import { apps, appVersions } from "./db/core/schema.ts";
+import { isUniqueViolation } from "./db/d1.ts";
 import { featureEnabled, requireFeature } from "./features.ts";
 import { appMemoryPath, requireWithinLimit } from "./knowledge/memory-files.ts";
 import { requireOwnTypes } from "./knowledge/record-types.ts";
@@ -59,9 +59,8 @@ import {
   triggerSummary,
 } from "./workflows/trigger-registry.ts";
 
-// The App registry and each App's code. The registry, the versions and the
-// working copy (files written since the latest version) are rows in the
-// core database. A version's files are one object in R2 (EU),
+// The App registry and each App's code. The registry and the versions are
+// rows in the core database. A version's files are one object in R2 (EU),
 // `apps/<app>/trees/<sha256>.json`: canonical JSON by path, stored under
 // its own SHA-256, which the version row names. Reading a version is one
 // read, checked against the hash.
@@ -72,9 +71,9 @@ import {
 // row never names a missing tree. A commit refused as a conflict can leave
 // its tree named by no version: rare, and one version's size at most.
 //
-// Versions are linear: each commit is the latest version plus the working
-// copy, as the next number. Two commits at once both try the same number,
-// and the database keeps one; the other is refused as a conflict.
+// Versions are linear: each commit is the latest version with its changes
+// over it, as the next number. Two commits at once both try the same
+// number, and the database keeps one; the other is refused as a conflict.
 
 export type AppRow = typeof apps.$inferSelect;
 export type VersionRow = typeof appVersions.$inferSelect;
@@ -245,42 +244,19 @@ const sizeOf = (files: ReadonlyMap<string, string>): Size => {
   return { files: files.size, length };
 };
 
-/**
- * An App's working copy: its latest version's files with the changes
- * written since over them. The version, the rows and the App's working
- * revision are read in one batch, so a commit landing in between can't
- * pair a new version with rows it already committed.
- */
-const workingCopy = async (env: Env, app: AppId) => {
-  const db = drizzle(env.DB);
-  const [[latest], rows, [registered]] = await db.batch([
-    db
-      .select()
-      .from(appVersions)
-      .where(eq(appVersions.appId, app))
-      .orderBy(desc(appVersions.version))
-      .limit(1),
-    db
-      .select()
-      .from(appWorkingFiles)
-      .where(eq(appWorkingFiles.appId, app))
-      .orderBy(asc(appWorkingFiles.path)),
-    db
-      .select({ revision: apps.workingRevision })
-      .from(apps)
-      .where(eq(apps.id, app)),
-  ]);
+/** An App's latest version, if it has one, and its files. */
+const latestFiles = async (env: Env, app: AppId) => {
+  const latest = await drizzle(env.DB)
+    .select()
+    .from(appVersions)
+    .where(eq(appVersions.appId, app))
+    .orderBy(desc(appVersions.version))
+    .limit(1)
+    .get();
   const files = latest
     ? await readTree(env, app, latest.tree)
     : new Map<string, string>();
-  for (const { path, content } of rows) {
-    if (content === null) {
-      files.delete(path);
-    } else {
-      files.set(path, content);
-    }
-  }
-  return { latest, rows, files, revision: registered?.revision ?? null };
+  return { latest, files };
 };
 
 /**
@@ -333,10 +309,10 @@ const checkPaths = (
 };
 
 /**
- * `app.too_large` if `files` are over an App's limits. With `before`, the
- * working copy's size before a write, only if they also grew: a working
- * copy that is over them (from before they were lowered) can still shrink.
- * A version is always within them, so it always fits a build.
+ * `app.too_large` if `files` are over an App's limits. With `before`, a
+ * draft's size before a write, only if they also grew: a draft that is
+ * over them (from before they were lowered) can still shrink. A version
+ * is always within them, so it always fits a build.
  */
 const checkLimits = (
   files: ReadonlyMap<string, string>,
@@ -436,7 +412,6 @@ export const createApp = async (
     blueprint: blueprint ?? null,
     currentVersion: null,
     pendingVersion: null,
-    workingRevision: null,
     pendingSince: null,
     createdAt: new Date(),
   };
@@ -544,7 +519,7 @@ export const appExports = async (
   return { version: currentVersion, exports: row.exports };
 };
 
-/** An App's files at `version`, or its working copy without one. */
+/** An App's files at `version`, or at its latest version without one. */
 export const readFiles = async (
   env: Env,
   by: Member,
@@ -555,13 +530,13 @@ export const readFiles = async (
   if (version !== undefined) {
     return await versionFiles(env, appId, version);
   }
-  const { files } = await workingCopy(env, appId);
+  const { files } = await latestFiles(env, appId);
   return Object.fromEntries(files);
 };
 
 /**
  * Applies changes (`FileChanges`: new content by path, or null to delete a
- * file) to an App's `files`, its working copy or a chat's draft of it
+ * file) to an App's `files`, its latest version's or a chat's draft of it
  * (agent-builds.ts), refused as a whole when they would be over the App's
  * limits, hold paths that can't both exist, or an AGENTS.md over its
  * limit. The changes, checked.
@@ -595,75 +570,23 @@ export const applyChanges = (
 };
 
 /**
- * Writes changes to an App's working copy: new content by path, or null to
- * delete a file. Refused as a whole when the working copy would be over
- * the App's limits.
- *
- * Each write is a new revision of the working copy, and lands only over
- * the revision its limit check read: two writes at once can't together
- * take the App over its limits. The one that loses is refused as a
- * conflict, and nothing of it is written.
- */
-export const writeFiles = async (
-  env: Env,
-  by: Identity,
-  app: unknown,
-  input: unknown
-): Promise<void> => {
-  const { id: appId } = await appFor(env, by, app, "builder");
-  const { files, revision } = await workingCopy(env, appId);
-  const changes = applyChanges(env, files, input);
-
-  const db = drizzle(env.DB);
-  const next = crypto.randomUUID();
-  const writtenAt = Date.now();
-  const [[claimed]] = await db.batch([
-    db
-      .update(apps)
-      .set({ workingRevision: next })
-      .where(
-        and(eq(apps.id, appId), sql`${apps.workingRevision} IS ${revision}`)
-      )
-      .returning({ id: apps.id }),
-    // Each only if this write claimed the revision above.
-    ...changes.map(([path, content]) =>
-      db
-        .insert(appWorkingFiles)
-        .select(
-          sql`SELECT ${appId}, ${path}, ${content}, ${next}, ${by.userId}, ${writtenAt} WHERE (SELECT ${apps.workingRevision} FROM ${apps} WHERE ${apps.id} = ${appId}) = ${next}`
-        )
-        .onConflictDoUpdate({
-          target: [appWorkingFiles.appId, appWorkingFiles.path],
-          set: {
-            content: sql`excluded.content`,
-            revision: sql`excluded.revision`,
-            writtenBy: sql`excluded.written_by`,
-            writtenAt: sql`excluded.written_at`,
-          },
-        })
-    ),
-  ]);
-  if (!claimed) {
-    throw appErrors.create("app.conflict");
-  }
-};
-
-/**
- * Commits an App's working copy as its next version, by `by` with
- * `message`. Changes written while it commits stay in the working copy.
+ * Commits changes (new content by path, or null to delete a file) over an
+ * App's latest version as its next version, by `by` with `message`.
+ * Refused as a whole when the version would be over the App's limits. A
+ * version committed meanwhile takes the number: `app.conflict`, and
+ * nothing of this commit is kept.
  */
 export const commitFiles = async (
   env: Env,
   by: Identity,
   app: unknown,
+  input: unknown,
   message: unknown
 ): Promise<CommittedVersion> => {
   const { id: appId } = await appFor(env, by, app, "builder");
   const text = appErrors.parse("app.invalid", commitMessageSchema, message);
-  const { latest, rows, files } = await workingCopy(env, appId);
-  if (rows.length === 0) {
-    throw appErrors.create("app.nothing_to_commit");
-  }
+  const { latest, files } = await latestFiles(env, appId);
+  applyChanges(env, files, input);
   const { tree, json } = await versionTree(files);
   if (tree === latest?.tree) {
     throw appErrors.create("app.nothing_to_commit");
@@ -689,9 +612,6 @@ export const commitFiles = async (
     proposedBy: null,
     records,
   };
-  // Only the rows this commit read: each write gives the rows it writes a
-  // new revision, so a row written since has one this commit didn't read.
-  const committed = [...new Set(rows.map(({ revision }) => revision))];
   const db = drizzle(env.DB);
   try {
     await auditedBatch(env, db, [
@@ -705,14 +625,6 @@ export const commitFiles = async (
           files: row.files,
         })
       ),
-      db
-        .delete(appWorkingFiles)
-        .where(
-          and(
-            eq(appWorkingFiles.appId, appId),
-            inList(appWorkingFiles.revision, committed)
-          )
-        ),
     ]);
   } catch (error) {
     if (isUniqueViolation(error)) {
@@ -722,14 +634,16 @@ export const commitFiles = async (
   }
   // Committed: now built, so the version opens without building, and
   // whoever saved hears what doesn't build (save-builds.ts). Its kill
-  // switch leaves the builds to their first use, as before.
+  // switch leaves the builds to their first use, as before. Built from
+  // the files as the version reads back, paths in order, so a build says
+  // the same here as at its first use.
   return {
     ...toVersion(row),
     builds: featureEnabled(env, "build_on_save")
       ? await buildOnSave(env, {
           app: appId,
           version: row.version,
-          files: Object.fromEntries(files),
+          files: storedTreeSchema.parse(JSON.parse(json)),
         })
       : notBuiltOnSave,
   };
@@ -780,17 +694,7 @@ export const draftOverLatest = async (
   app: AppId,
   { base, changes }: DraftChanges
 ): Promise<DraftOverLatest> => {
-  const db = drizzle(env.DB);
-  const latest = await db
-    .select()
-    .from(appVersions)
-    .where(eq(appVersions.appId, app))
-    .orderBy(desc(appVersions.version))
-    .limit(1)
-    .get();
-  const files = latest
-    ? await readTree(env, app, latest.tree)
-    : new Map<string, string>();
+  const { latest, files } = await latestFiles(env, app);
   const parent = latest?.version ?? null;
   if (parent !== base) {
     const baseRow =
@@ -831,9 +735,7 @@ export const draftOverLatest = async (
  * by `by` (the chat's agent, acting for its person, `by.via`) with
  * `message`, and puts it up for review, in one batch: it is never
  * committed without being proposed. Its files were built as they were
- * checked. Builders' working copy stays as it is: as after any commit, it
- * is the new latest version with their changes over it. A version
- * committed meanwhile takes the number: `app.conflict`.
+ * checked. A version committed meanwhile takes the number: `app.conflict`.
  */
 export const proposeDraft = async (
   env: Env,

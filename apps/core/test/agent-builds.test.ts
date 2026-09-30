@@ -25,7 +25,7 @@ import { server } from "./workflow-apps.ts";
 // permission of its own, or past what its person may do (an App they
 // don't build, or any App for someone who doesn't build); a chat that read
 // restricted data writes it into code others read; the agent's draft and
-// a builder's working copy overwrite each other; a draft that doesn't
+// a builder's commits overwrite each other; a draft that doesn't
 // pass reaches the App; and a repair loop that never ends.
 
 const idp = mockIdp();
@@ -333,16 +333,16 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
     });
 
     // The App is the person's, and has nothing of the draft: no version,
-    // nothing current, and an empty working copy for its builders.
+    // nothing current, and no files for its builders.
     const app = await createdApp(person.api);
     expect({
       app,
       versions: await builder.api.apps.versions.list(app.id),
-      workingCopy: await builder.api.apps.files.read(app.id),
+      files: await builder.api.apps.files.read(app.id),
     }).toMatchObject({
       app: { owner: person.userId, currentVersion: null, pendingVersion: null },
       versions: [],
-      workingCopy: {},
+      files: {},
     });
     // Created by the agent acting for the person, as the audit log says.
     await vi.waitFor(
@@ -362,7 +362,7 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
     );
   });
 
-  it("keeps the draft apart from a builder's working copy, both ways", async () => {
+  it("keeps the draft apart from what a builder commits meanwhile, both ways", async () => {
     const ledger = `const [app] = (await env.apps.list()).filter(({ name }) => name === "Ledger");`;
     const { builder, existing, chat, grant } = await setUp([
       codeStep(`export default async (env) => {
@@ -381,11 +381,12 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
     await grant();
 
     await chat.ask("Add notes to the Ledger");
-    // A builder writes to the working copy meanwhile, the same file too.
-    await builder.api.apps.files.write(existing, {
-      "notes.md": "the builder's",
-      "builder.md": "mine",
-    });
+    // A builder commits meanwhile, the same file too.
+    await builder.api.apps.files.commit(
+      existing,
+      { "notes.md": "the builder's", "builder.md": "mine" },
+      "Mine"
+    );
     await chat.ask("Are your notes still there?");
 
     const [draft, after] = await codeResults(chat.stub, chat.chat.id);
@@ -1133,11 +1134,14 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
       ...invoices(500, false),
       "notes.md": "old",
     });
-    await builder.api.apps.files.write(app, {
-      ...invoices(900, true),
-      "notes.md": null,
-    });
-    const { version } = await builder.api.apps.files.commit(app, "Book them");
+    const { version } = await builder.api.apps.files.commit(
+      app,
+      {
+        ...invoices(900, true),
+        "notes.md": null,
+      },
+      "Book them"
+    );
 
     const review = await builder.api.apps.versions.review(app, version);
 
@@ -1196,10 +1200,13 @@ export default workflowTests(definition, [{ name: "runs", mocks: { save: 1 }, ex
     await requestGranted(idp, builder, outlook(app));
     // Only server code the server imports changes: the workflow's steps
     // call the server.
-    await builder.api.apps.files.write(app, {
-      "app/lib/books.ts": "export const twice = true;\n",
-    });
-    const { version } = await builder.api.apps.files.commit(app, "Server");
+    const { version } = await builder.api.apps.files.commit(
+      app,
+      {
+        "app/lib/books.ts": "export const twice = true;\n",
+      },
+      "Server"
+    );
 
     const review = await builder.api.apps.versions.review(app, version);
 
@@ -1242,14 +1249,14 @@ export default workflowTests(definition, [{ name: "runs", mocks: { save: 1 }, ex
     });
 
     // A change to one step's function alone shows that step as changed.
-    await builder.api.apps.files.write(app, {
-      "workflows/notify.ts": (notify["workflows/notify.ts"] ?? "").replace(
-        'call("hits", "notify")',
-        'call("hits", "notified")'
-      ),
-    });
     const { version: bodyOnly } = await builder.api.apps.files.commit(
       app,
+      {
+        "workflows/notify.ts": (notify["workflows/notify.ts"] ?? "").replace(
+          'call("hits", "notify")',
+          'call("hits", "notified")'
+        ),
+      },
       "Body"
     );
     await expect(
@@ -1270,19 +1277,20 @@ export default workflowTests(definition, [{ name: "runs", mocks: { save: 1 }, ex
     const { id: app } = await builder.api.apps.create({ name: "Digest" });
     await release(builder, app, digest("hwczrv0to6"));
     // Only the mail's address: two calls a 32-bit hash couldn't tell apart.
-    await builder.api.apps.files.write(app, digest("flfoi83s5j"));
     const { version: address } = await builder.api.apps.files.commit(
       app,
+      digest("flfoi83s5j"),
       "Address"
     );
     const addressReview = await builder.api.apps.versions.review(app, address);
     // Then only the helper the first step calls, without reading env.
-    await builder.api.apps.files.write(app, {
-      ...digest("hwczrv0to6"),
-      "workflows/lib/total.ts": "export const total = (n: number) => n + 2;\n",
-    });
     const { version: helper } = await builder.api.apps.files.commit(
       app,
+      {
+        ...digest("hwczrv0to6"),
+        "workflows/lib/total.ts":
+          "export const total = (n: number) => n + 2;\n",
+      },
       "Helper"
     );
     const helperReview = await builder.api.apps.versions.review(app, helper);
@@ -1352,15 +1360,18 @@ export default workflowTests(definition, [{ name: "runs", mocks: { save: 1 }, ex
         purge: exported("write"),
       }),
     });
-    await builder.api.apps.files.write(app, {
-      // Now on a schedule, and its step inside a function of its own.
-      ...weekly(`[{ type: "schedule", param: "every" }]`, true),
-      "app/exports.json": JSON.stringify({
-        totals: exported("write"),
-        book: exported("write"),
-      }),
-    });
-    const { version } = await builder.api.apps.files.commit(app, "Weekly");
+    const { version } = await builder.api.apps.files.commit(
+      app,
+      {
+        // Now on a schedule, and its step inside a function of its own.
+        ...weekly(`[{ type: "schedule", param: "every" }]`, true),
+        "app/exports.json": JSON.stringify({
+          totals: exported("write"),
+          book: exported("write"),
+        }),
+      },
+      "Weekly"
+    );
 
     const review = await builder.api.apps.versions.review(app, version);
 
@@ -1419,15 +1430,15 @@ export default workflowTests(definition, [{ name: "runs", mocks: { save: 1 }, ex
     const once = `[{ type: "schedule", param: "every" }]`;
     await release(builder, app, weekly(once, false, true));
     // Only a second schedule, the same as the first: both run it.
-    await builder.api.apps.files.write(
+    const { version } = await builder.api.apps.files.commit(
       app,
       weekly(
         `[{ type: "schedule", param: "every" }, { type: "schedule", param: "every" }]`,
         false,
         true
-      )
+      ),
+      "Twice"
     );
-    const { version } = await builder.api.apps.files.commit(app, "Twice");
 
     const review = await builder.api.apps.versions.review(app, version);
 
@@ -1490,8 +1501,11 @@ export default workflowTests(definition, [{ name: "runs", mocks: { save: 1 }, ex
       actions: ["read"],
       binding: "INBOX",
     });
-    await owner.api.apps.files.write(app, { "notes.md": "new" });
-    const { version } = await owner.api.apps.files.commit(app, "Notes");
+    const { version } = await owner.api.apps.files.commit(
+      app,
+      { "notes.md": "new" },
+      "Notes"
+    );
 
     const [ownReview, theirs, listed] = await Promise.all([
       owner.api.apps.versions.review(app, version),
@@ -1524,8 +1538,11 @@ export default workflowTests(definition, [{ name: "runs", mocks: { save: 1 }, ex
       id: reviewer.userId,
       role: "builder",
     });
-    await owner.api.apps.files.write(app, { "notes.md": "new" });
-    const { version } = await owner.api.apps.files.commit(app, "Notes");
+    const { version } = await owner.api.apps.files.commit(
+      app,
+      { "notes.md": "new" },
+      "Notes"
+    );
 
     const [ownReview, theirs] = await Promise.all([
       owner.api.apps.versions.review(app, version),

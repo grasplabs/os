@@ -82,8 +82,8 @@ export const chatSources = sqliteTable(
 /**
  * A chat's drafts: one per App its agent writes to, over the version it
  * started from (`base`, null for an App with none). A draft is the chat's
- * own: builders' working copy never sees it, and it reaches the App only
- * when the agent proposes it as a version (agent-builds.ts). Each write is
+ * own: it reaches the App only when the agent proposes it as a version
+ * (agent-builds.ts). Each write is
  * a new `revision`, and lands only over the revision it read. A draft
  * whose changes are all gone (proposed, discarded, or written back as the
  * base has them) keeps its row, and its revision: it has no changes, and

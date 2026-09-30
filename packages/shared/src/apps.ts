@@ -9,9 +9,9 @@ import type { Permission } from "./permissions.ts";
 import type { TriggerDeclaration } from "./workflows.ts";
 
 // An App's code is a tree of text files, versioned as a whole: builders
-// write files into the App's working copy and commit it as the next
-// version; the chat's agent, for a builder, writes into a draft of its
-// chat's own instead. Versions never change once committed.
+// commit changes over the App's latest version as the next version; the
+// chat's agent, for a builder, writes into a draft of its chat's own and
+// proposes that. Versions never change once committed.
 // One version is current, the one that runs; another can be pending, put
 // up for review before a builder makes it current.
 
@@ -64,8 +64,8 @@ export const newAppSchema = z.strictObject({
 export type NewApp = z.input<typeof newAppSchema>;
 
 /**
- * Changes to an App's working copy: a file's new content by path, or null
- * to delete it.
+ * Changes to an App's files: a file's new content by path, or null to
+ * delete it.
  */
 export const fileChangesSchema = z
   .record(appPathSchema, z.string().max(appLimits.fileLength).nullable())
@@ -336,27 +336,32 @@ export interface CommittedVersion extends AppVersion {
   };
 }
 
-/** An App's files and their working copy. */
+/** An App's files. */
 export interface AppFilesApi {
   /**
-   * The App's files at `version`; without one, its working copy: the
-   * latest version with every change written since.
+   * The App's files at `version`; without one, at its latest version
+   * (none while it has no version).
    */
   read: (app: string, version?: number) => Promise<AppFiles>;
-  /** Writes changes (`FileChanges`) to the working copy. */
-  write: (app: string, changes: FileChanges) => Promise<void>;
   /**
-   * Commits the working copy as the App's next version, and starts its
-   * screen, server and workflow builds at once, so the version opens
-   * without building. Answers with how they went (`builds`) once they are
-   * done, or after a few seconds with those still building as `pending`
-   * (all three `pending` while `build_on_save` is off).
+   * Commits `changes` over the App's latest version as its next version,
+   * and starts its screen, server and workflow builds at once, so the
+   * version opens without building. Answers with how they went (`builds`)
+   * once they are done, or after a few seconds with those still building
+   * as `pending` (all three `pending` while `build_on_save` is off).
    * A build never fails or holds up the commit. Exports that aren't
    * valid (`appExportsPath`) do: the commit is refused with
    * `app.exports_invalid`, naming the issues; and so do record types
    * that aren't (`appRecordTypesPath`), with `app.records_invalid`.
+   * Changes that leave the files as they are: `app.nothing_to_commit`.
+   * Of two commits at once, one is refused with `app.conflict`: read the
+   * latest version and commit over it again.
    */
-  commit: (app: string, message: string) => Promise<CommittedVersion>;
+  commit: (
+    app: string,
+    changes: FileChanges,
+    message: string
+  ) => Promise<CommittedVersion>;
 }
 
 /** An App's versions and which of them runs. */
@@ -548,7 +553,7 @@ export const appErrors = defineErrorFamily({
   "app.blueprint_not_found": "That version of the App isn't a blueprint.",
   "app.version_not_found": "The App has no such version.",
   "app.too_large": "The App's files would be over its limits.",
-  "app.nothing_to_commit": "Nothing was written since the latest version.",
+  "app.nothing_to_commit": "The changes leave the latest version as it is.",
   "app.exports_invalid":
     "The App's exports (app/exports.json) aren't valid, so it can't be committed.",
   "app.records_invalid":

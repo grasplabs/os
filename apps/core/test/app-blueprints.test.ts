@@ -68,8 +68,11 @@ const v1 = {
 const notesApp = async (owner: Person): Promise<string> => {
   const { id } = await owner.api.apps.create({ name: `Notes ${unique()}` });
   await release(owner, id, v1);
-  await owner.api.apps.files.write(id, { "AGENTS.md": "# Notes, v2\n" });
-  await owner.api.apps.files.commit(id, "Version 2");
+  await owner.api.apps.files.commit(
+    id,
+    { "AGENTS.md": "# Notes, v2\n" },
+    "Version 2"
+  );
   return id;
 };
 

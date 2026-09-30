@@ -239,6 +239,13 @@
       "when": 1790755038751,
       "tag": "0033_run_details_removed",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "6",
+      "when": 1790763408631,
+      "tag": "0034_drop_app_working_copy",
+      "breakpoints": true
     }
   ]
 }

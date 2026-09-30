@@ -58,9 +58,10 @@ import type { CheckOutcome, Draft } from "./workspace.ts";
 // create from, by the rules people follow: app-blueprints.ts), and
 // changes one in a draft of its own: one per chat and App, kept with the
 // chat in its Workspace object (workspace.ts), over the App's latest
-// version when it began. Builders'
-// working copy never sees a draft, so the agent's edits and a builder's
-// can't overwrite each other. It checks a draft as a save does (screens,
+// version when it began. A draft reaches the App only as a version, and
+// never over a version that changed the same files since it began, so
+// the agent's edits and a builder's can't overwrite each other. It checks
+// a draft as a save does (screens,
 // server code and workflows: type errors, @shadcn/lint and build errors)
 // and runs its workflows' tests, and dry-runs them with the values it
 // gives. A workflow must call the App's bindings where its step list can
@@ -628,8 +629,8 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
 
   /**
    * Writes `changes` (new content by path, or null to delete a file) into
-   * the chat's draft of `app`, refused as a whole as a write to the
-   * working copy would be. The version it is over, and what it changed.
+   * the chat's draft of `app`, refused as a whole as the changes of a
+   * commit would be. The version it is over, and what it changed.
    */
   async write(
     app: unknown,
@@ -943,7 +944,7 @@ const buildDeclaration = (previews: boolean): string => {
     : "";
   return `/**
  * Building Apps for the person: create one, or change one they build, in
- * this chat's own draft of it (builders' working copy never sees it). Write
+ * this chat's own draft of it (the App never sees it until proposed). Write
  * files, check them, fix what fails and check again. Nothing here makes a
  * change live: a builder of the App does that in Grasp.
  *

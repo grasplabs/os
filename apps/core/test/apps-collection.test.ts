@@ -270,8 +270,11 @@ describe("indexing", setUpTime, () => {
     // Version 2 made current unindexed, version 3 committed.
     await withIndexingOff(owner, async (api) => {
       await release({ api }, app.id, { "AGENTS.md": agentsMd(second) });
-      await api.apps.files.write(app.id, { "AGENTS.md": agentsMd(third) });
-      await api.apps.files.commit(app.id, "Third");
+      await api.apps.files.commit(
+        app.id,
+        { "AGENTS.md": agentsMd(third) },
+        "Third"
+      );
     });
 
     // The cron indexes version 2; just before its write lands, version 3

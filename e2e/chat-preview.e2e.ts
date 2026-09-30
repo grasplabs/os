@@ -134,11 +134,11 @@ test("the side panel previews the chat's draft, whose server code changes none o
   const name = `Tally ${tag}`;
   try {
     const app = await api.apps.create({ name });
-    await api.apps.files.write(app.id, {
-      "screens/tally.tsx": screen,
-      "app/server.ts": server("in the App"),
-    });
-    const { version } = await api.apps.files.commit(app.id, "A tally");
+    const { version } = await api.apps.files.commit(
+      app.id,
+      { "screens/tally.tsx": screen, "app/server.ts": server("in the App") },
+      "A tally"
+    );
     await api.apps.versions.setCurrent(app.id, version);
     const chat = await api.chats.create(`Preview ${tag}`);
     await writeDraft(builder.userId, chat.id, app.id, version, {
