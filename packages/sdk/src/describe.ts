@@ -160,12 +160,6 @@ interface Bindings {
   env: string | undefined;
   /** The SDK's stubs the file imports, by the name it imports each as. */
   stubs: ReadonlyMap<string, Stub>;
-  /**
-   * Each identifier in the workflow function that is its `env`: every one
-   * of that name but those a scope inside the function declares anew (a
-   * callback's own `env` parameter, say).
-   */
-  envUses: ReadonlySet<Node>;
 }
 
 const contextKeys = new Set([
@@ -218,7 +212,6 @@ const bindingsOf = (
     state: undefined,
     env: undefined,
     stubs,
-    envUses: new Set(),
   };
   if (!contextParam) {
     return bindings;
@@ -392,7 +385,11 @@ const envCallsIn = (bindings: Bindings, nodes: Node[]): string[] => {
   const names: string[] = [];
   for (const node of nodes) {
     visit(node, (candidate, ancestors) => {
-      if (!bindings.envUses.has(candidate)) {
+      if (
+        candidate.type !== "Identifier" ||
+        candidate.name !== bindings.env ||
+        isNamePosition(ancestors)
+      ) {
         return;
       }
       const called = envCallOf(bindings, ancestors);
@@ -455,18 +452,10 @@ const checkBindingUses = (body: Node, bindings: Bindings): void => {
 // spread or read by a computed name, and a call in a function inside a
 // step's own could be kept there and made by another step.
 //
-// Only the `env` the workflow function's parameter list binds counts: a
-// scope inside it that declares the name anew (`(sum, env) => sum + env`)
-// has a variable of its own, which is left alone. That hides nothing: such
-// a variable holds the bindings only if it is given them, and giving them
-// (`const env = outer`, `helper(env)`) is a use of the context's `env` that
-// is refused where it is written. Answers the uses that are the context's.
-const checkEnvUses = (
-  body: Node,
-  bindings: Bindings,
-  scopes: ReadonlyMap<Node, ReadonlySet<string>>
-): Set<Node> => {
-  const uses = new Set<Node>();
+// Every identifier of the context's `env`'s name is taken to be it: the
+// file declares nothing else by that name (`checkEnvName`), so there is no
+// telling two apart to get wrong.
+const checkEnvUses = (body: Node, bindings: Bindings): void => {
   visit(body, (node, ancestors) => {
     if (node.type === "ThisExpression") {
       throw fail(node, "Don't use `this` in the workflow's function");
@@ -486,22 +475,16 @@ const checkEnvUses = (
         `Only call \`${node.name}\`; don't rename it or pass it on`
       );
     }
-    const { name } = node;
-    const declaredAnew = ancestors.some(
-      ({ node: above }) => scopes.get(above)?.has(name) === true
-    );
-    if (name !== bindings.env || declaredAnew) {
+    if (node.name !== bindings.env) {
       return;
     }
     if (envCallOf(bindings, ancestors) === undefined) {
-      throw fail(node, envHint(name));
+      throw fail(node, envHint(node.name));
     }
     if (!inStepFunction(bindings, ancestors)) {
       throw fail(node, stepHint);
     }
-    uses.add(node);
   });
-  return uses;
 };
 
 /** The names a declaration's pattern binds, without its defaults' code. */
@@ -573,7 +556,59 @@ const declaredWithin = (node: Node): string[] => {
   return [];
 };
 
-/** The names each scope of a file declares, by the scope's node. */
+/** The names a node gives a value besides: an import, a class, TypeScript's own. */
+const declaredOtherwise = (node: Node): string[] => {
+  if (node.type === "ImportDeclaration") {
+    return node.specifiers.map(({ local }) => local.name);
+  }
+  if (node.type === "TSParameterProperty") {
+    return patternNames(node.parameter);
+  }
+  if (node.type === "TSDeclareFunction") {
+    const named = node.id ? [node.id.name] : [];
+    return [...named, ...node.params.flatMap((param) => patternNames(param))];
+  }
+  const named =
+    node.type === "ClassExpression" ||
+    node.type === "TSEnumDeclaration" ||
+    node.type === "TSModuleDeclaration" ||
+    node.type === "TSImportEqualsDeclaration";
+  return named && node.id?.type === "Identifier" ? [node.id.name] : [];
+};
+
+// Nothing else in the workflow's file is named as the context's `env` is:
+// no variable, parameter, catch binding, function, class or import,
+// wherever it is declared. Telling a second `env` from the context's takes
+// knowing exactly which scope each name is in (a `var` in a block is the
+// function's, so it *is* the parameter), and a reader that gets that wrong
+// once leaves a call out of the step list. With one `env` in the file,
+// every identifier of that name is the context's.
+const checkEnvName = (file: Node, run: Node, env: string | undefined): void => {
+  if (env === undefined) {
+    return;
+  }
+  visit(file, (node) => {
+    const names = [
+      ...declaredAround(node),
+      ...(node === run ? [] : declaredWithin(node)),
+      ...declaredOtherwise(node),
+    ];
+    if (names.includes(env)) {
+      throw fail(
+        node,
+        `Name this something other than \`${env}\`, such as \`entry\` or \`item\`: in a workflow's file only the workflow function's own \`${env}\` has that name`
+      );
+    }
+  });
+};
+
+/**
+ * The names each scope of a file declares, by the scope's node; only for
+ * telling what an assignment may change (`checkModuleScope`), where a name
+ * wrongly taken for undeclared is refused, never let through. A `var` is
+ * counted in the block it is written in, though it is its function's: a
+ * use of it outside that block is then refused, which errs the safe way.
+ */
 const scopesOf = (file: Node): Map<Node, Set<string>> => {
   const scopes = new Map<Node, Set<string>>();
   const declare = (scope: Node | undefined, names: string[]): void => {
@@ -587,6 +622,15 @@ const scopesOf = (file: Node): Map<Node, Set<string>> => {
     scopes.set(scope, known);
   };
   visit(file, (node, ancestors) => {
+    // `declare const Array: …` declares a type for a name, not a variable:
+    // the name is still the global.
+    const parent = ancestors.at(-1)?.node;
+    const typeOnly =
+      (node.type === "ClassDeclaration" && node.declare === true) ||
+      (parent?.type === "VariableDeclaration" && parent.declare === true);
+    if (typeOnly) {
+      return;
+    }
     declare(
       ancestors.findLast(({ node: above }) => isScope(above))?.node,
       declaredAround(node)
@@ -1235,8 +1279,9 @@ const readContext = (
   checkModuleScope(file);
   const { run, stubs } = findWorkflowFunction(file);
   const bindings = bindingsOf(run.params, stubs);
-  const envUses = checkEnvUses(run.body, bindings, scopesOf(run.body));
-  return { run, bindings: { ...bindings, envUses } };
+  checkEnvName(file, run, bindings.env);
+  checkEnvUses(run.body, bindings);
+  return { run, bindings };
 };
 
 /**
@@ -1265,8 +1310,8 @@ export const checkWorkflowModule = (source: string): void => {
  * steps and not in a function inside it, which another step could run.
  * `this`, `arguments`, and `env`, a binding or an SDK stub that is
  * renamed, kept in a variable, passed on, spread or read by a computed
- * name are errors (a variable named `env` that a scope inside the
- * function declares for itself is its own, and left alone), and so is what `checkWorkflowModule` refuses, each
+ * name are errors, and so is anything else in the file named as the
+ * context's `env` is (a callback's parameter, say: rename it), and so is what `checkWorkflowModule` refuses, each
  * saying how to write it instead.
  *
  * It is the part of `describeWorkflow` that isn't about how steps are laid

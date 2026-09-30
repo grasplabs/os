@@ -417,6 +417,16 @@ describe(describeWorkflow, () => {
         `let leaked;\nfor (Array.prototype.map of [() => leaked]) {}`,
         "Don't change `Array`, a global",
       ],
+      // A type declared for the name declares no variable.
+      [
+        `let leaked;\ndeclare const Array: { prototype: { map: unknown } };\nArray.prototype.map = () => leaked;`,
+        "Don't change `Array`, a global",
+      ],
+      // A `var` counts only in the block it is written in.
+      [
+        `let leaked;\n{ var made; }\nmade = leaked;`,
+        "Don't change `made`, a global",
+      ],
       // A name declared somewhere else in the file is still the global here.
       [
         `let leaked;\nconst first = (Array) => Array[0];\nArray.prototype.map = function () { leaked = this; return []; };`,
@@ -527,42 +537,67 @@ describe(describeWorkflow, () => {
     ).toHaveLength(1);
   });
 
-  it("leaves alone a variable named env that a scope inside the workflow's function declares for itself", () => {
-    const envOf = (body: string): unknown[] =>
-      describeWorkflow(workflowSource(body, "step, { input, env }")).steps.map(
-        (node) => (node.type === "step" ? node.env : node.type)
-      );
+  it("refuses anything else in the workflow's file named as its env is, so every env is the context's", () => {
+    const call = `await env.APP.call("sendAll");`;
+    const rename = "Name this something other than `env`";
+    const cases: string[] = [
+      // A `var` in a block is the function's own variable, so here it is
+      // the context's `env` itself: the call under it is a binding's.
+      inStep(`{ var env; ${call} }`),
+      inStep(`if (input.ok) { var env = env; ${call} }`),
+      // A callback's parameter, a local, a catch binding, a loop's variable.
+      inStep(`return input.totals.reduce((sum, env) => sum + env, 0);`),
+      inStep(`const env = { APP: { call: () => 1 } }; ${call}`),
+      inStep(`try { ${call} } catch (env) { return env; }`),
+      inStep(`for (const env of input.totals) { ${call} }`),
+      inStep(`const { first: env } = input; ${call}`),
+      inStep(`const [, ...env] = input.totals; ${call}`),
+      // A function or a class of that name, and between steps too.
+      inStep(`function env() {} ${call}`),
+      `const take = function env() {};\n${inStep(call)}`,
+      inStep(`class env {} ${call}`),
+      `const count = (env) => env.length;\n${inStep(call)}`,
+    ];
 
-    // A callback's own parameter, in a step and between steps.
-    expect(
-      envOf(
-        `const count = (env) => env.length;\n${inStep(`return input.totals.reduce((sum, env) => sum + env, count(input.totals));`)}`
-      )
-    ).toStrictEqual([undefined]);
-    // The step's own variable: its calls aren't the App's bindings'.
-    expect(
-      envOf(
-        inStep(
-          `const env = { LOCAL: { call: () => 1 } }; return env.LOCAL.call();`
+    for (const body of cases) {
+      expect(() =>
+        describeWorkflow(workflowSource(body, "step, { input, env }"))
+      ).toThrow(rename);
+    }
+    // Anywhere in the file, an import included.
+    for (const top of [
+      `import { env } from "./lib/env.ts";`,
+      `import env from "./lib/env.ts";`,
+      `import * as env from "./lib/env.ts";`,
+      `const env = {};`,
+      `const pick = ({ env }) => env;`,
+      `declare const env: unknown;`,
+      `enum env { One }`,
+    ]) {
+      expect(() =>
+        describeWorkflow(
+          `${top}\n${workflowSource(inStep(call), "step, { input, env }")}`
         )
-      )
-    ).toStrictEqual([undefined]);
-    // Next to it, the context's `env` still counts.
-    expect(
-      envOf(
-        inStep(
-          `const total = input.totals.reduce((sum, env) => sum + env, 0); await env.APP.call("book", total);`
-        )
-      )
-    ).toStrictEqual([["APP"]]);
-    // Handing the context's `env` to a variable of that name is a use of it.
+      ).toThrow(rename);
+    }
+    // Under another name, that name is the one nothing else has.
     expect(() =>
-      envOf(
-        inStep(
-          `const send = (env) => env.APP.call("sendAll"); await send(env);`
+      describeWorkflow(
+        workflowSource(
+          inStep(`return input.totals.map((bindings) => bindings);`),
+          "step, { input, env: bindings }"
         )
       )
-    ).toThrow("don't keep `env`");
+    ).toThrow("Name this something other than `bindings`");
+    // A property or a key of that name is no variable.
+    expect(
+      describeWorkflow(
+        workflowSource(
+          inStep(`return { env: input.env, first: input.totals[0] };`),
+          "step, { input, env }"
+        )
+      ).steps
+    ).toMatchObject([{ name: "tidy-up" }]);
   });
 
   it("checks how the bindings are called apart from how the steps are laid out", () => {
