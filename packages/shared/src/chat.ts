@@ -285,18 +285,17 @@ export interface ChatsApi {
     args: unknown[]
   ) => Promise<unknown>;
   /**
-   * Tells the chat's agent how the preview of the draft at `revision`
-   * runs on `screen`: `problem`, one its screen reported (an uncaught
-   * error, an unhandled rejection or a `console.error`), or, without one,
-   * that it rendered. Its next check of the draft reads them. A report of
-   * a revision the draft moved past is dropped.
+   * Tells the chat's agent of `problem`, one the preview of the draft at
+   * `revision` ran into on `screen` (an uncaught error, an unhandled
+   * rejection or a `console.error`). Its next check of the draft reads
+   * them. A report of a revision the draft moved past is dropped.
    */
   previewReport: (
     chatId: string,
     app: string,
     revision: number,
     screen: string,
-    problem?: ScreenProblem
+    problem: ScreenProblem
   ) => Promise<void>;
   /** Stops the agent's work on the chat; `false` when there was none. */
   cancel: (chatId: string) => Promise<boolean>;

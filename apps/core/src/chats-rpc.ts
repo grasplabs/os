@@ -349,15 +349,16 @@ export class ChatsRpc extends RpcTarget implements ChatsApi {
     app: string,
     revision: number,
     screen: string,
-    problem?: ScreenProblem
+    problem: ScreenProblem
   ): Promise<void> {
     await withPerson(this.#check, async (by) => {
       const { id } = await appFor(this.#env, by, app, "builder");
       const at = screenErrors.parse("screen.invalid", screenNameSchema, screen);
-      const reported =
-        problem === undefined
-          ? undefined
-          : screenErrors.parse("screen.invalid", screenProblemSchema, problem);
+      const reported = screenErrors.parse(
+        "screen.invalid",
+        screenProblemSchema,
+        problem
+      );
       await this.#chatsOf(by.userId).previewReport(
         chatIdOf(chatId),
         by.userId,

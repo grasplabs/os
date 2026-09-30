@@ -580,6 +580,7 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
   it("refuses to build without the agent's own permission, or for someone who doesn't build", async () => {
     const calls = tryEach({
       create: `(await env.build.create({ name: "Refused" })).name`,
+      call: `await env.build.call("app_refused", "count")`,
     });
     const resultOf = async (
       role: "builder" | "user",
@@ -599,10 +600,12 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
     // Reading the Apps collection is not building.
     await expect(resultOf("builder", ["read"])).resolves.toStrictEqual({
       create: denied,
+      call: denied,
     });
     // The agent's permission reaches no further than its person.
     await expect(resultOf("user", ["read", "write"])).resolves.toStrictEqual({
       create: forbidden,
+      call: appErrors.create("app.not_found").message,
     });
   });
 
@@ -615,6 +618,8 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
         tryEach({
           shared: `await env.build.write(${JSON.stringify(shared)}, { "a.md": "a" })`,
           unshared: `await env.build.write(${JSON.stringify(unshared)}, { "a.md": "a" })`,
+          sharedCall: `await env.build.call(${JSON.stringify(shared)}, "count")`,
+          unsharedCall: `await env.build.call(${JSON.stringify(unshared)}, "count")`,
         })
       ),
       says("No."),
@@ -633,6 +638,8 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
     expect(returned(result?.text)).toStrictEqual({
       shared: roleErrors.create("role.forbidden").message,
       unshared: appErrors.create("app.not_found").message,
+      sharedCall: roleErrors.create("role.forbidden").message,
+      unsharedCall: appErrors.create("app.not_found").message,
     });
   });
 

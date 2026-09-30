@@ -1,4 +1,3 @@
-import { appErrors } from "@grasp-os/shared/apps";
 import { appIdSchema, chatIdSchema } from "@grasp-os/shared/ids";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -6,7 +5,6 @@ import { z } from "zod";
 
 import { chatAgentId, personalWorkspaceId } from "../src/chats-rpc.ts";
 import { workspace } from "../src/durable-objects.ts";
-import type { PreviewOutcome } from "../src/preview-reports.ts";
 import { buildServer } from "../src/screens.ts";
 import {
   codeResults,
@@ -19,19 +17,22 @@ import {
 import { fakeGateway } from "./ai-gateway.ts";
 import type { GatewayReply } from "./ai-gateway.ts";
 import { release, requestGranted } from "./apps.ts";
+import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
 import { mailConnection } from "./mail-connection.ts";
 import { signedInApi } from "./sign-in.ts";
 
 // The repair loop, fed by the preview: the chat's agent writes a draft
 // whose server code fails at run time, the preview in the person's side
-// panel reports it, and the agent's next check fails with it, so the agent
-// fixes it and checks again, with no one stepping in. The side panel is
-// played here as the page plays it (screen-host.ts): it follows the chat,
-// previews the draft at each write, calls its server as the screen does,
-// and reports what went wrong, then that it rendered. What it reports is
-// text the draft's code wrote, so these tests also write it as an attack,
-// and check that it reaches the model only as data in a check's result.
+// panel runs into it, and the agent's next check fails with it, so the
+// agent fixes it and checks again, with no one stepping in. The side
+// panel is played here as the page plays it (screen-host.ts): it follows
+// the chat, previews the draft at each write, calls its server as the
+// screen does, and reports what went wrong. The agent can also call the
+// draft's server itself (`env.build.call`), in the same preview. What
+// either sees is text the draft's code wrote, so these tests also write
+// it as an attack, and check that it reaches the model only as data in a
+// tool's result.
 
 const idp = mockIdp();
 
@@ -60,16 +61,10 @@ export class App extends DurableObject {
 }
 `;
 
-/** A preview's outcome, by each problem's source and whether it was refused. */
-const summary = (reported: PreviewOutcome) => ({
-  status: reported.status,
-  problems: reported.problems.map(({ source, refused }) => ({
-    source,
-    refused,
-  })),
-});
-
-/** Server code whose `send` mails through `MAIL`, as a screen's button would. */
+/**
+ * Server code whose `send` mails through `MAIL`, as a screen's button
+ * would, and whose `count` counts in its own storage.
+ */
 const mailing = `import { DurableObject } from "cloudflare:workers";
 
 export class App extends DurableObject {
@@ -89,8 +84,14 @@ export class App extends DurableObject {
     throw new TypeError("total is undefined");
   }
 
-  forge(_caller: unknown, text: string): never {
-    throw Object.assign(new Error(text), { code: "app.preview_side_effect" });
+  async count(): Promise<number> {
+    const now = ((await this.ctx.storage.get<number>("count")) ?? 0) + 1;
+    await this.ctx.storage.put("count", now);
+    return now;
+  }
+
+  broken(): never {
+    throw new Error(atob(${JSON.stringify(btoa(`Invoice 7 has no total. ${attack}`))}));
   }
 }
 `;
@@ -111,7 +112,6 @@ const check = `export default async (env) => {
   return {
     passed: checked.passed,
     failedInARow: checked.failedInARow,
-    preview: checked.preview.status,
     problems: checked.preview.problems.map(({ source, at, message }) => ({ source, at, message })),
   };
 };`;
@@ -140,8 +140,7 @@ const answer = async (promise: Promise<unknown>): Promise<unknown> => {
 
 /**
  * The side panel, previewing the chat's draft once it is at `revision`:
- * its screen calls `total`, reports the rejection it got, if any, and then
- * that it rendered.
+ * its screen calls `total`, and reports the rejection it got, if any.
  */
 const previewAt = async (
   person: Person,
@@ -168,7 +167,6 @@ const previewAt = async (
       message: "The total couldn't be read.",
     });
   }
-  await chats.previewReport(chatId, app, bundle.revision, bundle.screen);
   return total;
 };
 
@@ -284,7 +282,6 @@ describe("the repair loop, fed by the preview", { timeout: 180_000 }, () => {
       failedCheck: {
         passed: false,
         failedInARow: 1,
-        preview: "failed",
         problems: [
           {
             source: "server",
@@ -301,7 +298,6 @@ describe("the repair loop, fed by the preview", { timeout: 180_000 }, () => {
       passedCheck: {
         passed: true,
         failedInARow: 0,
-        preview: "passed",
         problems: [],
       },
       outsideResults: gateway.requests.map(() => false),
@@ -310,7 +306,104 @@ describe("the repair loop, fed by the preview", { timeout: 180_000 }, () => {
     });
   });
 
-  it("fails a check for every problem the draft caused, and passes over only what core saw refused", async () => {
+  it("waits a moment for the preview of a write checked at once, and fails on what it ran into", async () => {
+    const { builder, app, chatId, stub } = await setUp([
+      codeStep(`export default async (env) => {
+        const [app] = (await env.apps.list()).filter(({ name }) => name === "Invoice desk");
+        await env.build.write(app.id, ${JSON.stringify({
+          "app/server.ts": server(false),
+        })});
+        const checked = await env.build.check(app.id);
+        return {
+          passed: checked.passed,
+          seen: checked.preview.seen,
+          // The screen's own report may land in the same moment: the
+          // server's failure is kept first.
+          first: checked.preview.problems.map(({ source, at }) => ({ source, at }))[0],
+        };
+      };`),
+      says("It fails."),
+    ]);
+
+    // The side panel has the draft's first write open.
+    await stub.saveDraft(
+      chatIdSchema.parse(chatId),
+      app,
+      1,
+      { "screens/desk.tsx": screen, "app/server.ts": server(true) },
+      [],
+      0
+    );
+    await builder.api.chats.preview(chatId, app);
+    // The next write and the check in one step: the panel previews the
+    // write while the check waits for it.
+    const asked = stub.ask(chatIdSchema.parse(chatId), {
+      text: "Make the invoice desk show the total",
+      model,
+    });
+    const broken = await previewAt(builder, chatId, 2);
+    await asked;
+
+    const [checked] = await codeResults(stub, chatId);
+    expect({ broken, checked: returned(checked?.text) }).toStrictEqual({
+      broken: "app.failed",
+      checked: {
+        passed: false,
+        seen: true,
+        first: { source: "server", at: "total" },
+      },
+    });
+  });
+
+  it("waits for no preview when the draft doesn't build, even with the panel open", async () => {
+    const { builder, app, chatId, stub } = await setUp([
+      codeStep(`export default async (env) => {
+        const [app] = (await env.apps.list()).filter(({ name }) => name === "Invoice desk");
+        await env.build.write(app.id, { "app/server.ts": "export class App {" });
+        const started = Date.now();
+        const checked = await env.build.check(app.id);
+        return {
+          passed: checked.passed,
+          server: checked.server.status,
+          seen: checked.preview.seen,
+          elapsed: Date.now() - started,
+        };
+      };`),
+      says("It doesn't build."),
+    ]);
+    // The side panel has the draft's first write open.
+    await stub.saveDraft(
+      chatIdSchema.parse(chatId),
+      app,
+      1,
+      { "screens/desk.tsx": screen, "app/server.ts": server(true) },
+      [],
+      0
+    );
+    await builder.api.chats.preview(chatId, app);
+
+    await stub.ask(chatIdSchema.parse(chatId), {
+      text: "Change the invoice desk's server",
+      model,
+    });
+
+    const [checked] = await codeResults(stub, chatId);
+    const { elapsed, ...result } = z
+      .object({
+        passed: z.boolean(),
+        server: z.string(),
+        seen: z.boolean(),
+        elapsed: z.number(),
+      })
+      .parse(returned(checked?.text));
+    expect({ result, quick: elapsed < 2500 }).toStrictEqual({
+      result: { passed: false, server: "failed", seen: false },
+      // Well under the preview wait of 3 seconds.
+      quick: true,
+    });
+  });
+
+  it("fails a check for each problem its preview ran into, but for a refusal the draft lets out", async () => {
     const { builder, app, chatId, stub } = await setUp([], false);
     const admin = await signedInApi(idp, "admin");
     const mail = await mailConnection();
@@ -334,164 +427,170 @@ describe("the repair loop, fed by the preview", { timeout: 180_000 }, () => {
       );
       return revision + 1;
     };
-    /** How the preview of `revision` ran, waiting up to `waitMs` for it. */
-    const outcome = async (revision: number, waitMs = 0) =>
-      await stub.previewOutcome(id, app, revision, waitMs);
-    const refusalText = appErrors.create("app.preview_side_effect").message;
-    /** The draft's `method`, as its screen calls it: its answer, or code. */
-    const call = async (
-      revision: number,
-      method: string,
-      args: unknown[] = []
-    ): Promise<unknown> => {
-      try {
-        return await chats.previewCall(chatId, app, revision, method, args);
-      } catch (error) {
-        return typeof error === "object" && error !== null && "code" in error
-          ? error.code
-          : String(error);
-      }
+    /** Where each problem the preview of `revision` ran into comes from. */
+    const sources = async (revision: number) => {
+      const { problems } = await stub.previewProblems(id, app, revision, 0);
+      return problems.map(({ source }) => source);
     };
-    const rendered = async (revision: number) => {
-      await chats.previewReport(chatId, app, revision, "desk");
+    /** The draft's `method`, as its screen calls it: its answer, or code. */
+    const call = async (revision: number, method: string): Promise<unknown> =>
+      await answer(chats.previewCall(chatId, app, revision, method, []));
+    const reportOn = async (revision: number, message: string) => {
+      await chats.previewReport(chatId, app, revision, "desk", {
+        kind: "rejection",
+        message,
+      });
     };
 
     const first = await writeDraft(0);
-    // Nobody opened it: unseen, and a check doesn't wait for it.
-    const unseen = await outcome(first);
-    await chats.preview(chatId, app);
-    // The mail the preview refused, which the screen handles: the draft
-    // may be right. It passes once it ran a moment past rendering.
-    const refusedAnswer = await call(first, "send");
-    await rendered(first);
-    const handled = await outcome(first, 5000);
+    // Nobody opened it: nothing to read, not seen, and no wait for it.
+    const asked = Date.now();
+    const unopened = await stub.previewProblems(id, app, first, 5000);
+    const waited = Date.now() - asked < 2000;
+    // The mail the preview refused, let out by the draft and handled by
+    // the screen: the draft may be right.
+    const refused = await call(first, "send");
+    const handled = await sources(first);
 
     // The same refusal, left unhandled by the screen: what the screen
-    // reports of it is the draft's, whatever it says.
+    // reports of it is the draft's.
     const second = await writeDraft(first);
     await call(second, "send");
-    await chats.previewReport(chatId, app, second, "desk", {
-      kind: "rejection",
-      message: refusalText,
-    });
-    await rendered(second);
-    const unhandled = await outcome(second);
-
-    // An error the draft forged to look like a refusal, with its text and
-    // code, in a call no stub refused a call of: the draft's.
-    const third = await writeDraft(second);
-    const forged = await call(third, "forge", [refusalText]);
-    await rendered(third);
-    const forgedOutcome = await outcome(third);
-
-    // Refusals in numbers crowd out no real error: ten refused sends, then
-    // a TypeError, which still fails the check.
-    const fourth = await writeDraft(third);
-    for (let count = 0; count < 10; count += 1) {
-      // oxlint-disable-next-line no-await-in-loop -- one call after another, as a screen makes them
-      await call(fourth, "send");
-    }
-    await chats.previewReport(chatId, app, fourth, "desk", {
-      kind: "error",
-      message: "TypeError: total is undefined",
-    });
-    await rendered(fourth);
-    const crowded = await outcome(fourth);
-
-    // An error a moment after rendering, while a check waits for the
-    // preview to settle, still fails it.
-    const fifth = await writeDraft(fourth);
-    await rendered(fifth);
-    const settling = outcome(fifth, 5000);
-    await chats.previewReport(chatId, app, fifth, "desk", {
-      kind: "rejection",
-      message: "TypeError: the invoices never loaded",
-    });
-    const late = await settling;
-
-    // A check out of time while the preview settles waits it out rather
-    // than passing it: an error in that window still fails it.
-    const sixth = await writeDraft(fifth);
-    await rendered(sixth);
-    const outOfTime = outcome(sixth, 0);
-    await chats.previewReport(chatId, app, sixth, "desk", {
-      kind: "rejection",
-      message: "TypeError: the totals never loaded",
-    });
-    const unsettled = await outOfTime;
+    await reportOn(second, "Unhandled: the mail couldn't be sent");
+    const unhandled = await sources(second);
 
     // A refusal the draft caught, then an error of its own: the draft's.
-    const seventh = await writeDraft(sixth);
-    const caughtThenFailed = await call(seventh, "sendThenFail");
-    await rendered(seventh);
-    const caught = await outcome(seventh);
+    const third = await writeDraft(second);
+    const caughtThenFailed = await call(third, "sendThenFail");
+    const caught = await sources(third);
+
+    // A screen failing in a loop fills the list and no more.
+    const fourth = await writeDraft(third);
+    for (let count = 0; count < 15; count += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- one report after another, as a screen sends them
+      await reportOn(fourth, `TypeError number ${count}`);
+    }
+    const { length: looping } = await sources(fourth);
 
     // What an earlier write's preview reports once the draft moved on is
-    // dropped.
-    const eighth = await writeDraft(seventh);
-    await chats.previewReport(chatId, app, seventh, "desk", {
-      kind: "error",
-      message: "From the earlier write",
-    });
-    const moved = await outcome(eighth);
+    // dropped, and the new write starts with none.
+    const fifth = await writeDraft(fourth);
+    await reportOn(fourth, "From the earlier write");
+    const moved = await sources(fifth);
 
     expect({
-      unseen: summary(unseen),
-      refusedAnswer,
-      handled: summary(handled),
-      unhandled: summary(unhandled),
-      forged,
-      forgedOutcome: summary(forgedOutcome),
-      crowded: summary(crowded),
-      late: summary(late),
-      unsettled: summary(unsettled),
+      unopened,
+      answeredAtOnce: waited,
+      refused,
+      handled,
+      unhandled,
       caughtThenFailed,
-      caught: summary(caught),
-      moved: summary(moved),
+      caught,
+      looping,
+      moved,
       mail: await mail.did(),
     }).toStrictEqual({
-      unseen: { status: "unseen", problems: [] },
-      refusedAnswer: "app.preview_side_effect",
-      handled: {
-        status: "passed",
-        problems: [{ source: "server", refused: true }],
-      },
-      unhandled: {
-        status: "failed",
-        problems: [
-          { source: "server", refused: true },
-          { source: "screen", refused: false },
-        ],
-      },
-      forged: "app.failed",
-      forgedOutcome: {
-        status: "failed",
-        problems: [{ source: "server", refused: false }],
-      },
-      crowded: {
-        status: "failed",
-        problems: [
-          { source: "server", refused: true },
-          { source: "server", refused: true },
-          { source: "server", refused: true },
-          { source: "screen", refused: false },
-        ],
-      },
-      late: {
-        status: "failed",
-        problems: [{ source: "screen", refused: false }],
-      },
-      unsettled: {
-        status: "failed",
-        problems: [{ source: "screen", refused: false }],
-      },
+      unopened: { problems: [], seen: false },
+      answeredAtOnce: true,
+      refused: "app.preview_side_effect",
+      handled: [],
+      unhandled: ["screen"],
       caughtThenFailed: "app.failed",
-      caught: {
-        status: "failed",
-        problems: [{ source: "server", refused: false }],
-      },
-      moved: { status: "unseen", problems: [] },
+      caught: ["server"],
+      looping: 10,
+      moved: [],
       mail: { calls: 0, sent: [] },
+    });
+  });
+
+  it("lets the agent call its draft's server code in the preview, never the App's live data", async () => {
+    const drafted = { "screens/desk.tsx": screen, "app/server.ts": mailing };
+    const { builder, app, chatId, stub, gateway } = await setUp([
+      codeStep(`export default async (env) => {
+        const [app] = (await env.apps.list()).filter(({ name }) => name === "Invoice desk");
+        await env.build.write(app.id, ${JSON.stringify(drafted)});
+        const first = await env.build.call(app.id, "count");
+        const second = await env.build.call(app.id, "count", []);
+        const broken = await env.build.call(app.id, "broken");
+        let refused = null;
+        try {
+          await env.build.call(app.id, "send");
+        } catch (error) {
+          refused = String(error.message).startsWith("A preview changes nothing");
+        }
+        const checked = await env.build.check(app.id);
+        return {
+          first,
+          second,
+          broken: { ok: broken.ok, code: broken.code, message: broken.message },
+          refused,
+          problems: checked.preview.problems.length,
+          seen: checked.preview.seen,
+        };
+      };`),
+      says("Called."),
+    ]);
+    const admin = await signedInApi(idp, "admin");
+    const mail = await mailConnection();
+    await requestGranted(idp, admin, {
+      subject: { type: "app", appId: appIdSchema.parse(app) },
+      object: { type: "connection", connectionId: mail.id },
+      actions: ["mail.send"],
+      binding: "MAIL",
+    });
+    // The App live, with the same server code, and a count of its own.
+    await release(builder, app, { "app/server.ts": mailing });
+    await buildServer(env, { "app/server.ts": mailing });
+    const live = async () => await builder.api.screens.call(app, "count", []);
+    const before = [await live(), await live()];
+
+    await stub.ask(chatIdSchema.parse(chatId), {
+      text: "Try the invoice desk's count",
+      model,
+    });
+
+    const results = await codeResults(stub, chatId);
+    const audited = await vi.waitFor(
+      async () => {
+        const events = await allEvents();
+        const calls = events.filter(
+          ({ action, detail }) =>
+            action === "agent.call" && detail.method === "build.call"
+        );
+        expect(calls).toHaveLength(4);
+        return calls.map(({ detail }) => detail.ok);
+      },
+      { timeout: 10_000, interval: 50 }
+    );
+    expect({
+      called: returned(results[0]?.text),
+      before,
+      after: await live(),
+      mail: await mail.did(),
+      // The failure's text reaches the model only inside a tool's result.
+      inResult: JSON.stringify(gateway.requests.at(-1)?.body).includes(attack),
+      audited,
+    }).toStrictEqual({
+      called: {
+        first: { ok: true, answer: 1 },
+        second: { ok: true, answer: 2 },
+        broken: {
+          ok: false,
+          code: "app.failed",
+          message: `Invoice 7 has no total. ${attack}`,
+        },
+        refused: true,
+        // The agent heard of its own calls: nothing kept for the check,
+        // and with no side panel open, its screens weren't seen.
+        problems: 0,
+        seen: false,
+      },
+      before: [1, 2],
+      after: 3,
+      mail: { calls: 0, sent: [] },
+      inResult: true,
+      // Each audited as the agent's call, the refused one too.
+      audited: [true, true, false, undefined],
     });
   });
 });
