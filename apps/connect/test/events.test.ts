@@ -1,5 +1,6 @@
 import type { EventListener } from "@grasp-os/shared/connect";
 import { connectionIdSchema } from "@grasp-os/shared/ids";
+import { connectorEventSchema } from "@grasp-os/shared/workflows";
 import { env, exports } from "cloudflare:workers";
 import {
   afterEach,
@@ -12,10 +13,10 @@ import {
 import { z } from "zod";
 
 import {
+  failedLimit,
   maxDeliveryAttempts,
   outboxMax,
   pollIntervalMs,
-  refusedLimit,
 } from "../src/events.ts";
 import { accessTokenFor } from "../src/tokens.ts";
 import {
@@ -49,7 +50,7 @@ import { fakeProviders } from "./oauth-provider.ts";
 const providers = fakeProviders();
 let graph: GraphEventsFake = graphEventsFake();
 /** Answers the next Graph request instead of the fake, when set. */
-let instead: (() => Response) | undefined;
+let instead: (() => Response | Promise<Response>) | undefined;
 /** Drives Graph fails every request for. */
 const failingDrives = new Set<string>();
 /** Holds each request for where a drive stands until it resolves, when set. */
@@ -61,7 +62,7 @@ const internet = fakeInternet(async (request, url) => {
   const answer = instead;
   if (answer !== undefined) {
     instead = undefined;
-    return answer();
+    return await answer();
   }
   if (
     [...failingDrives].some((drive) =>
@@ -177,6 +178,47 @@ const heldCount = async (): Promise<number> => {
   ).first<{ held: number }>();
   return row?.held ?? 0;
 };
+
+/**
+ * The shared invoices mailbox read by `outlook`, Graph answering every
+ * read with `status`, each after the last one's wait, once more than it
+ * takes for the audit log to say so: the source then, how long it waits,
+ * and what the audit log says of it failing.
+ */
+const failedReads = async (outlook: Connected, status: number) => {
+  const listeners = [listener(outlook, { resource: invoices })];
+  await sync(listeners);
+  let failedAt = 0;
+  for (let attempt = 1; attempt <= failedLimit + 1; attempt += 1) {
+    instead = () => Response.json({ error: { code: "Failed" } }, { status });
+    // oxlint-disable-next-line no-await-in-loop -- each read after the last one's wait
+    const [due] = await sources();
+    vi.setSystemTime(Math.max(Date.now(), due?.poll_at ?? 0));
+    failedAt = Date.now();
+    // oxlint-disable-next-line no-await-in-loop -- reads in turn
+    await sync(listeners);
+  }
+  const [source] = await sources();
+  const listed = await listening();
+  return {
+    source,
+    wait: (source?.poll_at ?? 0) - failedAt,
+    recorded: listed
+      .filter(({ action }) =>
+        ["connection.events.refused", "connection.events.failed"].includes(
+          action
+        )
+      )
+      .map(({ action, detail }) => ({ action, detail })),
+  };
+};
+
+/** Graph failing a request. */
+const failedAnswer = (): Response =>
+  Response.json({ error: { code: "Failed" } }, { status: 500 });
+
+/** An ID's hash, as an event is delivered under it. */
+const hashedIdPattern = /^sha256:[0-9a-f]{64}$/u;
 
 const eventIdsOf = (taken: { event: string }[]): string[] =>
   taken.map(
@@ -423,20 +465,34 @@ describe("connector events", () => {
     ]);
   });
 
-  it("read a flood of mail a hundred at a time, the rest at once", async () => {
+  it("read a flood of mail that built up over an unread hour a hundred at a time, the rest at once, each once", async () => {
     const outlook = await connected();
     await sync([listener(outlook)]);
-    for (let n = 1; n <= 150; n += 1) {
-      graph.receive(outlook.oid, invoiceMail(outlook.oid, n, now()));
+    // An hour without a read, mail arriving all through it.
+    const flood = 250;
+    const expected: string[] = [];
+    for (let n = 1; n <= flood; n += 1) {
+      later((60 * 60_000) / flood);
+      const mail = invoiceMail(outlook.oid, n, now());
+      graph.receive(outlook.oid, mail);
+      expected.push(mail.id);
     }
-    later();
     await sync([listener(outlook)]);
     const first = await outboxed();
     // The rest is due at once, without waiting for the next minute.
     await sync([listener(outlook)]);
+    await sync([listener(outlook)]);
+    const caughtUp = await outboxed();
+    // Nothing of it again once the source has caught up.
+    later();
+    await sync([listener(outlook)]);
     const all = await outboxed();
 
-    expect([first.length, all.length]).toStrictEqual([100, 150]);
+    expect({
+      first: first.length,
+      caughtUp: caughtUp.map(({ id }) => id),
+      all: all.length,
+    }).toStrictEqual({ first: 100, caughtUp: expected, all: flood });
   });
 
   it("read nothing while the outbox is full, and keep their place", async () => {
@@ -840,42 +896,134 @@ describe("connector events", () => {
 
   it("read a source refused access only daily after ten refusals in a row, and say so once", async () => {
     const outlook = await connected();
-    await sync([listener(outlook, { resource: invoices })]);
-    const refusedAt: number[] = [];
-    for (let attempt = 1; attempt <= refusedLimit + 1; attempt += 1) {
-      instead = () =>
-        Response.json(
-          { error: { code: "ErrorAccessDenied" } },
-          { status: 403 }
-        );
-      // oxlint-disable-next-line no-await-in-loop -- each read after the last one's wait
-      const [source] = await sources();
-      vi.setSystemTime(Math.max(Date.now(), source?.poll_at ?? 0));
-      refusedAt.push(Date.now());
-      // oxlint-disable-next-line no-await-in-loop -- reads in turn
-      await sync([listener(outlook, { resource: invoices })]);
-    }
-    const [source] = await sources();
-    const listed = await listening();
-    const refused = listed.filter(
-      ({ action }) => action === "connection.events.refused"
-    );
+    const { source, wait, recorded } = await failedReads(outlook, 403);
 
     expect({
       failures: source?.failures,
-      wait: (source?.poll_at ?? 0) - (refusedAt.at(-1) ?? 0),
-      refused: refused.map(({ detail }) => detail),
+      wait,
+      recorded,
     }).toStrictEqual({
-      failures: refusedLimit + 1,
+      failures: failedLimit + 1,
       wait: 24 * 60 * 60_000,
-      refused: [
+      recorded: [
         {
-          type: "m365.mail.received",
-          resource: invoices,
-          status: 403,
-          failures: refusedLimit,
+          action: "connection.events.refused",
+          detail: {
+            type: "m365.mail.received",
+            resource: invoices,
+            status: 403,
+            failures: failedLimit,
+          },
         },
       ],
+    });
+  });
+
+  it("go on reading a source that fails for another reason hourly, and say so once after ten failures in a row", async () => {
+    const outlook = await connected();
+    const { source, wait, recorded } = await failedReads(outlook, 500);
+
+    expect({
+      failures: source?.failures,
+      wait,
+      recorded,
+    }).toStrictEqual({
+      failures: failedLimit + 1,
+      wait: 60 * 60_000,
+      recorded: [
+        {
+          action: "connection.events.failed",
+          detail: {
+            type: "m365.mail.received",
+            resource: invoices,
+            status: 500,
+            failures: failedLimit,
+          },
+        },
+      ],
+    });
+  });
+
+  it("say nothing of a failure a read that outlived its lease didn't count, its source read on since", async () => {
+    const outlook = await connected();
+    const listeners = [listener(outlook, { resource: invoices })];
+    await sync(listeners);
+    for (let attempt = 1; attempt < failedLimit; attempt += 1) {
+      instead = failedAnswer;
+      // oxlint-disable-next-line no-await-in-loop -- each read after the last one's wait
+      const [due] = await sources();
+      vi.setSystemTime(Math.max(Date.now(), due?.poll_at ?? 0));
+      // oxlint-disable-next-line no-await-in-loop -- reads in turn
+      await sync(listeners);
+    }
+    const [due] = await sources();
+    vi.setSystemTime(Math.max(Date.now(), due?.poll_at ?? 0));
+    // The read that would fail for the tenth time in a row, held at Graph.
+    const gate = Promise.withResolvers<null>();
+    instead = async () => {
+      await gate.promise;
+      return failedAnswer();
+    };
+    const slow = sync(listeners);
+    await vi.waitFor(() => {
+      expect(instead).toBeUndefined();
+    });
+    // Its lease runs out, and another sync reads the source on.
+    later(3 * 60_000);
+    const mail = invoiceMail(invoices, 1, now());
+    graph.receive(invoices, mail);
+    await sync(listeners);
+    gate.resolve(null);
+    await slow;
+    const [source] = await sources();
+    const events = await outboxed();
+    const listed = await listening();
+
+    expect({
+      failures: source?.failures,
+      events: events.map(({ id }) => id),
+      failing: listed.filter(({ action }) =>
+        ["connection.events.refused", "connection.events.failed"].includes(
+          action
+        )
+      ),
+    }).toStrictEqual({ failures: 0, events: [mail.id], failing: [] });
+  });
+
+  it("report an item whose ID is longer than an event's may be under the ID's hash, in full in its payload, and once", async () => {
+    const outlook = await connected();
+    await sync([listener(outlook)]);
+    const longId = "A".repeat(201);
+    const mail = { ...invoiceMail(outlook.oid, 1, now()), id: longId };
+    graph.receive(outlook.oid, mail);
+    later();
+    await sync([listener(outlook)]);
+    // Shown again, changed: the same event, under the same ID.
+    graph.receive(outlook.oid, { ...mail, isRead: true });
+    later();
+    await sync([listener(outlook)]);
+    const events = await outboxed();
+    const listed = await listening();
+
+    expect({
+      events: events.map((event) => ({
+        hashed: hashedIdPattern.test(String(event.id)),
+        // As core takes an event, and a run gets it as input.
+        taken: connectorEventSchema.safeParse(event).success,
+        payloadId: z.object({ id: z.string() }).parse(event.payload).id,
+      })),
+      dropped: listed.filter(
+        ({ action }) => action === "connection.events.dropped"
+      ),
+    }).toStrictEqual({
+      events: [
+        {
+          hashed: true,
+          taken: true,
+          payloadId: longId,
+        },
+      ],
+      dropped: [],
     });
   });
 
