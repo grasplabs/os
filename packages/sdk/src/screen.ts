@@ -244,11 +244,11 @@ export interface WorkflowRun {
     error: { code: string; message: string };
   };
   /**
-   * When its details were removed (ISO 8601): an ended run keeps them for
-   * 30 days, or fewer if the deployment says so. The run itself stays
+   * Set once its details were removed: an ended run keeps them for 30
+   * days, or fewer if the deployment says so. The run itself stays
    * listed; show it as one whose details are gone.
    */
-  detailsRemovedAt?: string;
+  detailsRemoved?: true;
 }
 
 /**

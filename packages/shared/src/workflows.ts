@@ -459,12 +459,12 @@ export interface WorkflowRun {
    */
   failure?: RunFailure;
   /**
-   * When its details were removed (ISO 8601), its retention over: an
-   * ended run keeps them for the deployment's `RUN_RETENTION_DAYS`, 30
-   * days unless set, and never longer than the engine keeps its record.
-   * The run itself stays: what it was, how it ended, when and for whom.
+   * Set once its details were removed, its retention over: an ended run
+   * keeps them for the deployment's `RUN_RETENTION_DAYS`, 30 days unless
+   * set. The run itself stays: what it was, how it ended, when and for
+   * whom.
    */
-  detailsRemovedAt?: string;
+  detailsRemoved?: true;
 }
 
 /**

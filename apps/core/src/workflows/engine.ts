@@ -1,13 +1,23 @@
 import { wrapWorkflowBinding } from "@cloudflare/dynamic-workflows";
+import { deploymentConfig } from "@grasp-os/shared/config";
+import {
+  runRetentionDefaultDays,
+  runRetentionSchema,
+} from "@grasp-os/shared/deployment-config";
 import type { AppId, WorkflowId } from "@grasp-os/shared/ids";
 import type { Json } from "@grasp-os/shared/json";
 import { z } from "zod";
 
 // The engine that runs Apps' workflow runs, behind the little core asks of
 // it: create a run, see where it is, terminate it, send it an event, remove
-// what it kept of it. This
-// is the only module that touches the engine (`WORKFLOWS`, Cloudflare
-// Workflows), so another profile swaps it here and nowhere else.
+// it. This is the only module that touches the engine (`WORKFLOWS`,
+// Cloudflare Workflows), so another profile swaps it here and nowhere else.
+//
+// The engine keeps a run's record (its input, what its steps returned, its
+// output and error) only for the deployment's run retention once the run
+// has ended: every App's run is created with that as its `retention`, so the
+// engine removes the record itself, on the same clock as core removes the
+// rest of the run's details (retention.ts).
 //
 // On-prem (plain workerd, scripts/workerd-smoke.ts) has no `WORKFLOWS`:
 // workerd has no Workflows engine (Wrangler's local dev and the tests get
@@ -69,19 +79,47 @@ export interface RunEngine {
     event: { type: string; id: string; payload: unknown }
   ) => Promise<void>;
   /**
-   * Removes the runs' instances with all the engine kept of them: their
-   * input, what their steps returned, their output and error. At most
-   * {@link maxRemovedAtOnce} at once. Answers the runs the engine has
-   * nothing of any more: removed now, or that it had no instance of, so
-   * removing again removes nothing and answers the same. A run it
-   * couldn't remove, or can't tell of, is left out, to try again. It removes whatever it is
-   * asked to, a live run too: the caller asks only for ended ones.
+   * Removes the run's instance, with all the engine kept of it, whether
+   * or not it has ended; one it has no instance of stays as it is. For a
+   * run core ended that the engine may not have (retention.ts): every
+   * other ended run's record the engine removes itself.
    */
-  remove: (ids: readonly string[]) => Promise<string[]>;
+  remove: (id: string) => Promise<void>;
 }
 
-/** Most runs one `remove` takes: the engine's most per call. */
-export const maxRemovedAtOnce = 100;
+/**
+ * How many days an ended run keeps its details (`RUN_RETENTION_DAYS`), or
+ * `undefined` if the deployment's config is invalid.
+ */
+export const runRetentionDays = (
+  env: Pick<Env, "RUN_RETENTION_DAYS">
+): number | undefined =>
+  env.RUN_RETENTION_DAYS === undefined
+    ? runRetentionDefaultDays
+    : deploymentConfig(
+        runRetentionSchema,
+        "RUN_RETENTION_DAYS",
+        env.RUN_RETENTION_DAYS
+      );
+
+/**
+ * How long the engine keeps an instance once it has ended, as `create`
+ * takes it: the deployment's run retention, for one that completed or was
+ * terminated (`successRetention`) and for one that errored
+ * (`errorRetention`), which are all the ways an instance ends. None while
+ * the deployment's config is invalid: the engine then keeps it as long as
+ * the account's plan lets it, 30 days at most.
+ */
+const retentionOf = (
+  env: Pick<Env, "RUN_RETENTION_DAYS">
+): Pick<WorkflowInstanceCreateOptions, "retention"> => {
+  const days = runRetentionDays(env);
+  if (days === undefined) {
+    return {};
+  }
+  const kept = `${days} days` as const;
+  return { retention: { successRetention: kept, errorRetention: kept } };
+};
 
 /**
  * The payload of an event as the engine carries it: the event's own ID
@@ -121,16 +159,12 @@ const hasEnded = async (instance: WorkflowInstance): Promise<boolean> => {
 export const runEngine = (env: Env): RunEngine => ({
   create: async ({ id, pinned: { app, workflow, version }, input }) => {
     // Tagged with what the dispatcher loads it by; it reads the rest from
-    // the run's row. Placed in the EU where the platform can. No
-    // `retention` is set: it can only shorten how long the engine keeps an
-    // ended instance, and unset that is the longest the account's plan
-    // allows (30 days on Workers Paid, 3 on Free). Core's own retention
-    // (retention.ts) is never longer than those 30 days, and removes the
-    // instance itself when it is over.
+    // the run's row. Placed in the EU where the platform can.
     await wrapWorkflowBinding({ app, workflow, version }).create({
       id,
       params: input,
       locationHint: "weur",
+      ...retentionOf(env),
     });
   },
   createInternal: async ({ id, workflow, input }) => {
@@ -182,27 +216,16 @@ export const runEngine = (env: Env): RunEngine => ({
       >,
     });
   },
-  remove: async (ids) => {
-    if (ids.length === 0) {
-      return [];
+  remove: async (id) => {
+    let instance: WorkflowInstance;
+    try {
+      instance = await env.WORKFLOWS.get(id);
+    } catch (error) {
+      if (isNotFound(error)) {
+        return;
+      }
+      throw error;
     }
-    const { deleted, errors } = await env.WORKFLOWS.deleteBatch([...ids]);
-    const gone = new Set(deleted.map(({ id }) => id));
-    // One the engine didn't delete: gone all the same if it has no such
-    // instance, which `status` tells as it does everywhere else, rather
-    // than by this call's own error codes. One whose status can't be read
-    // either isn't known to be gone: it is left out, and holds up none of
-    // the others.
-    await Promise.all(
-      errors.map(async ({ id }) => {
-        const live = await runEngine(env)
-          .status(id)
-          .catch(() => null);
-        if (live === undefined) {
-          gone.add(id);
-        }
-      })
-    );
-    return ids.filter((id) => gone.has(id));
+    await instance.delete();
   },
 });

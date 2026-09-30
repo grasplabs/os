@@ -53,7 +53,7 @@ import { failureNoticed } from "../notifications.ts";
 import { hasWorkflow } from "./code.ts";
 import { runEngine } from "./engine.ts";
 import type { WaitReason } from "./host.ts";
-import { markDetailsRemoved, removedText } from "./retention.ts";
+import { removedText } from "./retention.ts";
 import { tellScreens } from "./run-changes.ts";
 import type { TriggerType } from "./trigger-registry.ts";
 
@@ -144,9 +144,7 @@ const toRun = (row: RunFields): WorkflowRun => ({
   status: shownStatus(row.status),
   createdAt: row.createdAt.toISOString(),
   endedAt: iso(row.endedAt),
-  ...(row.detailsRemovedAt === null
-    ? {}
-    : { detailsRemovedAt: row.detailsRemovedAt.toISOString() }),
+  ...(row.detailsRemovedAt === null ? {} : { detailsRemoved: true }),
 });
 
 /** What runs need of their App: its current version and its owner. */
@@ -683,8 +681,8 @@ export const runFor = (
 
 /**
  * Where the engine has a run; nothing for one still starting, or that
- * has ended without an instance to ask (its start failed, or its details
- * were removed, retention.ts), whose row says all there is.
+ * has ended without an instance to ask (its start failed, or the engine
+ * removed its record, its retention over), whose row says all there is.
  */
 const liveOf = async (
   env: Env,
@@ -710,28 +708,29 @@ export const runStatus = async (
   by: Member,
   run: unknown
 ): Promise<WorkflowRun> => {
-  let row = await foundRun(env, run);
+  const row = await foundRun(env, run);
   const { owner: ownerId } = await appFor(env, by, row.appId, "user");
   const live = await liveOf(env, row);
-  // A run that completed had an instance. If the engine has none now, and
-  // the sweep didn't remove it, the engine dropped it itself (its own
-  // retention, shorter on some plans than the deployment's): what it
-  // returned is gone, so the rest of its details go too, and the run says
-  // so rather than answer as one that returned nothing.
-  if (
-    live === undefined &&
-    row.status === "completed" &&
-    row.detailsRemovedAt === null
-  ) {
-    await markDetailsRemoved(env, row.id, new Date());
-    row = await foundRun(env, row.id);
-  }
   const status =
     (row.status === "starting" || row.status === "running") && live
       ? liveStatuses[live.status]
       : shownStatus(row.status);
-  const found = { ...runFor(env, by, row, ownerId), status };
-  if (!(live && seesDetails(by, row, ownerId))) {
+  // Its details were removed when its row says so, and also when it
+  // completed (so it had an instance) and the engine has none any more:
+  // the engine removes its record on its own clock, which may be moments
+  // ahead of the sweep that marks the row (retention.ts). Said on the
+  // read, and stored nowhere: never a run answered as if it returned
+  // nothing. Once the row says so, nothing the engine may still have of
+  // it for a while is shown.
+  const removed =
+    row.detailsRemovedAt !== null ||
+    (live === undefined && row.status === "completed");
+  const found: WorkflowRun = {
+    ...runFor(env, by, row, ownerId),
+    status,
+    ...(removed ? { detailsRemoved: true } : {}),
+  };
+  if (removed || !(live && seesDetails(by, row, ownerId))) {
     return found;
   }
   const output = z.json().safeParse(live.output);

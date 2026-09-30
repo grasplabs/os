@@ -29,12 +29,16 @@ import { appWith, runEvents, workflowFiles } from "./workflow-apps.ts";
 
 // Retention of workflow runs, from its threat model (src/workflows/
 // retention.ts): once a run has ended for the deployment's retention, the
-// 15-minute cron removes what it read and returned, and keeps the run.
-// Each case below is a way that could go wrong: a run swept too early, or
-// while it still waits; a run left half swept; a swept run run again; and
-// a reader handed a swept run as if nothing were missing.
+// engine removes its record of it, the 15-minute cron what core and
+// connect keep of it, and the run stays. Each case below is a way that
+// could go wrong: a run swept too early, or while it still waits; a run
+// left half swept; a swept run run again; and a reader handed a swept run
+// as if nothing were missing.
 //
-// Runs are real, on the Workflows engine (Miniflare's). Time is the
+// Runs are real, on the Workflows engine (Miniflare's), which takes the
+// retention core gives each run but doesn't act on it: that Cloudflare's
+// removes an ended run's record then is checked on a real account. Here
+// the tests check that core asks for it, and everything core does. Time is the
 // cron's own: each sweep is run for a time that many days on, as
 // Cloudflare would run it then, so no test waits or sets a clock.
 
@@ -183,64 +187,6 @@ const sweptOf = async (runs: readonly string[]): Promise<number> => {
   return runs.filter((id) => swept.has(id)).length;
 };
 
-/**
- * How the engine fails for runs: it answers that it couldn't remove them
- * (`refused`); it does, and can't say whether it has them either
- * (`unreadable`); or it fails for every batch with one of them in it
- * (`failing`).
- */
-type Failure = "refused" | "unreadable" | "failing";
-
-/**
- * Has the engine fail for the runs `stuck`, as `how` says, and remove
- * every other as ever, until the function it returns is called. With
- * `instance`, a run the engine has, it answers for each of them as it
- * does for that one: for rows that have nothing in the engine, which it
- * would otherwise say are gone.
- */
-const failingFor = (
-  stuck: ReadonlySet<string>,
-  how: Failure = "refused",
-  instance?: string
-): (() => void) => {
-  const deleteBatch = env.WORKFLOWS.deleteBatch.bind(env.WORKFLOWS);
-  const get = env.WORKFLOWS.get.bind(env.WORKFLOWS);
-  const deletes = vi
-    .spyOn(env.WORKFLOWS, "deleteBatch")
-    .mockImplementation(async (ids) => {
-      if (how === "failing" && ids.some((id) => stuck.has(id))) {
-        throw new Error("The engine is unavailable");
-      }
-      const others = ids.filter((id) => !stuck.has(id));
-      const { deleted, errors } =
-        others.length === 0
-          ? { deleted: [], errors: [] }
-          : await deleteBatch(others);
-      return {
-        deleted,
-        errors: [
-          ...errors,
-          ...ids
-            .filter((id) => stuck.has(id))
-            .map((id) => ({ id, code: 10_001, message: "internal_server" })),
-        ],
-      };
-    });
-  const gets = vi.spyOn(env.WORKFLOWS, "get").mockImplementation(async (id) => {
-    if (!stuck.has(id)) {
-      return await get(id);
-    }
-    if (how === "unreadable") {
-      throw new Error("The engine is unavailable");
-    }
-    return await get(instance ?? id);
-  });
-  return () => {
-    deletes.mockRestore();
-    gets.mockRestore();
-  };
-};
-
 describe("run retention", { timeout: 60_000 }, () => {
   afterEach(endLiveRuns);
 
@@ -258,7 +204,6 @@ describe("run retention", { timeout: 60_000 }, () => {
     const within = {
       done: await builder.api.workflows.status(done.id),
       failed: await builder.api.workflows.status(failed.id),
-      engine: [await inEngine(done.id), await inEngine(failed.id)],
     };
     const at = daysOn(31);
     await runQuarterHourCron({}, at);
@@ -279,14 +224,14 @@ describe("run retention", { timeout: 60_000 }, () => {
       },
       within,
       after,
-      engine: [await inEngine(done.id), await inEngine(failed.id)],
+      markedAt: rows.map((row) => row?.details_removed_at),
       inRows: JSON.stringify(rows).includes("TRANSCRIPT"),
-      listed: listed.map(({ id, status, detailsRemovedAt }) => ({
+      listed: listed.map(({ id, status, detailsRemoved }) => ({
         id,
         status,
-        detailsRemovedAt,
+        detailsRemoved,
       })),
-      page: page.map(({ id, detailsRemovedAt }) => ({ id, detailsRemovedAt })),
+      page: page.map(({ id, detailsRemoved }) => ({ id, detailsRemoved })),
       screen: await builder.api.screens.run(app, done.id),
       // The audit log keeps its own events of the run.
       audited: await runEvents(done.id, "workflow.run.completed"),
@@ -297,9 +242,10 @@ describe("run retention", { timeout: 60_000 }, () => {
         message: `Couldn't read: ${transcript}`,
         error: `Couldn't read: ${transcript}`,
       },
-      within: { ...before, engine: [true, true] },
+      within: before,
       after: {
-        // The run as it was, without what it returned.
+        // The run as it was, without what it returned: nothing the local
+        // engine, which keeps its record, still has of it.
         done: {
           id: done.id,
           app,
@@ -309,7 +255,7 @@ describe("run retention", { timeout: 60_000 }, () => {
           status: "completed",
           createdAt: before.done.createdAt,
           endedAt: before.done.endedAt,
-          detailsRemovedAt: at.toISOString(),
+          detailsRemoved: true,
         },
         // Where and how it failed, without the workflow's own words, or
         // the key it gave the step.
@@ -322,7 +268,7 @@ describe("run retention", { timeout: 60_000 }, () => {
           status: "failed",
           createdAt: before.failed.createdAt,
           endedAt: before.failed.endedAt,
-          detailsRemovedAt: at.toISOString(),
+          detailsRemoved: true,
           failure: {
             ...before.failed.failure,
             step: "read",
@@ -330,23 +276,15 @@ describe("run retention", { timeout: 60_000 }, () => {
           },
         },
       },
-      engine: [false, false],
+      markedAt: [at.getTime(), at.getTime()],
       inRows: false,
       listed: [
-        {
-          id: failed.id,
-          status: "failed",
-          detailsRemovedAt: at.toISOString(),
-        },
-        {
-          id: done.id,
-          status: "completed",
-          detailsRemovedAt: at.toISOString(),
-        },
+        { id: failed.id, status: "failed", detailsRemoved: true },
+        { id: done.id, status: "completed", detailsRemoved: true },
       ],
       page: [
-        { id: failed.id, detailsRemovedAt: at.toISOString() },
-        { id: done.id, detailsRemovedAt: at.toISOString() },
+        { id: failed.id, detailsRemoved: true },
+        { id: done.id, detailsRemoved: true },
       ],
       screen: {
         id: done.id,
@@ -357,7 +295,7 @@ describe("run retention", { timeout: 60_000 }, () => {
         status: "completed",
         createdAt: before.done.createdAt,
         endedAt: before.done.endedAt,
-        detailsRemovedAt: at.toISOString(),
+        detailsRemoved: true,
         waitingFor: [],
       },
       audited: [
@@ -389,7 +327,7 @@ describe("run retention", { timeout: 60_000 }, () => {
       within: within.failure?.error.message,
       asSet: asSet.failure?.error.message,
       byDefault: byDefault.failure?.error.message,
-      removed: byDefault.detailsRemovedAt !== undefined,
+      removed: byDefault.detailsRemoved,
       kept: z
         .object({ error: z.object({ message: z.string() }) })
         .parse(JSON.parse(String(row?.failure))).error.message,
@@ -424,35 +362,76 @@ describe("run retention", { timeout: 60_000 }, () => {
     });
   });
 
-  it("says a completed run's details are gone from the first read after the engine dropped its record itself", async () => {
+  it("has the engine keep each run's record for the deployment's retention, and no longer", async () => {
+    const builder = await personApi("builder");
+    const app = await appWith(builder, keeps);
+    const start = {
+      app: appIdSchema.parse(app),
+      workflow: workflowIdSchema.parse("keeps"),
+      input: { notes: transcript },
+      startedBy: builder.userId,
+      actor: { type: "system" },
+    } as const;
+
+    const create = vi.spyOn(env.WORKFLOWS, "create");
+    let asked: unknown[];
+    try {
+      const byDefault = await startRun(env, start);
+      const shorter = await startRun(
+        { ...env, RUN_RETENTION_DAYS: "7" },
+        start
+      );
+      // A config core can't read: the engine keeps it as long as it may.
+      const unset = await startRun(
+        { ...env, RUN_RETENTION_DAYS: "soon" },
+        start
+      );
+      asked = [byDefault, shorter, unset].map(
+        ({ id }) =>
+          create.mock.calls.find(([options]) => options?.id === id)?.[0]
+            ?.retention
+      );
+      await Promise.all(
+        [byDefault, shorter, unset].map(async ({ id }) => {
+          await finished(id);
+        })
+      );
+    } finally {
+      create.mockRestore();
+    }
+
+    expect(asked).toStrictEqual([
+      { successRetention: "30 days", errorRetention: "30 days" },
+      { successRetention: "7 days", errorRetention: "7 days" },
+      undefined,
+    ]);
+  });
+
+  it("says a completed run's details were removed once the engine has dropped its record, on the read, storing nothing", async () => {
     const builder = await personApi("builder");
     const app = await appWith(builder, keeps);
     const done = await endedRun(builder, app, "keeps");
     const before = await builder.api.workflows.status(done.id);
 
-    // As the engine's own retention does, before the deployment's is over.
+    // As the engine does when the run's retention is over, which may be
+    // moments before the sweep marks its row.
     const instance = await env.WORKFLOWS.get(done.id);
     await instance.delete();
     const read = await builder.api.workflows.status(done.id);
-    const again = await builder.api.workflows.status(done.id);
     const row = await rowOf(done.id);
 
     expect({
-      before: before.output,
+      before: { output: before.output, removed: before.detailsRemoved },
       read: {
         status: read.status,
         output: read.output,
-        removed: typeof read.detailsRemovedAt,
+        removed: read.detailsRemoved,
       },
-      // Marked once: the next read says the same.
-      again,
-      marked:
-        row?.details_removed_at === Date.parse(read.detailsRemovedAt ?? ""),
+      stored: row?.details_removed_at,
     }).toStrictEqual({
-      before: { read: transcript },
-      read: { status: "completed", output: undefined, removed: "string" },
-      again: read,
-      marked: true,
+      before: { output: { read: transcript }, removed: undefined },
+      read: { status: "completed", output: undefined, removed: true },
+      stored: null,
     });
   });
 
@@ -493,7 +472,7 @@ describe("run retention", { timeout: 60_000 }, () => {
       ended: {
         status: ended.status,
         output: ended.output,
-        removed: ended.detailsRemovedAt,
+        removed: ended.detailsRemoved,
       },
       worked: await hitsOf(app, builder, "work"),
     }).toStrictEqual({
@@ -605,9 +584,8 @@ describe("run retention", { timeout: 60_000 }, () => {
       at: [early.getTime(), late.getTime()].includes(
         Number(once?.details_removed_at)
       ),
-      engine: await inEngine(failed.id),
       again,
-    }).toStrictEqual({ at: true, engine: false, again: once });
+    }).toStrictEqual({ at: true, again: once });
   });
 
   it("takes no step when a swept run is started again: its trigger finds the run, and an instance under its ID is refused", async () => {
@@ -624,8 +602,10 @@ describe("run retention", { timeout: 60_000 }, () => {
     } as const;
     const run = await startRun(env, delivery);
     await finished(run.id);
-    const at = daysOn(31);
-    await runQuarterHourCron({}, at);
+    await runQuarterHourCron({}, daysOn(31));
+    // The engine's record went as its retention ended.
+    const record = await env.WORKFLOWS.get(run.id);
+    await record.delete();
 
     // Its trigger delivered again: this run, no new one.
     const again = await startRun(env, delivery);
@@ -659,107 +639,101 @@ describe("run retention", { timeout: 60_000 }, () => {
       rows: 1,
       instance: { status: "errored" },
       // Still the run that completed, its details gone: not failed anew.
-      status: { status: "completed", detailsRemovedAt: at.toISOString() },
+      status: { status: "completed", detailsRemoved: true },
       cancelled: { status: "completed" },
       done: 1,
       completed: 1,
     });
   });
 
-  it("leaves a run the engine couldn't remove, or whose row couldn't be marked, for the next sweep", async () => {
+  it("finishes a sweep that stopped before its rows were marked", async () => {
     const builder = await personApi("builder");
-    const app = await appWith(builder, keeps);
-    const stuck = await endedRun(builder, app, "keeps");
-    const unmarked = await endedRun(builder, app, "keeps");
+    const app = await appWith(builder, fails);
+    const failed = await endedRun(builder, app, "fails");
 
-    // The engine removes every run but one.
-    const mend = failingFor(new Set([stuck.id]));
-    // And the database fails as the rows are marked, as D1 can.
+    // The database fails as the rows are marked, as D1 can.
     let broken = true;
     const db = racingDb(() => {
       if (broken) {
         throw new Error("D1_ERROR: broken for the test");
       }
     });
-    let first: unknown;
-    try {
-      first = await sweepRunDetails({ ...env, DB: db }, daysOn(31)).catch(
-        (error: unknown) => error
-      );
-    } finally {
-      mend();
-    }
-    const between = {
-      stuck: await builder.api.workflows.status(stuck.id),
-      unmarked: await rowOf(unmarked.id),
-      engine: [await inEngine(stuck.id), await inEngine(unmarked.id)],
-    };
+    const first = await sweepRunDetails({ ...env, DB: db }, daysOn(31)).catch(
+      (error: unknown) => error
+    );
+    const between = await builder.api.workflows.status(failed.id);
     broken = false;
     await sweepRunDetails({ ...env, DB: db }, daysOn(31));
+    const after = await builder.api.workflows.status(failed.id);
 
     expect({
       first: first instanceof Error && first.message,
+      // Not marked, so still there in full.
       between: {
-        // Not removed, so still there in full.
-        stuck: {
-          output: between.stuck.output,
-          removed: between.stuck.detailsRemovedAt,
-        },
-        // Removed from the engine, its row not yet saying so.
-        unmarked: between.unmarked?.details_removed_at,
-        engine: between.engine,
+        message: between.failure?.error.message,
+        removed: between.detailsRemoved,
       },
-      swept: await sweptOf([stuck.id, unmarked.id]),
-      engine: [await inEngine(stuck.id), await inEngine(unmarked.id)],
+      after: {
+        message: after.failure?.error.message,
+        removed: after.detailsRemoved,
+      },
     }).toStrictEqual({
       first: "D1_ERROR: broken for the test",
-      between: {
-        stuck: { output: { read: transcript }, removed: undefined },
-        unmarked: null,
-        engine: [true, false],
-      },
-      swept: 2,
-      engine: [false, false],
+      between: { message: `Couldn't read: ${transcript}`, removed: undefined },
+      after: { message: removed(30), removed: true },
     });
   });
 
-  it("sweeps the runs behind runs it can't remove in the same pass, however the engine fails for them and however many they are", async () => {
+  it("removes the instance of a cancelled run the engine never ended, and leaves one it can't remove for the next sweep, sweeping the rest", async () => {
     const builder = await personApi("builder");
-    const app = await appWith(builder, keeps);
-    // A run the engine has, for it to answer about the stuck ones with.
-    const held = await endedRun(builder, app, "keeps");
-    const swept: Record<string, number[]> = {};
-    for (const [how, count] of [
-      // As many as a whole pass sweeps: none of its batches is used up.
-      ["refused", batchesPerSweep * sweptPerBatch],
-      ["unreadable", sweptPerBatch],
-      ["failing", sweptPerBatch],
-    ] as const) {
-      // Ended longest ago: first in every pass, in batches of their own.
-      // oxlint-disable-next-line no-await-in-loop -- one failure after another
-      const stuck = await oldRuns(builder, app, count, 60);
-      // oxlint-disable-next-line no-await-in-loop -- one failure after another
-      const behind = await oldRuns(builder, app, 3, 40);
-      const mend = failingFor(new Set(stuck), how, held.id);
-      try {
-        // oxlint-disable-next-line no-await-in-loop -- one failure after another
-        await runQuarterHourCron();
-        // oxlint-disable-next-line no-await-in-loop -- one failure after another
-        swept[how] = [await sweptOf(stuck), await sweptOf(behind)];
-      } finally {
-        mend();
-      }
-      // Once the engine takes them, the next pass sweeps them.
-      // oxlint-disable-next-line no-await-in-loop -- one failure after another
-      await runQuarterHourCron();
-      // oxlint-disable-next-line no-await-in-loop -- one failure after another
-      swept[how]?.push(await sweptOf(stuck));
-    }
+    const app = await appWith(builder, { ...waits, ...keeps });
+    const done = await endedRun(builder, app, "keeps");
+    const run = await builder.api.workflows.start(app, "waits", {
+      notes: transcript,
+    });
+    await listening(run.id, "go");
+    // A cancel whose termination failed: the row has ended, the instance
+    // waits on, and the engine's own retention never starts for it.
+    await env.DB.prepare(
+      "UPDATE workflow_runs SET status = 'cancelled', ended_at = ? WHERE id = ?"
+    )
+      .bind(Date.now(), run.id)
+      .run();
 
-    expect(swept).toStrictEqual({
-      refused: [0, 3, batchesPerSweep * sweptPerBatch],
-      unreadable: [0, 3, sweptPerBatch],
-      failing: [0, 3, sweptPerBatch],
+    // The engine fails for that run, and only for it.
+    const get = env.WORKFLOWS.get.bind(env.WORKFLOWS);
+    const failing = vi
+      .spyOn(env.WORKFLOWS, "get")
+      .mockImplementation(async (id) => {
+        if (id === run.id) {
+          throw new Error("The engine is unavailable");
+        }
+        return await get(id);
+      });
+    let between: unknown;
+    try {
+      await runQuarterHourCron({}, daysOn(31));
+      between = {
+        cancelled: await sweptOf([run.id]),
+        other: await sweptOf([done.id]),
+      };
+    } finally {
+      failing.mockRestore();
+    }
+    const stillThere = await inEngine(run.id);
+    await runQuarterHourCron({}, daysOn(31));
+
+    expect({
+      between,
+      stillThere,
+      after: {
+        cancelled: await sweptOf([run.id]),
+        engine: await inEngine(run.id),
+      },
+    }).toStrictEqual({
+      between: { cancelled: 0, other: 1 },
+      stillThere: true,
+      after: { cancelled: 1, engine: false },
     });
   });
 
