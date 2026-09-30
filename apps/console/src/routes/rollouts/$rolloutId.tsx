@@ -170,7 +170,7 @@ const checkLines = (check: RevocationCheck): string[] => [
   ...(check.revocable.length === 0
     ? []
     : [
-        `The old ${check.revocable.join(", ")} can be revoked at ${check.revocable.length === 1 ? "its provider" : "their providers"}: every active client runs the new value, read live, and none is part way through provisioning.`,
+        `The old ${check.revocable.join(", ")} can be revoked at ${check.revocable.length === 1 ? "its provider" : "their providers"}: every active client runs the new value, read live, and none is still being provisioned.`,
       ]),
   ...check.rotated.flatMap((name) => {
     const reason = keepReason(check, name);

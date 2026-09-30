@@ -216,6 +216,23 @@ describe("the client grid", () => {
       all.push(client);
     }
     const [slow, unread, ...whole] = all;
+    // An unknown answer for a client that answers, kept a moment ago as
+    // the console kept them before: never served.
+    const [stale] = whole;
+    const kept = await caches.open("grid-live");
+    await kept.put(
+      `https://grid-live.console.invalid/${encodeURIComponent(stale?.clientId ?? "")}`,
+      Response.json(
+        {
+          drift: "unknown",
+          sharedSecretsCurrent: null,
+          reach: "unknown",
+          day: null,
+          costUsd: null,
+        },
+        { headers: { "cache-control": "max-age=60" } }
+      )
+    );
     // The slow client's account doesn't answer until the test lets it.
     const held = Promise.withResolvers<boolean>();
     cloudflare.beforeAnswering(

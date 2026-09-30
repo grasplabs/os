@@ -346,7 +346,9 @@ const usageWithin = async (
 
 /**
  * Client `clientId`'s live answer kept within the last minute, if any. A
- * cache that fails to answer is a miss: the answer is read again.
+ * cache that fails to answer is a miss, and so is a kept answer with
+ * anything unknown in it (`allKnown`; none is kept now, but one kept
+ * before that rule may still be there): the answer is read again.
  */
 const cached = async (clientId: string): Promise<LiveStatus | undefined> => {
   try {
@@ -356,7 +358,7 @@ const cached = async (clientId: string): Promise<LiveStatus | undefined> => {
       return undefined;
     }
     const parsed = liveStatusSchema.safeParse(await hit.json());
-    return parsed.success ? parsed.data : undefined;
+    return parsed.success && allKnown(parsed.data) ? parsed.data : undefined;
   } catch (error) {
     log.warn("grid.cache_unread", { clientId, error: errorCode(error) });
     return undefined;

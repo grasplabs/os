@@ -19,27 +19,23 @@
  *   unreadable, or live on a version without fingerprints is behind on
  *   every secret it holds, and so is a client whose account doesn't
  *   answer in time;
- * - no client is still being provisioned with a Worker made live: its
- *   run isn't a rollout's target, and may hold the store's earlier values
- *   for the Workers it has yet to upload, so it counts as behind on every
- *   secret, unread.
+ * - no client is still being provisioned: its run isn't a rollout's
+ *   target, and may hold the store's earlier values for the Workers it
+ *   has yet to upload, or have made one live that the console has no
+ *   record of yet (the record follows the upload), so it counts as behind
+ *   on every secret, unread, whatever is recorded of it.
  * A secret the rollout didn't rotate is never called revocable.
  *
  * Read on demand: it reads every active client's account, a few at a
  * time, each within a deadline (src/live-reads.ts).
  */
-import { and, eq, exists } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { z } from "zod";
 
 import { cloudflareApi } from "../cloudflare/api.ts";
 import { consoleDatabase } from "../db/act.ts";
 import type { ConsoleDatabase } from "../db/act.ts";
-import {
-  clients,
-  clientWorkers,
-  rollouts,
-  rolloutTargets,
-} from "../db/schema.ts";
+import { clients, rollouts, rolloutTargets } from "../db/schema.ts";
 import {
   deployerToken,
   deploySecrets,
@@ -204,8 +200,7 @@ export interface RevocationCheck {
   /**
    * Per rotated secret, the clients not known to run the store's value:
    * active ones that don't, read live, or whose account didn't answer in
-   * time, and every client still being provisioned with a Worker made
-   * live.
+   * time, and every client still being provisioned.
    */
   behind: Record<string, string[]>;
   /** Targets it reached whose previous shared secrets aren't on record. */
@@ -229,26 +224,14 @@ const changedSince = (before: SharedPrints, started: SharedPrints): string[] =>
   );
 
 /**
- * The clients still being provisioned that have a Worker the console made
- * live: what a revocation check counts as behind without reading them.
+ * The clients still being provisioned: what a revocation check counts as
+ * behind without reading them, with or without a Worker on record.
  */
-const provisioningWithWorker = async (
-  db: ConsoleDatabase
-): Promise<string[]> => {
+const provisioningClients = async (db: ConsoleDatabase): Promise<string[]> => {
   const rows = await db
     .select({ id: clients.id })
     .from(clients)
-    .where(
-      and(
-        eq(clients.status, "provisioning"),
-        exists(
-          db
-            .select({ worker: clientWorkers.worker })
-            .from(clientWorkers)
-            .where(eq(clientWorkers.clientId, clients.id))
-        )
-      )
-    );
+    .where(eq(clients.status, "provisioning"));
   return rows.map(({ id }) => id);
 };
 
@@ -355,7 +338,7 @@ export const checkRevocation = async (
         ),
       ] as const
   );
-  const provisioning = await provisioningWithWorker(db);
+  const provisioning = await provisioningClients(db);
   const behind = Object.fromEntries(
     [...rotated].map((name) => [
       name,

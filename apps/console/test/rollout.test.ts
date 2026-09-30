@@ -439,13 +439,14 @@ const liveOf = (account: AccountState, script: string): string | undefined => {
 /**
  * Before each test: the database outlives each test, and every rollout
  * reaches ring 0, so each test's rollouts reach only its own clients, and
- * start while no earlier test's rollout is open.
+ * start while no earlier test's rollout is open. An earlier test's client
+ * left in provisioning goes too: a revocation check counts every one.
  */
 const setAsideEarlierTests = async (): Promise<void> => {
   await db
     .update(clients)
     .set({ status: "offboarded" })
-    .where(eq(clients.status, "active"));
+    .where(inArray(clients.status, ["active", "provisioning"]));
   await db
     .update(rollouts)
     .set({ status: "cancelled" })
@@ -1569,7 +1570,7 @@ describe("rolling new secrets out", () => {
     });
   });
 
-  it("never says an old secret can go while a client still being provisioned has a Worker live, which no secrets rollout reaches", async () => {
+  it("never says an old secret can go while a client is still being provisioned, which no secrets rollout reaches, whatever is recorded of it", async () => {
     const release = await importedRelease(
       "feat(core): while one is provisioned"
     );
@@ -1581,7 +1582,8 @@ describe("rolling new secrets out", () => {
       .update(clients)
       .set({ status: "provisioning" })
       .where(eq(clients.id, partWay.clientId));
-    // Provisioning too, with nothing made live yet: it holds no secret.
+    // Provisioning too, with no Worker on record: its first may be live
+    // already, recorded only after it's uploaded.
     const notYet = `client-${crypto.randomUUID().slice(0, 8)}`;
     const now = new Date();
     await db.insert(clients).values({
@@ -1610,8 +1612,12 @@ describe("rolling new secrets out", () => {
       check: {
         revocable: [],
         rotated: ["MICROSOFT_CLIENT_SECRET"],
-        // Behind without being read; the one with nothing live isn't.
-        behind: { MICROSOFT_CLIENT_SECRET: [partWay.clientId] },
+        // Both behind, without being read.
+        behind: {
+          MICROSOFT_CLIENT_SECRET: [partWay.clientId, notYet].toSorted((a, b) =>
+            a.localeCompare(b)
+          ),
+        },
       },
       partWayCalls: 0,
     });
