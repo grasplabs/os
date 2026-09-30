@@ -90,6 +90,12 @@ const HeldWrite = ({
             On connection {action.connectionId}
             {action.resource === null ? "" : `, ${action.resource}`}
           </p>
+          <p className="text-muted-foreground text-sm">
+            Asked for{" "}
+            <time dateTime={action.requestedAt}>
+              {new Date(action.requestedAt).toLocaleString()}
+            </time>
+          </p>
           {action.restricted ? (
             <Badge variant="destructive">
               This chat read restricted data: this may send it out

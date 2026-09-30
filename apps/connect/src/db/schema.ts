@@ -118,6 +118,12 @@ export const idempotentCalls = sqliteTable(
     output: text(),
     provenance: text(),
     createdAt: timestamp("created_at").notNull(),
+    /**
+     * The one resource the call's capability named, or null for the whole
+     * connection: what reading the answer later is authorised against
+     * again (`heldOutcome`).
+     */
+    resource: text(),
   },
   (table) => [
     primaryKey({
@@ -131,6 +137,8 @@ export const idempotentCalls = sqliteTable(
       ],
     }),
     index("idempotent_calls_created_idx").on(table.createdAt),
+    // How a held action ended, found by the key connect made for it.
+    index("idempotent_calls_key_idx").on(table.idempotencyKey),
   ]
 );
 

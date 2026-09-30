@@ -1,8 +1,13 @@
 import { connectErrors } from "@grasp-os/shared/connect";
-import type { ConnectResult, PendingReference } from "@grasp-os/shared/connect";
-import { identifierMaxLength } from "@grasp-os/shared/ids";
+import type {
+  ConnectResult,
+  HeldOutcome,
+  PendingReference,
+} from "@grasp-os/shared/connect";
 import { errorFields, log } from "@grasp-os/shared/log";
+import { permissionErrors } from "@grasp-os/shared/permissions";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
+import { z } from "zod";
 
 import {
   auditRefusal,
@@ -13,7 +18,12 @@ import {
   requireOpenRun,
 } from "./agent-scope.ts";
 import type { AgentApi, AgentScope } from "./agent-scope.ts";
-import { connectionGrantOf, forSandbox, signedStubCall } from "./bindings.ts";
+import {
+  connectionGrantOf,
+  forSandbox,
+  signedCall,
+  signedStubCall,
+} from "./bindings.ts";
 import type { ConnectionGrant } from "./bindings.ts";
 import { connectionOwnersOf } from "./connections.ts";
 import { workspace } from "./durable-objects.ts";
@@ -50,6 +60,41 @@ export interface AgentCallResult {
   pending: PendingReference | null;
 }
 
+/** How a call that waited for the person ended, as a chat's code reads it. */
+export interface AgentCallOutcome {
+  /**
+   * `waiting` for the person still (or being carried out now), `declined`
+   * by them (or dropped), `done`, or `failed`.
+   */
+  status: HeldOutcome["state"];
+  /** What the action returned, once done; what it said, if it failed. */
+  output: unknown;
+  /** Why it failed. */
+  error: string | null;
+}
+
+/** `outcome` as a chat's code reads it; read outputs are JSON text. */
+const callOutcome = (outcome: HeldOutcome): AgentCallOutcome => {
+  if (outcome.state === "done") {
+    return {
+      status: "done",
+      output: JSON.parse(outcome.result.output),
+      error: null,
+    };
+  }
+  if (outcome.state === "failed") {
+    return {
+      status: "failed",
+      output: outcome.output === null ? null : JSON.parse(outcome.output),
+      error: outcome.reason,
+    };
+  }
+  return { status: outcome.state, output: null, error: null };
+};
+
+/** The ID a held call was answered with (`AgentCallResult.pending`). */
+const pendingIdSchema = z.uuid();
+
 /** The chat's connection grants, as its agent holds them now. */
 const connectionGrants = async (
   env: Env,
@@ -63,35 +108,6 @@ const connectionGrants = async (
       ? []
       : [{ ...grant, name: permission.binding, actions: permission.actions }];
   });
-};
-
-/**
- * The longest idempotency key a chat's code may choose: connect's limit
- * less the chat's prefix (`<chatId>:`), which `chatKeyed` adds.
- */
-export const chatKeyMaxLength = (chatId: string): number =>
-  identifierMaxLength - chatId.length - 1;
-
-/**
- * `options` with its idempotency key, if it has one, made the chat's own.
- * A key too long to take the prefix is refused as the invalid call it
- * would become, saying how long a key may be.
- */
-const chatKeyed = (scope: AgentScope, options: unknown): unknown => {
-  if (typeof options !== "object" || options === null) {
-    return options;
-  }
-  const key: unknown = Reflect.get(options, "idempotencyKey");
-  if (typeof key !== "string") {
-    return options;
-  }
-  const max = chatKeyMaxLength(scope.chatId);
-  if (key.length > max) {
-    throw connectErrors.create("connect.invalid", {
-      issues: [`options.idempotencyKey: At most ${max} characters`],
-    });
-  }
-  return { ...options, idempotencyKey: `${scope.chatId}:${key}` };
 };
 
 /**
@@ -172,13 +188,15 @@ export class ConnectionsApi extends WorkerEntrypoint<Env, AgentScope> {
   /**
    * Calls `action` on the connection named `connection`. A side effect is
    * held for the person to confirm: nothing is done yet, and `pending`
-   * says so.
+   * says so. The call names no idempotency key: connect makes one for each
+   * side effect it holds, which the person takes exactly once. While it
+   * waits, the same call made again finds the same held action; how it
+   * ended, `outcome` says.
    */
   async call(
     connection: unknown,
     action: unknown,
-    input: unknown,
-    options?: unknown
+    input: unknown
   ): Promise<AgentCallResult> {
     const scope = this.ctx.props;
     await requireOpenRun(this.env, scope, "connections.call");
@@ -186,15 +204,11 @@ export class ConnectionsApi extends WorkerEntrypoint<Env, AgentScope> {
     // recorded here, once; what connect takes, connect records.
     const { grant, request } = await (async () => {
       const named = await this.#grantNamed(connection);
-      // Connect keeps a side effect's answer, and its held action, under
-      // the agent and the key: the agent is the workspace's, so each
-      // chat's keys are its own, and one chat never gets another's answer
-      // or held action.
       const signed = await signedStubCall(
         this.env,
         chatAuthority(scope),
         named,
-        [action, input, chatKeyed(scope, options)]
+        [action, input]
       );
       return { grant: named, request: signed };
     })().catch(
@@ -224,6 +238,86 @@ export class ConnectionsApi extends WorkerEntrypoint<Env, AgentScope> {
     await recordSources(this.env, scope, [grant.connection.connectionId]);
     return { output: JSON.parse(result.output), pending: null };
   }
+
+  /**
+   * How the held call `pendingId` of this chat ended: the chat's code has
+   * no other way to a confirmed call's answer, as a call made again is a
+   * call of its own. Only for a call this chat's agent made for its
+   * person (connect finds no other), and authorised exactly as that call
+   * would be now: by a permission the agent holds now for that action on
+   * that connection and that same resource, checked and signed as any
+   * call's (`signedCall`), so the answer comes back under that
+   * permission's mask as it is now, or is refused where connect can't
+   * apply it. Connect records it, as it records a call; what is refused
+   * before connect has the call is recorded here, once. What it hands
+   * over is recorded with the chat first, as a direct call's answer.
+   */
+  async outcome(pendingId: unknown): Promise<AgentCallOutcome> {
+    const scope = this.ctx.props;
+    await requireOpenRun(this.env, scope, "connections.outcome");
+    const id = pendingIdSchema.safeParse(pendingId);
+    const request = await (async () => {
+      requireFeature(this.env, "connections");
+      if (!id.success) {
+        throw connectErrors.create("connect.invalid");
+      }
+      const held = await this.env.CONNECT.heldCall({
+        agentId: scope.agentId,
+        onBehalfOf: scope.personId,
+        workspaceId: scope.workspaceId,
+        chatId: scope.chatId,
+        id: id.data,
+      });
+      // The agent's permissions for exactly that call, as they are now;
+      // of several, the one that masks least, as the agent could call by
+      // it directly.
+      const grants = await connectionGrants(this.env, scope);
+      const [grant] = grants
+        .filter(
+          ({ connection, actions }) =>
+            connection.connectionId === held.connectionId &&
+            (connection.resource ?? null) === held.resource &&
+            actions.includes(held.action)
+        )
+        .toSorted(
+          (one, other) =>
+            (one.connection.mask?.length ?? 0) -
+            (other.connection.mask?.length ?? 0)
+        );
+      if (grant === undefined) {
+        throw permissionErrors.create("permission.denied", {
+          action: held.action,
+        });
+      }
+      const { capability, scope: call } = await signedCall(
+        this.env,
+        { ...grant, authority: chatAuthority(scope) },
+        { action: held.action, idempotencyKey: held.idempotencyKey }
+      );
+      return { capability, ...call, idempotencyKey: held.idempotencyKey };
+    })().catch(
+      async (error: unknown) =>
+        await auditRefusal(
+          this.env,
+          scope,
+          {
+            method: "connections.outcome",
+            detail: { pendingActionId: id.success ? id.data : null },
+          },
+          forSandbox(error)
+        )
+    );
+    let outcome: HeldOutcome;
+    try {
+      outcome = await this.env.CONNECT.heldOutcome(request);
+    } catch (error) {
+      throw forSandbox(error);
+    }
+    if (outcome.state === "done" || outcome.state === "failed") {
+      await recordSources(this.env, scope, [request.connectionId]);
+    }
+    return callOutcome(outcome);
+  }
 }
 
 /** What the model reads of `env.connections`. */
@@ -232,27 +326,34 @@ const connectionsDeclaration = `/**
  * under the name its permission gives it. Every call is recorded. A call
  * that changes something (sends, creates, deletes) is never done straight
  * away: it waits for the person to confirm it in Grasp, and \`pending\`
- * says so. Tell them it waits for them; don't call it again to push it.
+ * says so. Tell them it waits for them; don't call it again to push it:
+ * while it waits, the same call only finds the same waiting change. Once
+ * they decided, read how it ended with \`outcome\`.
  */
 connections: {
   /** The connections this chat may use, and the actions each allows. */
   list(): Promise<{ name: string; connectionId: string; resource: string | null; actions: string[] }[]>;
-  /**
-   * Calls one of a connection's actions with its input. A change needs an
-   * \`idempotencyKey\` of your own (at most 200 characters): calling again
-   * with the same key returns the first call's answer instead of doing it
-   * twice.
-   */
+  /** Calls one of a connection's actions with its input. */
   call(
     name: string,
     action: string,
-    input: Record<string, unknown>,
-    options?: { idempotencyKey?: string }
+    input: Record<string, unknown>
   ): Promise<{
     /** What the action returned; null while it waits for the person. */
     output: unknown;
     /** Set while it waits for the person to confirm it. */
     pending: { id: string } | null;
+  }>;
+  /**
+   * How a call that waited for the person ended, by its \`pending.id\`:
+   * still \`waiting\`, \`declined\` by them, \`done\` (with what the action
+   * returned) or \`failed\` (with why, and what the action said). Only for
+   * calls of this chat.
+   */
+  outcome(pendingId: string): Promise<{
+    status: "waiting" | "declined" | "done" | "failed";
+    output: unknown;
+    error: string | null;
   }>;
 };`;
 

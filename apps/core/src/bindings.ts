@@ -236,15 +236,17 @@ export class ConnectionBinding extends WorkerEntrypoint<
   ConnectionGrant & { authority: Authority }
 > {
   /**
-   * Runs one of the connection's actions. A side effect needs an
-   * `idempotencyKey`: repeating the call with it returns the first result.
-   * A side effect of an agent working for a person (and every one once its
-   * chat read restricted data) is held for the person to confirm instead:
-   * the answer then has `pending` set, `output` is the JSON text `"null"`
-   * and `provenance` is empty; repeating the call later returns the
-   * action's result once it ran. On a Composio connection, once the chat
-   * read restricted data, a read is a side effect too and needs a key from
-   * the agent: without one it is refused
+   * Runs one of the connection's actions. A side effect of an agent
+   * working for a person (and every one once its chat read restricted
+   * data; on a Composio connection a read is one too by then) is held for
+   * the person to confirm: the answer then has `pending` set, `output` is
+   * the JSON text `"null"` and `provenance` is empty. It needs no
+   * `idempotencyKey`: connect makes one as it holds the call, and the same
+   * call without one made again finds the same held action while it waits,
+   * and is a new action once that one is decided. With a key
+   * of the caller's, repeating the call finds the same held action, and
+   * later the action's result once it ran. A workflow's side effect needs
+   * its step's key: without one it is refused
    * (`connect.idempotency_key_required`), not held.
    */
   async call(

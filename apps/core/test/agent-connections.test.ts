@@ -1,8 +1,8 @@
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import { connectErrors } from "@grasp-os/shared/connect";
+import { permissionErrors } from "@grasp-os/shared/permissions";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { chatKeyMaxLength } from "../src/agent-connections.ts";
 import {
   chatOf,
   codeResults,
@@ -12,6 +12,7 @@ import {
   pointAtGateway,
   says,
 } from "./agent-chat.ts";
+import { fakeGateway } from "./ai-gateway.ts";
 import { requestGranted } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
@@ -70,11 +71,39 @@ const eventsOf = async (
   return await mine();
 };
 
+/** What a held call returned to the chat's code, as the model read it. */
+const pendingOf = (id: string | undefined) =>
+  `Returned:\n${JSON.stringify({ output: null, pending: { id } })}`;
+
+/** The model reads how the held call `id` ended, or why it can't. */
+const outcomeOf = (id: string) =>
+  codeStep(
+    `export default async (env) => { try { return await env.connections.outcome(${JSON.stringify(id)}); } catch (error) { return error.message; } };`
+  );
+
+/** What the chat's code steps returned, as the model read them. */
+const texts = async (
+  stub: Awaited<ReturnType<typeof chatOf>>["stub"],
+  chatId: string
+) => {
+  const results = await codeResults(stub, chatId);
+  return results.map(({ text }) => text);
+};
+
+/** The events that record a read of a held call's outcome, or the call held. */
+const reads = (all: AuditEvent[]) =>
+  all.filter(
+    ({ action, detail }) =>
+      (action === "agent.call" && detail.method === "connections.outcome") ||
+      (action === "connection.call" &&
+        ["held", "replayed"].includes(String(detail.outcome)))
+  );
+
 describe("a chat's connections", setUpTime, () => {
-  it("hold a write for the person to confirm instead of sending it", async () => {
+  it("hold a write, with no key of the model's, for the person to confirm, and send it once when they do", async () => {
     const { person, mail, chat, grant } = await setUp(
       codeStep(
-        `export default async (env) => await env.connections.call("MAIL", "mail.send", ${JSON.stringify(invoiceMail)}, { idempotencyKey: "invoice-7" });`
+        `export default async (env) => await env.connections.call("MAIL", "mail.send", ${JSON.stringify(invoiceMail)});`
       ),
       says("It waits for you to confirm it.")
     );
@@ -98,6 +127,24 @@ describe("a chat's connections", setUpTime, () => {
       held: JSON.stringify(invoiceMail),
       others: 0,
       sent: { calls: 0, sent: [] },
+    });
+
+    await person.api.pendingActions.confirm(
+      held?.id ?? "",
+      held?.inputHash ?? ""
+    );
+    // Taken: it can't be confirmed, and so sent, a second time.
+    await expect(
+      outcome(
+        person.api.pendingActions.confirm(held?.id ?? "", held?.inputHash ?? "")
+      )
+    ).resolves.toBe("connect.pending_not_found");
+    expect({
+      waiting: await person.api.pendingActions.list(),
+      sent: await mail.did(),
+    }).toStrictEqual({
+      waiting: [],
+      sent: { calls: 1, sent: [invoiceMail] },
     });
   });
 
@@ -229,16 +276,14 @@ describe("a chat's connections", setUpTime, () => {
     );
   });
 
-  it("refuse a key too long to be the chat's, and every call refused before connect, each audited once", async () => {
+  it("audit a call refused before connect once, by core, and one connect took by connect alone", async () => {
     const { mail, chat, grant } = await setUp(
       codeStep(
         `export default async (env) => {
-          const max = ${chatKeyMaxLength(crypto.randomUUID())};
-          const tried = async (action, key) => { try { await env.connections.call("MAIL", action, { query: "invoice" }, { idempotencyKey: key }); return "ok"; } catch (error) { return error.message; } };
+          const tried = async (action) => { try { await env.connections.call("MAIL", action, { query: "invoice" }); return "ok"; } catch (error) { return error.message; } };
           return {
-            longest: await tried("mail.search", "k".repeat(max)),
-            tooLong: await tried("mail.search", "k".repeat(max + 1)),
-            badAction: await tried("not an action!", "k"),
+            search: await tried("mail.search"),
+            badAction: await tried("not an action!"),
           };
         };`
       ),
@@ -251,10 +296,10 @@ describe("a chat's connections", setUpTime, () => {
     const invalid = connectErrors.create("connect.invalid").message;
     const [result] = await codeResults(chat.stub, chat.chat.id);
     expect(result?.text).toBe(
-      `Returned:\n${JSON.stringify({ longest: "ok", tooLong: invalid, badAction: invalid })}`
+      `Returned:\n${JSON.stringify({ search: "ok", badAction: invalid })}`
     );
-    // The two refused before connect, by core, once each; the one connect
-    // took, by connect alone.
+    // The one refused before connect, by core, once; the one connect took,
+    // by connect alone.
     const events = await eventsOf(
       chat.agent.agentId,
       (all) =>
@@ -262,7 +307,7 @@ describe("a chat's connections", setUpTime, () => {
           ({ action, detail }) =>
             (action === "agent.call" && detail.method === "connections.call") ||
             action === "connection.call"
-        ).length === 3
+        ).length === 2
     );
     expect(
       events
@@ -278,46 +323,185 @@ describe("a chat's connections", setUpTime, () => {
         .toSorted()
     ).toStrictEqual([
       "agent.call refused connect.invalid",
-      "agent.call refused connect.invalid",
       "connection.call ok ",
     ]);
   });
 
-  it("keep each chat's idempotency keys its own, in one workspace", async () => {
-    const send = codeStep(
-      `export default async (env) => await env.connections.call("MAIL", "mail.send", ${JSON.stringify(invoiceMail)}, { idempotencyKey: "invoice-7" });`
-    );
+  it("find the same held write when the model asks for it again while it waits, whatever options it passes, and hold a new one once it is decided", async () => {
+    // A fourth argument, as the API once took a key there, is ignored: two
+    // keys don't make two actions.
+    const send = (key: string) =>
+      codeStep(
+        `export default async (env) => await env.connections.call("MAIL", "mail.send", ${JSON.stringify(invoiceMail)}, { idempotencyKey: "${key}" });`
+      );
     const { person, mail, chat, grant } = await setUp(
-      send,
+      send("first"),
       says("It waits for you."),
-      send,
-      says("This one too.")
+      send("second"),
+      says("It still waits for you."),
+      send("third"),
+      says("I asked anew.")
     );
-    const other = await chat.stub.createChat("Other", person.userId, chat.id);
     await grant(mail.id, "MAIL");
 
     await chat.ask("Send Ben the invoice.");
-    await chat.stub.ask(other.id, { text: "Send it from here.", model });
+    await chat.ask("Try again.");
+    const waiting = await person.api.pendingActions.list();
+    const [held] = waiting;
+    await person.api.pendingActions.decline(held?.id ?? "");
+    await chat.ask("Once more.");
 
-    // Two held actions, one per chat, though both chats chose one key.
-    const held = await person.api.pendingActions.list();
-    const [first] = await codeResults(chat.stub, chat.chat.id);
-    const [second] = await codeResults(chat.stub, other.id);
+    const anew = await person.api.pendingActions.list();
+    const results = await codeResults(chat.stub, chat.chat.id);
     expect({
-      held: held.length,
-      distinct: new Set(held.map(({ id }) => id)).size,
-      pending: [first?.text, second?.text].map((text) =>
-        held.some(({ id }) => text?.includes(id) === true)
-      ),
-      sameAnswer: first?.text === second?.text,
+      waiting: waiting.map(({ input }) => input),
+      anew: anew.map(({ input }) => input),
+      sameAction: anew[0]?.id === held?.id,
+      results: results.map(({ text }) => text),
       sent: await mail.did(),
     }).toStrictEqual({
-      held: 2,
-      distinct: 2,
-      pending: [true, true],
-      sameAnswer: false,
+      waiting: [JSON.stringify(invoiceMail)],
+      anew: [JSON.stringify(invoiceMail)],
+      sameAction: false,
+      results: [
+        pendingOf(held?.id),
+        pendingOf(held?.id),
+        pendingOf(anew[0]?.id),
+      ],
       sent: { calls: 0, sent: [] },
     });
+  });
+
+  it("read how a held call ended by its ID: a read held in a restricted chat, once its person confirmed it, and only in the chat that asked", async () => {
+    const { person, mail, chat, grant } = await setUp(
+      codeStep(
+        `export default async (env) => {
+          const held = await env.connections.call("MAIL", "mail.search", { query: "invoice" });
+          return { held: held.output, now: await env.connections.outcome(held.pending.id) };
+        };`
+      ),
+      says("It waits for you.")
+    );
+    await grant(mail.id, "MAIL");
+    // The chat has read restricted data: on a Composio connection every
+    // call from it is held now, a read too.
+    await chat.stub.restrictChat(chat.chat.id);
+
+    await chat.ask("Find the invoice.");
+    const [held] = await person.api.pendingActions.list();
+    const id = held?.id ?? "";
+    const searchedBefore = await mail.searched();
+    await person.api.pendingActions.confirm(id, held?.inputHash ?? "");
+
+    await pointAtGateway(
+      chat.stub,
+      fakeGateway(outcomeOf(id), says("Found it."), outcomeOf(id), says("No."))
+    );
+    await chat.ask("What did it find?");
+    // Another chat of the same person and agent, and another person's chat.
+    const other = await chat.stub.createChat("Other", person.userId, chat.id);
+    await chat.stub.ask(other.id, { text: "What did it find?", model });
+    const ben = await signedInApi(idp, "user");
+    const bens = await chatOf(ben.userId, outcomeOf(id), says("No."));
+    await bens.ask("What did it find?");
+
+    const notFound = connectErrors.create("connect.pending_not_found").message;
+    const found = { messages: ["invoice-1"] };
+    expect({
+      searchedBefore,
+      searched: await mail.searched(),
+      mine: await texts(chat.stub, chat.chat.id),
+      otherChat: await texts(chat.stub, other.id),
+      bens: await texts(bens.stub, bens.chat.id),
+    }).toStrictEqual({
+      searchedBefore: [],
+      searched: ["invoice"],
+      mine: [
+        `Returned:\n${JSON.stringify({ held: null, now: { status: "waiting", output: null, error: null } })}`,
+        `Returned:\n${JSON.stringify({ status: "done", output: found, error: null })}`,
+      ],
+      otherChat: [`Returned:\n${notFound}`],
+      bens: [`Returned:\n${notFound}`],
+    });
+    // Each read is recorded once: by connect as a call (still held, then
+    // handed over as a repeat's answer), and what never reached connect as
+    // a call, by core.
+    const events = await eventsOf(
+      chat.agent.agentId,
+      (all) => reads(all).length === 4
+    );
+    expect(
+      reads(events)
+        .map(
+          ({ action, detail }) =>
+            `${action} ${String(detail.outcome)} ${String(detail.reason ?? "")}`
+        )
+        .toSorted()
+    ).toStrictEqual([
+      "agent.call refused connect.pending_not_found",
+      // The call itself, held, and the read of it while it waited.
+      "connection.call held ",
+      "connection.call held ",
+      "connection.call replayed ",
+    ]);
+  });
+
+  it("read a held call's outcome only as the call would be allowed now: not once its resource's permission is revoked, and under the mask in force now", async () => {
+    const person = await signedInApi(idp, "user");
+    const admin = await signedInApi(idp, "admin");
+    // Searches held to the query they name, as the admin's rule says.
+    const mail = await mailConnection(
+      [],
+      ["mail.send", { name: "mail.search", read: true, resource: "query" }]
+    );
+    const chat = await chatOf(
+      person.userId,
+      codeStep(
+        `export default async (env) => await env.connections.call("INVOICES", "mail.search", { query: "invoice" });`
+      ),
+      says("It waits for you.")
+    );
+    const permissionFor = async (
+      binding: string,
+      resource: string,
+      mask?: string[]
+    ) =>
+      await requestGranted(idp, admin, {
+        subject: chat.agent,
+        object: {
+          type: "connection",
+          connectionId: mail.id,
+          resource,
+          ...(mask === undefined ? {} : { mask }),
+        },
+        actions: ["mail.search"],
+        binding,
+      });
+    const invoices = await permissionFor("INVOICES", "invoice");
+    await permissionFor("OTHER", "other");
+    await chat.stub.restrictChat(chat.chat.id);
+
+    await chat.ask("Find the invoice.");
+    const [held] = await person.api.pendingActions.list();
+    const id = held?.id ?? "";
+    await person.api.pendingActions.confirm(id, held?.inputHash ?? "");
+
+    // The permission for that resource goes; one for another stays.
+    await admin.api.permissions.revoke(invoices);
+    await pointAtGateway(
+      chat.stub,
+      fakeGateway(outcomeOf(id), says("No."), outcomeOf(id), says("No."))
+    );
+    await chat.ask("What did it find?");
+    // A new permission for it masks a field: this server can't mask.
+    await permissionFor("MASKED", "invoice", ["body"]);
+    await chat.ask("And now?");
+
+    await expect(texts(chat.stub, chat.chat.id)).resolves.toStrictEqual([
+      `Returned:\n${JSON.stringify({ output: null, pending: { id } })}`,
+      `Returned:\n${permissionErrors.create("permission.denied").message}`,
+      `Returned:\n${connectErrors.create("connect.mask_unsupported").message}`,
+    ]);
   });
 
   it("keep a chat that read an EU-only connection to EU models, in every later turn", async () => {

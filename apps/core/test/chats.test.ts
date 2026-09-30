@@ -356,7 +356,7 @@ describe("chats", () => {
     await answering(
       ann,
       codeStep(
-        'export default async (env) => await env.connections.call("HELD_MAIL", "mail.send", { to: "ben@acme.test", subject: "Invoice" }, { idempotencyKey: "invoice" });'
+        'export default async (env) => await env.connections.call("HELD_MAIL", "mail.send", { to: "ben@acme.test", subject: "Invoice" });'
       ),
       reply
     );

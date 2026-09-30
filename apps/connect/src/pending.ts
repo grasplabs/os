@@ -7,6 +7,7 @@ import {
   connectionPersonSchema,
   declineChatActionsSchema,
   endedRunsSchema,
+  heldCallRequestSchema,
   heldRequestSchema,
   pendingKeySchema,
   refuseConfirmationSchema,
@@ -14,6 +15,7 @@ import {
 import type {
   ConnectCall,
   ConnectionPerson,
+  HeldCall,
   PendingAction,
   PendingReference,
 } from "@grasp-os/shared/connect";
@@ -23,7 +25,8 @@ import {
   permissionSubjectSchema,
   workContextSchema,
 } from "@grasp-os/shared/permissions";
-import { and, asc, desc, eq, sql } from "drizzle-orm";
+import type { WorkContext } from "@grasp-os/shared/permissions";
+import { and, asc, desc, eq, notExists, or, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
@@ -40,7 +43,9 @@ import { connections, idempotentCalls, pendingActions } from "./db/schema.ts";
 // carrying it out. The person sees it, with its exact input, through core,
 // from their own session; confirming runs that stored input through the
 // normal call path, with its idempotency key, and declining drops it.
-// Nothing of it is left but the audit events. As in the reference design,
+// Nothing of it is left but the audit events and, for a workflow run's
+// or a chat's under a key connect made, its key, spent as declined (see
+// `deletion`): never its input. As in the reference design,
 // a held action waits until it is decided: it doesn't expire.
 //
 // A restricted context's held actions are marked `restricted`, so the
@@ -132,7 +137,9 @@ const detailOf = (
  * Deleting one held action with `entry`, its event, only while it is still
  * there. With `spentAs` (why it won't run), a workflow run's held action
  * spends its key in the same batch, so its step's retry fails
- * (`connect.declined`) rather than asking again.
+ * (`connect.declined`) rather than asking again. So does a chat's under a
+ * key connect made (`madeKey`), so its chat can be told it was declined
+ * (`heldCall`, `heldOutcome`): the key, never the input.
  */
 const deletion = (
   env: Env,
@@ -158,9 +165,18 @@ const deletion = (
           output: sql<string | null>`${spentAs ?? null}`.as("output"),
           provenance: sql<null>`NULL`.as("provenance"),
           createdAt: sql<Date>`${Date.now()}`.as("created_at"),
+          resource: pendingActions.resource,
         })
         .from(pendingActions)
-        .where(and(still, eq(pendingActions.mode, "workflow")))
+        .where(
+          and(
+            still,
+            or(
+              eq(pendingActions.mode, "workflow"),
+              sql`${pendingActions.idempotencyKey} = json_extract(${pendingActions.context}, '$.chatId') || ':' || ${pendingActions.id}`
+            )
+          )
+        )
     )
     .onConflictDoNothing();
   const remove = db.delete(pendingActions).where(still);
@@ -245,11 +261,28 @@ export const dropPendingActions = async (
 const value = <T>(literal: T, column: string) => sql<T>`${literal}`.as(column);
 
 /**
+ * The idempotency key connect makes for a side effect held without one: a
+ * chat's carries the chat, so the chat can later be told how the action
+ * ended by the held action's ID alone (`heldCall`), and no other chat
+ * can.
+ */
+const madeKey = (context: WorkContext, id: string): string =>
+  context.type === "chat" ? `${context.chatId}:${id}` : id;
+
+/**
  * Holds a side effect for the person `claims` act for: the reference to
  * it, the one already held for this call if there is one. The same call
  * repeated with the same key finds the same held action; with another
- * input, it is refused. `idempotencyKey` is the call's, which every side
- * effect has by now.
+ * input, it is refused.
+ *
+ * A call a person is there for may come without a key (`idempotencyKey`
+ * null; call.ts refuses a workflow run's): it is held and taken exactly
+ * once whatever its key, so connect makes one (`madeKey`). While it waits,
+ * the same call made again (the same App or agent, person, context,
+ * connection, action, resource and input) finds that held action rather
+ * than holding a second: a model that asks twice doesn't get the person
+ * two cards, and one slip of theirs two sends. Once it is decided, the
+ * same call is a new action.
  */
 export const hold = async (
   env: Env,
@@ -262,7 +295,7 @@ export const hold = async (
   }: {
     input: Record<string, Json>;
     inputHash: string;
-    idempotencyKey: string;
+    idempotencyKey: string | null;
   }
 ): Promise<PendingReference> => {
   const { authority, origin } = claims;
@@ -275,14 +308,25 @@ export const hold = async (
   const { subject } = authority;
   const subjectType = subject.type;
   const subjectId = subject.type === "app" ? subject.appId : subject.agentId;
-  const sameCall = and(
+  const id = crypto.randomUUID();
+  const context = JSON.stringify(origin.context);
+  const sameCaller = and(
     eq(pendingActions.subjectType, subjectType),
     eq(pendingActions.subjectId, subjectId),
     eq(pendingActions.onBehalfOf, authority.onBehalfOf),
     eq(pendingActions.connectionId, connection.id),
-    eq(pendingActions.action, claims.action),
-    eq(pendingActions.idempotencyKey, idempotencyKey)
+    eq(pendingActions.action, claims.action)
   );
+  // The call this one repeats: by its key, or, without one, by what it
+  // would do and where it was asked.
+  const sameCall =
+    idempotencyKey === null
+      ? and(
+          sameCaller,
+          eq(pendingActions.inputHash, inputHash),
+          eq(pendingActions.context, context)
+        )
+      : and(sameCaller, eq(pendingActions.idempotencyKey, idempotencyKey));
   // Only while the connection is still active: a disconnect that dropped
   // its held actions a moment ago must not find a new one behind it.
   const [inserted] = await db
@@ -290,7 +334,7 @@ export const hold = async (
     .select(
       db
         .select({
-          id: value(crypto.randomUUID(), "id"),
+          id: value(id, "id"),
           subjectType: value(subjectType, "subject_type"),
           subjectId: value(subjectId, "subject_id"),
           onBehalfOf: value(authority.onBehalfOf, "on_behalf_of"),
@@ -300,11 +344,14 @@ export const hold = async (
           accountId: value(connection.accountId, "account_id"),
           resource: value(claims.resource, "resource"),
           action: value(claims.action, "action"),
-          idempotencyKey: value(idempotencyKey, "idempotency_key"),
+          idempotencyKey: value(
+            idempotencyKey ?? madeKey(origin.context, id),
+            "idempotency_key"
+          ),
           input: value(JSON.stringify(input), "input"),
           inputHash: value(inputHash, "input_hash"),
           permissionId: value(origin.permissionId, "permission_id"),
-          context: value(JSON.stringify(origin.context), "context"),
+          context: value(context, "context"),
           restricted: value(claims.restricted ? 1 : 0, "restricted"),
           createdAt: value(Date.now(), "created_at"),
         })
@@ -312,7 +359,13 @@ export const hold = async (
         .where(
           and(
             eq(connections.id, connection.id),
-            eq(connections.status, "active")
+            eq(connections.status, "active"),
+            // In the one statement, so of two such calls at once one is
+            // held and the other finds it. A call with a key is kept to
+            // one by the unique index on it.
+            idempotencyKey === null
+              ? notExists(db.select().from(pendingActions).where(sameCall))
+              : undefined
           )
         )
     )
@@ -522,6 +575,107 @@ export const pendingActionFor = async (
     )
     .get();
   return row === undefined ? null : summaryOf(row);
+};
+
+/**
+ * Which call a held action of a chat was (`ConnectApi.heldCall`), for the
+ * chat whose agent asked for it. A chat's code has only the ID its held
+ * call was answered with, so that finds it: while it waits, the held
+ * action itself; once decided, the stored call under the key connect made
+ * for it, which carries the chat (`madeKey`). Anything else is not found:
+ * another chat's, agent's or person's, one held under its caller's own
+ * key, and one taken by a confirmation whose call hasn't claimed its key
+ * yet, which a moment later is found. It says nothing of how the call
+ * ended: that is read with a capability for the call (`heldOutcome`).
+ */
+export const heldCall = async (
+  env: Env,
+  request: unknown
+): Promise<HeldCall> => {
+  const parsed = heldCallRequestSchema.safeParse(request);
+  if (!parsed.success) {
+    throw connectErrors.create("connect.invalid");
+  }
+  const { agentId, onBehalfOf, workspaceId, chatId, id } = parsed.data;
+  const db = drizzle(env.DB);
+  const idempotencyKey = madeKey({ type: "chat", workspaceId, chatId }, id);
+  const waiting = await db
+    .select({
+      connectionId: pendingActions.connectionId,
+      resource: pendingActions.resource,
+      action: pendingActions.action,
+    })
+    .from(pendingActions)
+    .where(
+      and(
+        eq(pendingActions.id, id),
+        eq(pendingActions.subjectType, "agent"),
+        eq(pendingActions.subjectId, agentId),
+        eq(pendingActions.onBehalfOf, onBehalfOf),
+        eq(pendingActions.idempotencyKey, idempotencyKey)
+      )
+    )
+    .get();
+  const found =
+    waiting ??
+    (await db
+      .select({
+        connectionId: idempotentCalls.connectionId,
+        resource: idempotentCalls.resource,
+        action: idempotentCalls.action,
+      })
+      .from(idempotentCalls)
+      .where(
+        and(
+          eq(idempotentCalls.idempotencyKey, idempotencyKey),
+          eq(idempotentCalls.subjectType, "agent"),
+          eq(idempotentCalls.subjectId, agentId),
+          eq(idempotentCalls.onBehalfOf, onBehalfOf)
+        )
+      )
+      .get());
+  if (found === undefined) {
+    throw connectErrors.create("connect.pending_not_found");
+  }
+  return { ...found, idempotencyKey };
+};
+
+/**
+ * The held action waiting under the call `claims` name, if one still is:
+ * its ID.
+ */
+export const waitingUnder = async (
+  env: Env,
+  {
+    authority,
+    connectionId,
+    resource,
+    action,
+    idempotencyKey,
+  }: CapabilityClaims
+): Promise<string | undefined> => {
+  if (idempotencyKey === null) {
+    return undefined;
+  }
+  const { subject } = authority;
+  const held = await drizzle(env.DB)
+    .select({ id: pendingActions.id, resource: pendingActions.resource })
+    .from(pendingActions)
+    .where(
+      and(
+        eq(pendingActions.subjectType, subject.type),
+        eq(
+          pendingActions.subjectId,
+          subject.type === "app" ? subject.appId : subject.agentId
+        ),
+        eq(pendingActions.onBehalfOf, authority.onBehalfOf),
+        eq(pendingActions.connectionId, connectionId),
+        eq(pendingActions.action, action),
+        eq(pendingActions.idempotencyKey, idempotencyKey)
+      )
+    )
+    .get();
+  return held?.resource === resource ? held.id : undefined;
 };
 
 /** Most held actions one round of `declineChatActions` reads and declines. */

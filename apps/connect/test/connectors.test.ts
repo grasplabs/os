@@ -1,4 +1,5 @@
 import { connectorManifestSchema } from "@grasp-os/connector-kit/manifest";
+import { signCapability } from "@grasp-os/shared/capability";
 import type { ConnectionPerson } from "@grasp-os/shared/connect";
 import { env, exports } from "cloudflare:workers";
 import { eq } from "drizzle-orm";
@@ -246,6 +247,73 @@ describe("a native connector", () => {
     await expect(outcome(send(["nonsense"]))).resolves.toBe(
       "connect.mask_unsupported"
     );
+    expect(api.sent.map(({ method }) => method)).toStrictEqual(["POST"]);
+  });
+
+  it("masks a held call's answer, read later, as the capability of that read says", async () => {
+    const connection = await connectionTo("sample");
+    const chat = agentFor(
+      connection.person.userId,
+      "agent-chat",
+      "interactive"
+    );
+    const stated = {
+      connectionId: connection.id,
+      action: "items.send",
+      resource: "invoices@acme.test",
+    };
+    const { pending } = await callAs(
+      chat,
+      { ...stated, input: { mailbox: "invoices@acme.test", subject: "Paid" } },
+      { origin: chatOrigin }
+    );
+    const [held] = await exports.default.listPendingActions(connection.person);
+    if (held === undefined || held.id !== pending?.id) {
+      throw new Error("Expected the held action");
+    }
+    const keyed = { ...stated, idempotencyKey: held.idempotencyKey };
+    // Confirmed while the permission masked nothing.
+    await exports.default.confirmAction({
+      person: connection.person,
+      id: held.id,
+      inputHash: held.inputHash,
+      capability: await signCapability(env.CAPABILITY_SIGNING_KEY, chat, {
+        ...keyed,
+        origin: chatOrigin,
+        confirms: held.id,
+      }),
+    });
+    const read = async (mask: string[]): Promise<unknown> => {
+      const ended = await exports.default.heldOutcome({
+        ...keyed,
+        capability: await signCapability(env.CAPABILITY_SIGNING_KEY, chat, {
+          ...keyed,
+          mask,
+        }),
+      });
+      return ended.state === "done" ? JSON.parse(ended.result.output) : ended;
+    };
+    await expect(read([])).resolves.toMatchObject({ subject: "Paid" });
+    // The permission masks the subject by now: so does the read.
+    await expect(read(["subject"])).resolves.toMatchObject({ subject: null });
+    // A mask connect can't apply is refused, never ignored.
+    await expect(outcome(read(["nonsense"]))).resolves.toBe(
+      "connect.mask_unsupported"
+    );
+    // And a capability for the whole connection isn't one for this call.
+    const whole = { ...keyed, resource: undefined };
+    await expect(
+      outcome(
+        exports.default.heldOutcome({
+          ...whole,
+          capability: await signCapability(
+            env.CAPABILITY_SIGNING_KEY,
+            chat,
+            whole
+          ),
+        })
+      )
+    ).resolves.toBe("connect.pending_not_found");
     expect(api.sent.map(({ method }) => method)).toStrictEqual(["POST"]);
   });
 

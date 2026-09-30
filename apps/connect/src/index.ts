@@ -9,6 +9,7 @@ import {
   connectCallSchema,
   connectErrors,
   declineActionSchema,
+  heldOutcomeRequestSchema,
 } from "@grasp-os/shared/connect";
 import type {
   Catalog,
@@ -22,6 +23,8 @@ import type {
   Disconnect,
   DisconnectPersonal,
   FinishConnection,
+  HeldCall,
+  HeldOutcome,
   OutboxedConnectorEvent,
   PendingAction,
   StartConnection,
@@ -32,7 +35,7 @@ import { WorkerEntrypoint } from "cloudflare:workers";
 
 import { ackAuditEvents, auditCall, takeAuditEvents } from "./audit.ts";
 import type { CallOutcome, CallRecord } from "./audit.ts";
-import { carryOut, connectionFor } from "./call.ts";
+import { carryOut, connectionFor, heldOutcome } from "./call.ts";
 import type { CallDone, CallProgress } from "./call.ts";
 import { catalog, catalogTools } from "./catalog.ts";
 import {
@@ -65,6 +68,7 @@ import {
   dropForEndedRuns,
   heldFor,
   declineChatActions,
+  heldCall,
   listPendingActions,
   pendingActionFor,
   refuseConfirmation,
@@ -286,6 +290,71 @@ export default class Connect
 
   async pendingAction(request: unknown): Promise<PendingAction | null> {
     return await pendingActionFor(this.env, request);
+  }
+
+  async heldCall(request: unknown): Promise<HeldCall> {
+    return await heldCall(this.env, request);
+  }
+
+  /**
+   * How a held call ended, for a caller with core's capability for that
+   * call, checked as `call` checks one. Recorded as a call is, refused
+   * ones too: what it hands over as a repeat's answer (`replayed`), with
+   * what that read; still waiting as `held`; declined, or not ended well,
+   * as refused or failed with why.
+   */
+  async heldOutcome(request: unknown): Promise<HeldOutcome> {
+    const parsed = heldOutcomeRequestSchema.safeParse(request);
+    if (!parsed.success) {
+      await auditFailure(this.env, {
+        outcome: "refused",
+        reason: "connect.invalid",
+      });
+      throw connectErrors.create("connect.invalid");
+    }
+    const { capability, ...call } = parsed.data;
+    let claims: CapabilityClaims | undefined;
+    let read: Awaited<ReturnType<typeof heldOutcome>>;
+    try {
+      claims = await verifyCapability(signingKeys(this.env), capability, call);
+      if (claims.confirms !== undefined) {
+        throw capabilityErrors.create("capability.invalid", {
+          reason: "scope",
+        });
+      }
+      read = await heldOutcome(this.env, claims);
+    } catch (error) {
+      const reason = codeOf(error);
+      await auditFailure(this.env, {
+        call,
+        claims,
+        outcome: outcomeOf(reason),
+        reason: reason ?? "internal",
+      });
+      throw error;
+    }
+    const { outcome, pendingActionId } = read;
+    const ended = { call, claims, sideEffect: true, pendingActionId };
+    if (outcome.state === "done") {
+      await auditCall(this.env, {
+        ...ended,
+        outcome: "replayed",
+        provenance: outcome.result.provenance,
+      });
+    } else if (outcome.state === "waiting") {
+      await auditCall(this.env, { ...ended, outcome: "held" });
+    } else {
+      const reason =
+        outcome.state === "declined" ? "connect.declined" : outcome.reason;
+      await auditCall(this.env, {
+        ...ended,
+        // A tool's own error is an answer, handed over as a repeat gets it.
+        outcome:
+          reason === "connect.action_failed" ? "replayed" : outcomeOf(reason),
+        reason,
+      });
+    }
+    return outcome;
   }
 
   async dropForEndedRun(request: unknown): Promise<void> {

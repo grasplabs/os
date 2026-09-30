@@ -36,9 +36,11 @@ export const composioTool = (
  * So is every call on a Composio server from a context that read
  * restricted data (`restricted`), reads too: its input goes to a third
  * party and may carry that data, so the person it acts for decides (R12).
- * Like any side effect it then needs an idempotency key: without one it is
- * refused, not held. Its answer is then kept like any side effect's, so a run's step that
- * waited for the person's decision gets it rather than being held again.
+ * Like any side effect of a workflow run it then needs an idempotency key:
+ * without one it is refused, not held (for a call a person is there for,
+ * connect makes the key as it holds it; call.ts). Its answer is then kept
+ * like any side effect's, so a run's step that waited for the person's
+ * decision gets it rather than being held again.
  */
 export const hasSideEffect = (
   tool: McpTool,
