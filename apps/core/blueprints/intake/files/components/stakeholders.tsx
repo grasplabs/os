@@ -178,7 +178,7 @@ export const Stakeholders = ({
                             Take out statements
                           </Button>
                         ) : null}
-                        {chat.status === "open" ? (
+                        {chat.status === "revoked" ? null : (
                           <Button
                             variant="ghost"
                             disabled={busy}
@@ -189,7 +189,7 @@ export const Stakeholders = ({
                           >
                             Revoke
                           </Button>
-                        ) : null}
+                        )}
                       </div>
                     </TableCell>
                   </TableRow>

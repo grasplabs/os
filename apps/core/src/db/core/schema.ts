@@ -971,8 +971,13 @@ export const guestChats = sqliteTable(
   },
   (table) => [
     uniqueIndex("guest_chats_token_idx").on(table.tokenHash),
-    // An App's chats, newest first, and its open ones counted.
+    // An App's chats, newest first.
     index("guest_chats_app_idx").on(table.appId, table.createdAt, table.id),
+    // An App's chats that haven't ended, newest first: listed first, and
+    // counted as it invites. Expired ones stay in it until they are swept.
+    index("guest_chats_open_idx")
+      .on(table.appId, table.createdAt, table.id)
+      .where(sql`ended IS NULL`),
     // What the retention sweep deletes, oldest first.
     index("guest_chats_expires_idx").on(table.expiresAt),
   ]

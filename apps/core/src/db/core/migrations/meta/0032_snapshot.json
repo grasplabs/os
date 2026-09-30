@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "321e11db-9782-43f4-83c1-d64c36aec4be",
+  "id": "a972a5c2-38c7-465f-afa2-066611b6d59e",
   "prevId": "2223b691-3f5a-494c-be13-8497c17d7dff",
   "tables": {
     "accounts": {
@@ -874,6 +874,16 @@
             "id"
           ],
           "isUnique": false
+        },
+        "guest_chats_open_idx": {
+          "name": "guest_chats_open_idx",
+          "columns": [
+            "app_id",
+            "created_at",
+            "id"
+          ],
+          "isUnique": false,
+          "where": "ended IS NULL"
         },
         "guest_chats_expires_idx": {
           "name": "guest_chats_expires_idx",

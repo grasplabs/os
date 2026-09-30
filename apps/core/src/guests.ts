@@ -34,6 +34,8 @@ import {
   isNull,
   lt,
   lte,
+  ne,
+  not,
   or,
   sql,
 } from "drizzle-orm";
@@ -71,8 +73,10 @@ import { authorize } from "./permissions.ts";
 //   the App still holds its permission, the member it was made for is
 //   still a member who may use the App, and `guest_chats` is on. Each is
 //   checked on every request, never only at invitation. A revoked link
-//   opens nothing at all, not even what was written; a finished or
-//   expired one still shows it, and takes nothing more.
+//   opens nothing at all, not even what was written, however late the
+//   revoke lands in a request (what was written is read in one batch
+//   with the chat's state); a finished or expired one still shows it,
+//   takes nothing more, and can be revoked too.
 // - The guest reaching the company's data: the model is called with no
 //   tools, only the skill's guidance and the chat so far, through the
 //   model gateway (its allowlist, rules and budgets), as the App for the
@@ -192,6 +196,12 @@ const endedAt = (now: Date) => ({
   expiresAt: sql`MIN(${guestChats.expiresAt}, ${now.getTime()})`,
 });
 
+/** That a chat isn't revoked: open, finished or expired. */
+const notRevoked = or(
+  isNull(guestChats.ended),
+  ne(guestChats.ended, "revoked")
+);
+
 // The App's side: inviting, listing, reading back and revoking, each for
 // the member its method runs for, under the App's permission.
 
@@ -307,21 +317,42 @@ export const inviteGuest = async (
   return { ...chatOf(row, now), link: link.href };
 };
 
-/** The App's guest chats, newest first: the latest 100. */
+/** Most chats `listGuests` answers. */
+const listedChats = 100;
+
+/**
+ * The App's guest chats, at most 100: the open ones first (at most 50,
+ * so every one is listed, however many ended since it was made), then
+ * those that ended or expired, each newest first. One batch, each query
+ * by an index: the open ones by theirs (`guest_chats_open_idx`).
+ */
 export const listGuests = async (
   env: Env,
   authority: Authority,
   permissionId: PermissionId
 ): Promise<GuestChat[]> => {
   await requireGuests(env, authority, permissionId);
-  const rows = await drizzle(env.DB)
-    .select()
-    .from(guestChats)
-    .where(eq(guestChats.appId, appOf(authority)))
-    .orderBy(desc(guestChats.createdAt), desc(guestChats.id))
-    .limit(100);
-  const now = Date.now();
-  return rows.map((row) => chatOf(row, now));
+  const app = appOf(authority);
+  const db = drizzle(env.DB);
+  const now = new Date();
+  const open = and(isNull(guestChats.ended), gt(guestChats.expiresAt, now));
+  const [opened, ended] = await db.batch([
+    db
+      .select()
+      .from(guestChats)
+      .where(and(eq(guestChats.appId, app), open))
+      .orderBy(desc(guestChats.createdAt), desc(guestChats.id))
+      .limit(listedChats),
+    db
+      .select()
+      .from(guestChats)
+      .where(and(eq(guestChats.appId, app), not(open ?? sql`0`)))
+      .orderBy(desc(guestChats.createdAt), desc(guestChats.id))
+      .limit(listedChats),
+  ]);
+  return [...opened, ...ended]
+    .slice(0, listedChats)
+    .map((row) => chatOf(row, now.getTime()));
 };
 
 /**
@@ -348,8 +379,11 @@ export const readGuest = async (
 };
 
 /**
- * Stops a guest chat's link for good; one that ended stays as it is, and
- * so audits nothing.
+ * Stops a guest chat's link for good, whether it is open, finished or
+ * expired: a revoked link opens nothing, what was written neither (a
+ * finished or expired one still shows it). One already revoked stays as
+ * it is, and so audits nothing. Its retention counts from when it first
+ * ended.
  */
 export const revokeGuest = async (
   env: Env,
@@ -364,8 +398,12 @@ export const revokeGuest = async (
   await auditedBatch(env, db, [
     db
       .update(guestChats)
-      .set({ ...endedAt(now), ended: "revoked" })
-      .where(and(eq(guestChats.id, row.id), isNull(guestChats.ended))),
+      .set({
+        ...endedAt(now),
+        endedAt: sql`COALESCE(${guestChats.endedAt}, ${now.getTime()})`,
+        ended: "revoked",
+      })
+      .where(and(eq(guestChats.id, row.id), notRevoked)),
     outboxedIfChanged(db, {
       actor: delegateActorOf(authority),
       action: "guest.revoked",
@@ -382,17 +420,56 @@ export const revokeGuest = async (
 const roleOf = ({ role }: GuestMessage): "user" | "assistant" =>
   role === "guest" ? "user" : "assistant";
 
-/** The chat as its guest sees it. */
+/**
+ * What a guest may read of chat `id`, as it is now: the chat and its
+ * messages in one batch, the messages only while the chat isn't revoked
+ * (checked in their own statement). So a revoke that lands after the
+ * link was checked still shows nothing: `guest.link_invalid`.
+ */
+const guestRead = async (
+  db: ReturnType<typeof drizzle>,
+  id: string
+): Promise<{ row: ChatRow; messages: GuestMessage[] }> => {
+  const [[row], rows] = await db.batch([
+    db.select().from(guestChats).where(eq(guestChats.id, id)),
+    db
+      .select()
+      .from(guestMessages)
+      .where(
+        and(
+          eq(guestMessages.chatId, id),
+          sql`EXISTS (SELECT 1 FROM ${guestChats} WHERE ${guestChats.id} = ${id} AND ${notRevoked})`
+        )
+      )
+      .orderBy(asc(guestMessages.seq)),
+  ]);
+  if (row === undefined || row.ended === "revoked") {
+    throw guestErrors.create("guest.link_invalid");
+  }
+  return {
+    row,
+    messages: rows.map(({ role, text, createdAt }) => ({
+      role,
+      text,
+      at: createdAt.toISOString(),
+    })),
+  };
+};
+
+/** The chat as its guest sees it now; nothing of one revoked meanwhile. */
 const viewOf = async (
   db: ReturnType<typeof drizzle>,
-  row: ChatRow
-): Promise<GuestView> => ({
-  name: row.name,
-  status: statusOf(row, Date.now()),
-  messages: await messagesOf(db, row.id),
-  turnsLeft: Math.max(0, guestTurnsMax - row.turns),
-  expiresAt: row.expiresAt.toISOString(),
-});
+  id: string
+): Promise<GuestView> => {
+  const { row, messages } = await guestRead(db, id);
+  return {
+    name: row.name,
+    status: statusOf(row, Date.now()),
+    messages,
+    turnsLeft: Math.max(0, guestTurnsMax - row.turns),
+    expiresAt: row.expiresAt.toISOString(),
+  };
+};
 
 /**
  * The chat a guest's secret opens, and who it acts as: the App, for the
@@ -477,7 +554,7 @@ const openChat = async (env: Env, token: string): Promise<GuestView> => {
       }),
     ]);
   }
-  return await viewOf(db, row);
+  return await viewOf(db, row.id);
 };
 
 /**
@@ -555,7 +632,7 @@ const sendMessage = async (
       .where(and(eq(guestChats.id, row.id), eq(guestChats.turns, turn)));
   let answer: string;
   try {
-    const history = await messagesOf(db, row.id);
+    const { messages: history } = await guestRead(db, row.id);
     const answered = await models(env).call({
       model: row.model,
       system: instructionsFor(row.name, guidance),
@@ -576,6 +653,10 @@ const sendMessage = async (
     answer = answered.text.trim();
   } catch (error) {
     await release();
+    // Revoked under it: nothing of the chat is said, as for any request.
+    if (guestErrors.codeOf(error) === "guest.link_invalid") {
+      throw error;
+    }
     log.warn("guest.turn_failed", { chat: row.id, ...errorFields(error) });
     throw guestErrors.create("guest.unavailable");
   }
@@ -604,7 +685,7 @@ const sendMessage = async (
     }),
     release(),
   ]);
-  return await viewOf(db, { ...row, turns: turn });
+  return await viewOf(db, row.id);
 };
 
 /** Ends the chat, as the guest's own choice: the link works no more. */
@@ -625,7 +706,7 @@ const finishChat = async (env: Env, token: string): Promise<GuestView> => {
       detail: { turns: row.turns },
     }),
   ]);
-  return await viewOf(db, { ...row, ended: "finished", endedAt: now });
+  return await viewOf(db, row.id);
 };
 
 /** The most a guest's request may carry: a message and the secret. */

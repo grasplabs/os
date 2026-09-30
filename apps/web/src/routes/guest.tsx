@@ -22,10 +22,11 @@ import { guestCall, linkSecret } from "../guest/api.ts";
 // requests below, is all the page has, and all it can do is this chat.
 // What the model answers is shown as plain text.
 
+/** What the page shows, and the link's secret it was opened with. */
 type Page =
-  | { state: "loading" }
-  | { state: "refused"; message: string }
-  | { state: "ready"; view: GuestView };
+  | { state: "loading"; secret: string }
+  | { state: "refused"; secret: string; message: string }
+  | { state: "ready"; secret: string; view: GuestView };
 
 const dateTime = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
@@ -76,8 +77,12 @@ const Messages = ({ view }: { view: GuestView }) => (
   </ol>
 );
 
-/** The chat, open for the guest's next message until it ends. */
-const Chat = ({ first }: { first: GuestView }) => {
+/**
+ * The chat `secret` opened, open for the guest's next message until it
+ * ends. Every message and the finish go with that same secret, never
+ * with whatever the URL holds by then.
+ */
+const Chat = ({ secret, first }: { secret: string; first: GuestView }) => {
   const [view, setView] = useState(first);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -89,7 +94,7 @@ const Chat = ({ first }: { first: GuestView }) => {
     request: { action: "send"; text: string } | { action: "finish" }
   ): Promise<boolean> => {
     setBusy(true);
-    const answer = await guestCall({ ...request, token: linkSecret() });
+    const answer = await guestCall({ ...request, token: secret });
     setBusy(false);
     if ("error" in answer) {
       setFailure(answer.error);
@@ -175,11 +180,23 @@ const Chat = ({ first }: { first: GuestView }) => {
 };
 
 const Guest = () => {
-  const [page, setPage] = useState<Page>({ state: "loading" });
+  // The link's secret, read from the URL once, and again only when the
+  // URL's fragment changes (another link pasted over this one): the chat
+  // shown, and the one every message goes to, are the one this opened.
+  const [secret, setSecret] = useState(linkSecret);
+  const [page, setPage] = useState<Page>({ state: "loading", secret });
   useEffect(() => {
-    let mounted = true;
+    const changed = (): void => {
+      setSecret(linkSecret());
+    };
+    window.addEventListener("hashchange", changed);
+    return () => {
+      window.removeEventListener("hashchange", changed);
+    };
+  }, []);
+  useEffect(() => {
+    let current = true;
     const load = async (): Promise<void> => {
-      const secret = linkSecret();
       const answer =
         secret === ""
           ? {
@@ -187,32 +204,37 @@ const Guest = () => {
                 "This link doesn't work. Ask whoever sent it for a new one.",
             }
           : await guestCall({ action: "open", token: secret });
-      if (!mounted) {
+      if (!current) {
         return;
       }
       setPage(
         "error" in answer
-          ? { state: "refused", message: answer.error }
-          : { state: "ready", view: answer.ok }
+          ? { state: "refused", secret, message: answer.error }
+          : { state: "ready", secret, view: answer.ok }
       );
     };
     void load();
     return () => {
-      mounted = false;
+      current = false;
     };
-  }, []);
+  }, [secret]);
+  // What was opened with another secret is never shown for this one.
+  const shown: Page =
+    page.secret === secret ? page : { state: "loading", secret };
   return (
     <main className="flex min-h-svh flex-col items-center justify-center gap-4 p-6">
-      {page.state === "loading" ? (
+      {shown.state === "loading" ? (
         <p className="text-muted-foreground text-sm">Opening the chat…</p>
       ) : null}
-      {page.state === "refused" ? (
+      {shown.state === "refused" ? (
         <>
           <h1 className="text-2xl font-medium">Chat</h1>
-          <ErrorText>{page.message}</ErrorText>
+          <ErrorText>{shown.message}</ErrorText>
         </>
       ) : null}
-      {page.state === "ready" ? <Chat first={page.view} /> : null}
+      {shown.state === "ready" ? (
+        <Chat key={shown.secret} secret={shown.secret} first={shown.view} />
+      ) : null}
     </main>
   );
 };

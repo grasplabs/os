@@ -155,6 +155,9 @@ const codeOf = ({ status, body }: { status: number; body: unknown }) => ({
 /** A plan's step over rows the query itself gives: no table's. */
 const literalRows = /^SCAN (?:\d+-ROW VALUES CLAUSE|CONSTANT ROW)$/u;
 
+/** Core's read of a chat's messages. */
+const readsMessages = /^select .* from "guest_messages"/iu;
+
 /** A guest's message, "Hello", with the secret `token`. */
 const send = (token: string) => ({ action: "send", token, text: "Hello" });
 
@@ -353,6 +356,16 @@ describe("guest chats", { timeout: 60_000 }, () => {
       answer: viewOf(finishing).status,
       send: codeOf(await guest(send(finished.token))),
       again: codeOf(await guest({ action: "finish", token: finished.token })),
+      // Finished, it still shows what was written, until it is revoked.
+      open: viewOf(await guest({ action: "open", token: finished.token }))
+        .status,
+      revoked: z
+        .object({ ok: z.object({ status: z.string() }) })
+        .parse(await call(app, as(builder.userId), "revoke", finished.id)).ok
+        .status,
+      afterRevoke: codeOf(
+        await guest({ action: "open", token: finished.token })
+      ),
     };
 
     const expiring = await invite(app, builder.userId, { days: 1 });
@@ -418,6 +431,9 @@ describe("guest chats", { timeout: 60_000 }, () => {
         answer: "finished",
         send: { status: 410, code: "guest.ended" },
         again: { status: 410, code: "guest.ended" },
+        open: "finished",
+        revoked: "revoked",
+        afterRevoke: { status: 404, code: "guest.link_invalid" },
       },
       expired: { open: "expired", send: { status: 410, code: "guest.ended" } },
       off: { status: 404, code: "guest.link_invalid" },
@@ -519,6 +535,101 @@ describe("guest chats", { timeout: 60_000 }, () => {
     });
   });
 
+  it("show nothing of a chat revoked after its link was checked, before what was written is read", async () => {
+    const builder = await signedInApi(idp, "builder");
+    const { app } = await guestApp(builder);
+    const { id, token } = await invite(app, builder.userId);
+    await answering([reply("What do you do?")], async () => {
+      await guest({ action: "open", token });
+      await guest({ action: "send", token, text: "I close the month." });
+    });
+    // The open's read of the messages waits until the chat is revoked.
+    const real = env.DB;
+    const held = Promise.withResolvers<null>();
+    const resume = Promise.withResolvers<null>();
+    let reads = false;
+    let holding = true;
+    env.DB = new Proxy(real, {
+      get: (target, key) => {
+        if (key === "prepare") {
+          return (query: string) => {
+            reads ||= readsMessages.test(query);
+            return target.prepare(query);
+          };
+        }
+        if (key === "batch") {
+          return async (statements: D1PreparedStatement[]) => {
+            if (reads && holding) {
+              holding = false;
+              held.resolve(null);
+              await resume.promise;
+            }
+            return await target.batch(statements);
+          };
+        }
+        const value: unknown = Reflect.get(target, key);
+        if (typeof value !== "function") {
+          return value;
+        }
+        const bound: unknown = value.bind(target);
+        return bound;
+      },
+    });
+    let opened: { status: number; body: unknown };
+    let revoked: unknown;
+    try {
+      const opening = guest({ action: "open", token });
+      await held.promise;
+      revoked = await call(app, as(builder.userId), "revoke", id);
+      resume.resolve(null);
+      opened = await opening;
+    } finally {
+      resume.resolve(null);
+      env.DB = real;
+    }
+    expect({
+      revoked: z.object({ ok: z.object({ status: z.string() }) }).parse(revoked)
+        .ok.status,
+      opened: codeOf(opened),
+      // Nothing of what was written is in the answer.
+      leaked: JSON.stringify(opened.body).includes("I close the month."),
+    }).toStrictEqual({
+      revoked: "revoked",
+      opened: { status: 404, code: "guest.link_invalid" },
+      leaked: false,
+    });
+  });
+
+  it("list an App's open chats first, however many ended since, so each can be revoked", async () => {
+    const builder = await signedInApi(idp, "builder");
+    const { app } = await guestApp(builder);
+    const oldest = await invite(app, builder.userId, { name: "Still open" });
+    for (let chat = 0; chat < 101; chat += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- one chat at a time
+      const made = await invite(app, builder.userId);
+      // oxlint-disable-next-line no-await-in-loop -- finished before the next
+      await guest({ action: "finish", token: made.token });
+    }
+    const newest = await invite(app, builder.userId, { name: "Newest open" });
+    const { ok: listed } = z
+      .object({
+        ok: z.array(z.object({ id: z.string(), status: z.string() })),
+      })
+      .parse(await call(app, as(builder.userId), "list"));
+    expect({
+      listed: listed.length,
+      first: listed.slice(0, 2),
+      rest: [...new Set(listed.slice(2).map(({ status }) => status))],
+    }).toStrictEqual({
+      listed: 100,
+      first: [
+        { id: newest.id, status: "open" },
+        { id: oldest.id, status: "open" },
+      ],
+      rest: ["finished"],
+    });
+  });
+
   it("are invited only by a person using the App, with a Grasp skill, at most 50 open at once", async () => {
     const builder = await signedInApi(idp, "builder");
     const { app } = await guestApp(builder);
@@ -613,12 +724,13 @@ describe("guest chats", { timeout: 60_000 }, () => {
     );
     const steps = plans.flat();
     expect({
+      open: steps.some((step) => step.includes("guest_chats_open_idx")),
       read: ofGuests.length > 0,
       scans: steps.filter(
         (step) => fullScan.test(step) && !literalRows.test(step)
       ),
       sorts: steps.filter((step) => step.includes("TEMP B-TREE")),
-    }).toStrictEqual({ read: true, scans: [], sorts: [] });
+    }).toStrictEqual({ open: true, read: true, scans: [], sorts: [] });
   });
 
   it("are deleted with what was written 30 days after they end, and not before", async () => {
@@ -635,7 +747,13 @@ describe("guest chats", { timeout: 60_000 }, () => {
         .parse(await call(app, as(builder.userId), "read", id));
     await sweepGuestChats(env, new Date(Date.now() + 29 * day));
     const before = [await readable(ended.id), await readable(open.id)];
-    await sweepGuestChats(env, new Date(Date.now() + 31 * day));
+    // A sweep deletes 100 at most, the oldest first, and the file's other
+    // tests left more than that: the cron's next runs take the rest.
+    const later = new Date(Date.now() + 31 * day);
+    for (let run = 0; run < 4; run += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- one run after another
+      await sweepGuestChats(env, later);
+    }
     expect({
       before,
       ended: await call(app, as(builder.userId), "read", ended.id),

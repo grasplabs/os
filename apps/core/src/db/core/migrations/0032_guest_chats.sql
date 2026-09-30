@@ -18,6 +18,7 @@ CREATE TABLE `guest_chats` (
 --> statement-breakpoint
 CREATE UNIQUE INDEX `guest_chats_token_idx` ON `guest_chats` (`token_hash`);--> statement-breakpoint
 CREATE INDEX `guest_chats_app_idx` ON `guest_chats` (`app_id`,`created_at`,`id`);--> statement-breakpoint
+CREATE INDEX `guest_chats_open_idx` ON `guest_chats` (`app_id`,`created_at`,`id`) WHERE ended IS NULL;--> statement-breakpoint
 CREATE INDEX `guest_chats_expires_idx` ON `guest_chats` (`expires_at`);--> statement-breakpoint
 CREATE TABLE `guest_messages` (
 	`chat_id` text NOT NULL,

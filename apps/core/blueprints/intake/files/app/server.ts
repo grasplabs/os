@@ -311,7 +311,7 @@ export class App extends DurableObject<Env> {
     });
   }
 
-  /** Stops a stakeholder chat's link. */
+  /** Stops a stakeholder chat's link, open, finished or expired: nothing of it opens after. */
   async revokeChat(caller: Caller, id: string): Promise<Outcome<GuestChat>> {
     return await outcome(async () => {
       await this.#requireWriter(caller);

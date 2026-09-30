@@ -221,9 +221,14 @@ test("an admin invites a stakeholder, who opens the link without an account, wri
   );
   await expect(guestPage.getByRole("button", { name: "Send" })).toHaveCount(0);
 
-  // A made-up link opens nothing.
-  await guestPage.goto(`/guest#${"A".repeat(43)}`);
-  await guestPage.reload();
+  // Another link pasted over this one opens that one, never this chat
+  // with its secret: a made-up one opens nothing.
+  await guestPage.evaluate((made) => {
+    window.location.hash = made;
+  }, "A".repeat(43));
+  await expect(
+    guestPage.getByRole("heading", { name: `Hi ${name}` })
+  ).toHaveCount(0);
   await expect(guestPage.getByRole("alert")).toHaveText(
     "This link doesn't work. Ask whoever sent it for a new one."
   );
