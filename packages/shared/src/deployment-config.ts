@@ -168,6 +168,7 @@ export const modelGatewayConfigSchema = (modelRef: z.ZodType<string>) =>
  */
 export const defaultGatewayModels = [
   "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+  "workers-ai/@cf/zai-org/glm-5.3-flash",
 ] as const;
 
 const budgetSchema = z.strictObject({

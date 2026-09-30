@@ -1,4 +1,5 @@
 import { deriveClientSecret } from "@grasp-os/shared/client-secrets";
+import { defaultGatewayModels } from "@grasp-os/shared/deployment-config";
 import { deriveRouterSecret } from "@grasp-os/shared/router";
 import { env } from "cloudflare:workers";
 import { and, asc, eq, sql } from "drizzle-orm";
@@ -924,7 +925,7 @@ describe("deploying safely", () => {
         name: "MODEL_GATEWAY",
         json: {
           gateway: "grasp-os",
-          models: ["workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast"],
+          models: [...defaultGatewayModels],
         },
       },
       signIn: {
