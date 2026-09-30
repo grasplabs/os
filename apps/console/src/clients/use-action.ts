@@ -16,6 +16,8 @@ const refusals: Readonly<Record<SettingsErrorCode, string>> = {
     "Its Workers don't run one release the console made live: roll a release out to it instead.",
   client_busy:
     "Something else is deploying to this client right now: try again once it's done.",
+  store_secret_missing:
+    "Secrets Store has no CLIENT_KEY, which the audit log needs to record the change: have deploy-ops write it, then try again.",
 };
 
 /** A staff change to a client's settings (`useAction`), its refusals worded. */

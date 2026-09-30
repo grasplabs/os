@@ -44,6 +44,7 @@ import type { ReleaseManifest, WorkerEntry } from "@grasp-os/shared/release";
 import { deriveRouterSecret, newClientIdSchema } from "@grasp-os/shared/router";
 import { and, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
+import type { BatchItem } from "drizzle-orm/batch";
 import { z } from "zod";
 
 import { CloudflareApiError } from "../cloudflare/api.ts";
@@ -146,10 +147,26 @@ const actorName = (actor: Actor): string =>
   actor === "system" ? actor : actor.email;
 
 /**
- * What a deploy deploys: a release, or only new secrets or only the
- * client's settings on the one it runs.
+ * What a deploy deploys: a release, or only new secrets, only the
+ * client's settings, or both on the one it runs.
  */
 export type DeployKind = (typeof clientDeploys.kind.enumValues)[number];
+
+/**
+ * What a deploy of the release a client runs already takes live, as its
+ * core records it: its `settings`, new `secrets`, or both in one version
+ * (`settings_and_secrets`). Every deploy carries whatever of the two
+ * waits, so its record names each that does.
+ */
+export const redeployKind = (changes: {
+  settings: boolean;
+  secrets: boolean;
+}): DeployKind => {
+  if (changes.settings && changes.secrets) {
+    return "settings_and_secrets";
+  }
+  return changes.settings ? "settings" : "secrets";
+};
 
 /**
  * Starts deploying release `releaseId` to client `clientId`, and returns
@@ -157,14 +174,17 @@ export type DeployKind = (typeof clientDeploys.kind.enumValues)[number];
  * finished are superseded in the same batch. A client whose id can't be
  * its hostname (`newClientIdSchema`) is refused. A `secrets` or
  * `settings` deploy runs the same steps; core records it as new secrets
- * or settings rather than a release.
+ * or settings rather than a release. `recording` gives what else records
+ * the deploy (a rollout's target naming it), written in the same batch:
+ * no deploy starts that its starter has no record of.
  */
 export const startDeploy = async (
   db: ConsoleDatabase,
   actor: Actor,
   clientId: string,
   releaseId: string,
-  kind: DeployKind = "release"
+  kind: DeployKind = "release",
+  recording: (deployId: string) => readonly BatchItem<"sqlite">[] = () => []
 ): Promise<string> => {
   if (!newClientIdSchema.safeParse(clientId).success) {
     throw new DeployError(
@@ -197,6 +217,7 @@ export const startDeploy = async (
         createdAt: now,
         updatedAt: now,
       }),
+      ...recording(id),
     ],
     {
       action: "deploy.start",

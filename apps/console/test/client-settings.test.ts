@@ -314,27 +314,34 @@ describe("a client's settings", () => {
     });
   });
 
-  it("change no sign-in while Secrets Store has no key to fingerprint its admins with", async () => {
+  it("refuse a change of sign-in while Secrets Store has no key to fingerprint its admins with, and still take the one it has as no change", async () => {
     const clientId = await recordClient();
+    const current = { ...signIn, admins: ["cy@acme.test"] };
+    await setSignIn(env, staff, { clientId, signIn: current });
+    const before = await recordOf(clientId);
     await emptyStoreSecret(env.CLIENT_KEY, "CLIENT_KEY");
 
-    await expect(
-      setSignIn(env, staff, {
-        clientId,
-        signIn: { ...signIn, admins: ["bo@acme.test"] },
-      })
-    ).rejects.toThrow("CLIENT_KEY is missing from Secrets Store");
+    const saved = {
+      // The form saved as it is: nothing to record, so no key is needed.
+      unchanged: await setSignIn(env, staff, { clientId, signIn: current }),
+      changed: await codeOf(
+        setSignIn(env, staff, {
+          clientId,
+          signIn: { ...signIn, admins: ["bo@acme.test"] },
+        })
+      ),
+    };
 
+    const events = await eventsOf(clientId, "client.sign_in");
     expect({
+      saved,
       record: await recordOf(clientId),
-      events: await eventsOf(clientId, "client.sign_in"),
+      events: events.length,
     }).toStrictEqual({
-      record: {
-        ring: 1,
-        signIn: JSON.stringify(signIn),
-        configChangedAt: null,
-      },
-      events: [],
+      saved: { unchanged: false, changed: "store_secret_missing" },
+      record: before,
+      // The one change made while the store had its key.
+      events: 1,
     });
   });
 

@@ -167,10 +167,12 @@ export const clientDeploys = sqliteTable(
     /**
      * What it deploys: a release, or on the release the client runs
      * already only new secrets (a secrets rollout, or its own rotated
-     * ones) or only its settings (applied now, or by a rollout of that
-     * release). Core records it as what changed.
+     * ones), only its settings (applied now, or by a rollout of that
+     * release), or both at once. Core records it as what changed.
      */
-    kind: text({ enum: ["release", "secrets", "settings"] })
+    kind: text({
+      enum: ["release", "secrets", "settings", "settings_and_secrets"],
+    })
       .notNull()
       .default("release"),
     /** `superseded`: a newer deploy of the client started, so this one no longer runs. */

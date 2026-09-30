@@ -943,6 +943,42 @@ describe("rolling a release out", () => {
     });
   });
 
+  it("records a deploy that takes both a flag and a secrets rotation live, on the release the client runs, as both", async () => {
+    const release = await importedRelease("feat(core): flagged and rotated");
+    const internal = await activeClient(0, release);
+    await setFeature(env, staff, {
+      clientId: internal.clientId,
+      feature: "apps",
+      on: true,
+    });
+    await rotateClientSecrets(db, staff, internal.clientId, new Date());
+    await using run = await followRollouts();
+
+    const rolloutId = await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+
+    const [client] = await db
+      .select({ rotationLiveAt: clients.rotationLiveAt })
+      .from(clients)
+      .where(eq(clients.id, internal.clientId));
+    expect({
+      targets: await targetsOf(rolloutId),
+      features: await liveFeaturesOf(internal.clientId, internal.account),
+      rotationLive: client?.rotationLiveAt instanceof Date,
+      change: await latestChangeOf(internal.clientId, internal.account),
+    }).toStrictEqual({
+      targets: {
+        [internal.clientId]: { ring: 0, status: "done", error: null },
+      },
+      features: { apps: true },
+      rotationLive: true,
+      change: {
+        audited: "settings_and_secrets",
+        told: { by: staff.email, what: "settings_and_secrets" },
+      },
+    });
+  });
+
   it("skips a client that runs the release already, deploying none of its Workers", async () => {
     const release = await importedRelease("feat(core): on it already");
     const internal = await activeClient(0, release);
@@ -1266,6 +1302,64 @@ const refuseNextUploadOf = (account: AccountState, script: string): void => {
   );
 };
 
+/** The status and error of each deploy of `releaseId` to client `clientId`, oldest first. */
+const deploysOf = async (clientId: string, releaseId: string) =>
+  await db
+    .select({ status: clientDeploys.status, error: clientDeploys.error })
+    .from(clientDeploys)
+    .where(
+      and(
+        eq(clientDeploys.clientId, clientId),
+        eq(clientDeploys.releaseId, releaseId)
+      )
+    )
+    .orderBy(asc(clientDeploys.createdAt), sql`rowid`);
+
+/**
+ * Loses the answer of the `nth` batch from now that starts a deploy: the
+ * batch lands, `meanwhile` runs, and its caller sees it fail, as when the
+ * console's database commits a write and the step dies before it hears
+ * so. `lost` says whether it happened; `restore` puts the database back.
+ */
+const loseDeployStart = (
+  nth: number,
+  meanwhile: () => Promise<void> = async () => {
+    await Promise.resolve();
+  }
+) => {
+  const prepare = env.DB.prepare.bind(env.DB);
+  const batch = env.DB.batch.bind(env.DB);
+  let starts = 0;
+  let starting = false;
+  let lost = false;
+  const prepared = vi.spyOn(env.DB, "prepare").mockImplementation((query) => {
+    if (query.includes('insert into "client_deploys"')) {
+      starts += 1;
+      starting = starts === nth;
+    }
+    return prepare(query);
+  });
+  const batched = vi
+    .spyOn(env.DB, "batch")
+    .mockImplementation(async (statements) => {
+      const results = await batch(statements);
+      if (starting) {
+        starting = false;
+        lost = true;
+        await meanwhile();
+        throw new Error("The answer was lost");
+      }
+      return results;
+    });
+  return {
+    lost: (): boolean => lost,
+    restore: (): void => {
+      prepared.mockRestore();
+      batched.mockRestore();
+    },
+  };
+};
+
 /** The Microsoft OAuth app's secret after a rotation in 1Password. */
 const rotatedMicrosoft = "microsoft-secret-rotated-4b7e1c";
 
@@ -1451,6 +1545,32 @@ describe("rolling new secrets out", () => {
     expect(
       JSON.stringify({ logged, events, deploys, steps, view })
     ).not.toContain(rotatedMicrosoft);
+  });
+
+  it("records a secrets rollout's deploy as settings too when it takes a flag that waited live with the secrets", async () => {
+    const release = await importedRelease("feat(core): a flag was waiting");
+    const internal = await activeClient(0, release);
+    await setFeature(env, staff, {
+      clientId: internal.clientId,
+      feature: "apps",
+      on: true,
+    });
+    await rotateMicrosoftSecret();
+    await using run = await followRollouts();
+
+    await rollOutSecrets({ scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+
+    expect({
+      features: await liveFeaturesOf(internal.clientId, internal.account),
+      change: await latestChangeOf(internal.clientId, internal.account),
+    }).toStrictEqual({
+      features: { apps: true },
+      change: {
+        audited: "settings_and_secrets",
+        told: { by: staff.email, what: "settings_and_secrets" },
+      },
+    });
   });
 
   it("never says the old secrets can go after a rollout that started before deploy-ops wrote a new value, nor once the store changes after it", async () => {
@@ -2804,7 +2924,7 @@ describe("controlling a rollout", () => {
     });
   });
 
-  it("keeps what a rollback puts back when the claim of a rollout started again runs twice, its deploy started by the first try", async () => {
+  it("keeps what a rollback puts back, and starts one deploy, when the claim of a rollout started again runs twice, its first try's answer lost", async () => {
     const before = await importedRelease("feat(core): the release before");
     const internal = await activeClient(0, before);
     const previous = await recordedVersionsOf(internal.clientId);
@@ -2815,41 +2935,76 @@ describe("controlling a rollout", () => {
     await using rollbacks = await followRollbacks();
     await rollOut(release, { scope: "ring", ring: 0 });
     await run.waitForStatus("errored");
-    // The console's database takes the claim's last write, the deploy it
-    // just started, only the second time: the step runs again, the
-    // client's latest deploy now one no target has.
-    const prepare = env.DB.prepare.bind(env.DB);
-    let claims = 0;
-    const flaky = vi.spyOn(env.DB, "prepare").mockImplementation((query) => {
-      if (query.includes('set "deploy_id"')) {
-        claims += 1;
-        if (claims === 1) {
-          throw new Error("D1 took no write");
-        }
-      }
-      return prepare(query);
-    });
+    const deploysBefore = await deploysOf(internal.clientId, release);
+    // The claim's batch lands, its deploy started, and the step never
+    // hears so: it runs again.
+    const losing = loseDeployStart(1);
 
     const again = await rollOut(release, { scope: "ring", ring: 0 });
     await run.waitForStatus("complete");
-    flaky.mockRestore();
+    losing.restore();
     const onRelease = await releasesOf(internal.clientId);
+    const deploys = await deploysOf(internal.clientId, release);
     await rollbacks.rollBack(again, internal.clientId);
 
     expect({
-      claims,
+      lost: losing.lost(),
+      started: deploys.length - deploysBefore.length,
       onRelease,
       live: await liveVersionsOf(internal.clientId, internal.account),
       releases: await releasesOf(internal.clientId),
       targets: await targetsOf(again),
     }).toStrictEqual({
-      claims: 2,
+      lost: true,
+      // The second try went on with the deploy the first started.
+      started: 1,
       onRelease: [release, release],
       live: previous,
       releases: [before, before],
       targets: {
         [internal.clientId]: { ring: 0, status: "rolled_back", error: null },
       },
+    });
+  });
+
+  it("leaves no deploy running when a claim that started one runs again after a rollback cancelled the rollout", async () => {
+    const before = await importedRelease("feat(core): the release before");
+    const { first, second } = await twoClients(before);
+    const release = await importedRelease(
+      "feat(core): started, then cancelled"
+    );
+    const secondCounts = deploymentCounts(second.account);
+    await using rollbacks = await followRollbacks();
+    await using run = await followRollouts();
+    // The second client's claim starts its deploy, and the step dies
+    // before it hears so; the first client's rollback lands meanwhile, so
+    // the step runs again with the rollout cancelled.
+    const losing = loseDeployStart(2, async () => {
+      await rollbacks.rollBack(await openRollout(), first.clientId);
+    });
+
+    const rolloutId = await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+    losing.restore();
+
+    expect({
+      lost: losing.lost(),
+      targets: await targetsOf(rolloutId),
+      rollout: await rolloutRow(rolloutId),
+      deploys: await deploysOf(second.clientId, release),
+      runner: await runnerOf(second.clientId),
+      deployments: deploymentCounts(second.account),
+    }).toStrictEqual({
+      lost: true,
+      targets: {
+        [first.clientId]: { ring: 0, status: "rolled_back", error: null },
+        [second.clientId]: { ring: 0, status: "skipped", error: "cancelled" },
+      },
+      rollout: { status: "cancelled", ring: 0 },
+      // The one it started, ended: none left running with no target.
+      deploys: [{ status: "failed", error: "cancelled" }],
+      runner: null,
+      deployments: secondCounts,
     });
   });
 
@@ -3645,6 +3800,40 @@ describe("applying a client's settings now", () => {
       change: {
         audited: "settings",
         told: { by: staff.email, what: "settings" },
+      },
+    });
+  });
+
+  it("records applying a client's settings as its secrets' too when a rotation of them waited for a deploy", async () => {
+    const release = await importedRelease(
+      "feat(core): applied with a rotation"
+    );
+    const client = await activeClient(1, release);
+    await setFeature(env, staff, {
+      clientId: client.clientId,
+      feature: "memory",
+      on: true,
+    });
+    await rotateClientSecrets(db, staff, client.clientId, new Date());
+    await using applies = await followApplies();
+
+    await applySettings(env, staff, client.clientId);
+    await applies.settledLatest();
+
+    const [record] = await db
+      .select({ rotationLiveAt: clients.rotationLiveAt })
+      .from(clients)
+      .where(eq(clients.id, client.clientId));
+    expect({
+      features: await liveFeaturesOf(client.clientId, client.account),
+      rotationLive: record?.rotationLiveAt instanceof Date,
+      change: await latestChangeOf(client.clientId, client.account),
+    }).toStrictEqual({
+      features: { memory: true },
+      rotationLive: true,
+      change: {
+        audited: "settings_and_secrets",
+        told: { by: staff.email, what: "settings_and_secrets" },
       },
     });
   });

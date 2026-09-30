@@ -18,7 +18,11 @@ import type { Staff } from "../access.ts";
 import { actIfChanged, consoleDatabase } from "../db/act.ts";
 import type { ConsoleDatabase } from "../db/act.ts";
 import { clients, settings } from "../db/schema.ts";
-import { signInApps, storeSecret } from "../deploy/context.ts";
+import {
+  MissingStoreSecretError,
+  signInApps,
+  storeSecret,
+} from "../deploy/context.ts";
 import {
   adminUnreachable,
   clientSignInSchema,
@@ -43,6 +47,8 @@ export const settingsErrorCodes = [
   "nothing_deployed",
   /** Another runner (provisioning, a rollout, a rollback) has the client. */
   "client_busy",
+  /** Secrets Store has no `CLIENT_KEY` to fingerprint a sign-in's admins with. */
+  "store_secret_missing",
 ] as const;
 export type SettingsErrorCode = (typeof settingsErrorCodes)[number];
 
@@ -81,18 +87,30 @@ export const signInInputSchema = z.object({
   signIn: z.unknown(),
 });
 
-/** Throws `unknown_client` unless the console has client `clientId`. */
-const assertClient = async (
+/**
+ * Client `clientId`'s record, as the settings read it: its sign-in, as
+ * stored. Throws `unknown_client` unless the console has the client.
+ */
+const recordedClient = async (
   db: ConsoleDatabase,
   clientId: string
-): Promise<void> => {
+): Promise<{ signIn: string | null }> => {
   const [client] = await db
-    .select({ id: clients.id })
+    .select({ signIn: clients.signIn })
     .from(clients)
     .where(eq(clients.id, clientId));
   if (client === undefined) {
     throw new SettingsError("unknown_client", `No client ${clientId}`);
   }
+  return client;
+};
+
+/** Throws `unknown_client` unless the console has client `clientId`. */
+const assertClient = async (
+  db: ConsoleDatabase,
+  clientId: string
+): Promise<void> => {
+  await recordedClient(db, clientId);
 };
 
 /**
@@ -183,17 +201,28 @@ const adminsFingerprintPurpose = "grasp-os console admins fingerprint";
  * for this purpose alone, as `secretsFingerprint` is made. It tells the
  * audit log that the admins changed, and whether to a list it had before,
  * without naming anyone; with the client's id in it, the same people at
- * two clients don't share one.
+ * two clients don't share one. Refused (`store_secret_missing`) while
+ * Secrets Store has no `CLIENT_KEY`.
  */
 const adminsFingerprint = async (
-  key: string,
+  env: Env,
   clientId: string,
   admins: readonly string[]
-): Promise<string> =>
-  await keyedHash(await hkdfHmacKey(key, adminsFingerprintPurpose, ["sign"]), {
-    clientId,
-    admins: admins.toSorted(),
-  });
+): Promise<string> => {
+  let key: string;
+  try {
+    key = await storeSecret(env, "CLIENT_KEY");
+  } catch (error) {
+    if (error instanceof MissingStoreSecretError) {
+      throw new SettingsError("store_secret_missing", error.message);
+    }
+    throw error;
+  }
+  return await keyedHash(
+    await hkdfHmacKey(key, adminsFingerprintPurpose, ["sign"]),
+    { clientId, admins: admins.toSorted() }
+  );
+};
 
 /**
  * Sets client `clientId`'s sign-in, as `staff`, audited (`client.sign_in`,
@@ -203,10 +232,11 @@ const adminsFingerprint = async (
  * next deploy makes core's `SIGN_IN` from it. Refused as the record's own
  * rule refuses it: `admin_unreachable` without a first admin who can sign
  * in, `sign_in_app_missing` for an IdP the console has no app id for,
- * `sign_in_invalid` for anything else. Fails, changing nothing, while
- * Secrets Store has no `CLIENT_KEY` to make the fingerprint with: a
- * change that couldn't say which admins it set isn't made. Returns
- * whether it changed.
+ * `sign_in_invalid` for anything else. A change is refused too
+ * (`store_secret_missing`) while Secrets Store has no `CLIENT_KEY` to
+ * make the fingerprint with: one that couldn't say which admins it set
+ * isn't made. The sign-in it has already is no change, and needs no key.
+ * Returns whether it changed.
  */
 export const setSignIn = async (
   env: Env,
@@ -233,13 +263,12 @@ export const setSignIn = async (
       `The console has no ${missing} app id for ${clientId}'s sign-in`
     );
   }
-  await assertClient(db, clientId);
-  const admins = await adminsFingerprint(
-    await storeSecret(env, "CLIENT_KEY"),
-    clientId,
-    parsed.data.admins
-  );
+  const recorded = await recordedClient(db, clientId);
   const value = JSON.stringify(parsed.data);
+  if (recorded.signIn === value) {
+    return false;
+  }
+  const admins = await adminsFingerprint(env, clientId, parsed.data.admins);
   const now = new Date();
   return await actIfChanged(
     db,

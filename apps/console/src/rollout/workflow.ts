@@ -68,6 +68,7 @@ import {
   finishDeploy,
   makeDeployWorkerLive,
   prepareDeploy,
+  redeployKind,
   shiftDeployTraffic,
   startDeploy,
   uploadDeployWorker,
@@ -91,7 +92,6 @@ import {
 } from "../workflow-steps.ts";
 import { ClientEndedError } from "./client-ended.ts";
 import {
-  parsePrevious,
   previousRunOf,
   ringsOf,
   runningRelease,
@@ -429,10 +429,11 @@ const deployPlan = (
 
 /**
  * What the deploy a rollout of `releaseId` starts on `client` changes,
- * as its core records it: new `secrets` for a secrets rollout (no
- * release); the `release`, unless the client runs it already (`running`),
- * when the rollout reaches it only for what waits for a deploy: its
- * `settings`, or else its own rotated `secrets`.
+ * as its core records it (`redeployKind`). A secrets rollout (no release)
+ * brings new secrets, and with them any settings of the client's that
+ * wait for a deploy. A release rollout brings the `release`, unless the
+ * client runs it already (`running`): then it reaches the client only for
+ * what waits, its settings, its own rotated secrets, or both.
  */
 const deployKind = (
   releaseId: string | null,
@@ -440,30 +441,35 @@ const deployKind = (
   client: TargetClient
 ): DeployKind => {
   if (releaseId === null) {
-    return "secrets";
+    return redeployKind({ settings: client.configPending, secrets: true });
   }
   if (running !== releaseId) {
     return "release";
   }
-  return client.configPending ? "settings" : "secrets";
+  return redeployKind({
+    settings: client.configPending,
+    secrets: client.rotationPending,
+  });
 };
 
 /**
  * Claims client `clientId` for the rollout, unless it skips it, and
  * returns the deploy it runs and what the client runs now. A client it
  * skips (`skipFor`) is skipped, audited, unless the rollout is deploying
- * it already; a rollout staff stopped goes no further, and skips the
- * client, releasing it if an earlier try of the step claimed it. A
- * secrets rollout reads the release the client runs once it holds the
- * client, so no other runner changes it after, and skips (`no_release`) a
- * client whose Workers don't run one release, unless it started its
- * deploy already. What a rollback puts back (`previous`) is settled
- * once, before anything of the release is live, and kept on its target
- * before its deploy starts, so a try of the step that runs again finds
- * it: what the client runs now, or, when the rollout that last deployed
- * to it never finished it, what it ran before that one
- * (`unfinishedPrevious`). The target stays `pending` until its first step
- * starts (`markStarted`).
+ * it already; a rollout staff stopped goes no further, and ends the
+ * client as every later step does (`endIfCancelled`): skipped, the deploy
+ * an earlier try of the step started cancelled, and the client released
+ * if that try claimed it. A secrets rollout reads the release the client
+ * runs once it holds the client, so no other runner changes it after, and
+ * skips (`no_release`) a client whose Workers don't run one release,
+ * unless it started its deploy already. What a rollback puts back
+ * (`previous`) is settled once, before anything of the release is live:
+ * what the client runs now, or, when the rollout that last deployed to it
+ * never finished it, what it ran before that one (`unfinishedPrevious`).
+ * It's kept on the target with the deploy's id in the batch that starts
+ * the deploy, so a try of the step that runs again finds both or neither,
+ * never a deploy its target doesn't name. The target stays `pending`
+ * until its first step starts (`markStarted`).
  */
 const claimTarget = async (
   env: Env,
@@ -472,8 +478,7 @@ const claimTarget = async (
   clientId: string
 ): Promise<Claimed> => {
   const { rolloutId } = params;
-  if (await isCancelled(db, rolloutId)) {
-    await skipTarget(db, rolloutId, clientId, "cancelled");
+  if (await endIfCancelled(db, rolloutId, clientId)) {
     return { state: "cancelled" };
   }
   const [target] = await db
@@ -506,31 +511,31 @@ const claimTarget = async (
   }
   // Read before a deploy starts: one that stops here leaves none behind.
   const running = await readPrevious(env, held);
-  const previous =
-    parsePrevious(target.previous) ??
-    (await unfinishedPrevious(db, clientId)) ??
-    running;
-  // Kept before its deploy starts: that deploy becomes the client's
-  // latest, which `unfinishedPrevious` reads.
-  await db
-    .update(rolloutTargets)
-    .set({ previous: JSON.stringify(previous), updatedAt: new Date() })
-    .where(targetWhere(rolloutId, clientId));
-  const deployId =
-    "deployId" in plan
-      ? plan.deployId
-      : await startDeploy(
-          db,
-          params.startedBy,
-          clientId,
-          plan.releaseId,
-          deployKind(params.releaseId, running.release, held)
-        );
-  // Still pending: claimed, but nothing of it started yet.
-  await db
-    .update(rolloutTargets)
-    .set({ deployId, updatedAt: new Date() })
-    .where(targetWhere(rolloutId, clientId));
+  if ("deployId" in plan) {
+    // An earlier try of the step started it, and kept `previous` with it.
+    return { state: "claimed", deployId: plan.deployId, running };
+  }
+  const previous = (await unfinishedPrevious(db, clientId)) ?? running;
+  // Its target names the deploy, and what a rollback of it puts back, in
+  // the batch that starts it. Still pending: claimed, but nothing of it
+  // started yet.
+  const deployId = await startDeploy(
+    db,
+    params.startedBy,
+    clientId,
+    plan.releaseId,
+    deployKind(params.releaseId, running.release, held),
+    (started) => [
+      db
+        .update(rolloutTargets)
+        .set({
+          deployId: started,
+          previous: JSON.stringify(previous),
+          updatedAt: new Date(),
+        })
+        .where(targetWhere(rolloutId, clientId)),
+    ]
+  );
   return { state: "claimed", deployId, running };
 };
 

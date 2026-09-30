@@ -13,14 +13,18 @@
 import { log } from "@grasp-os/shared/log";
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
-import { eq } from "drizzle-orm";
 
 import type { Staff } from "../access.ts";
 import { consoleDatabase } from "../db/act.ts";
 import type { ConsoleDatabase } from "../db/act.ts";
-import { clients, clientWorkers } from "../db/schema.ts";
 import { deployContext } from "../deploy/context.ts";
-import { errorCode, runDeploy, startDeploy } from "../deploy/deploy.ts";
+import {
+  errorCode,
+  redeployKind,
+  runDeploy,
+  startDeploy,
+} from "../deploy/deploy.ts";
+import { runningRelease, targetClient } from "../rollout/targets.ts";
 import { claimRun, currentRun, hasEnded, releaseRun } from "../runners.ts";
 import {
   deployStepConfig,
@@ -42,23 +46,6 @@ export interface ApplyParams {
 /** A new apply run's instance id. */
 const newApplyId = (): string =>
   `apply-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
-
-/**
- * The release every one of client `clientId`'s Workers runs, as the
- * console made it live; null when they run none, or not the same one.
- */
-const runningRelease = async (
-  db: ConsoleDatabase,
-  clientId: string
-): Promise<string | null> => {
-  const workers = await db
-    .select({ releaseId: clientWorkers.releaseId })
-    .from(clientWorkers)
-    .where(eq(clientWorkers.clientId, clientId));
-  const releases = new Set(workers.map(({ releaseId }) => releaseId));
-  const [only = null] = releases.size === 1 ? releases : [];
-  return only;
-};
 
 /** Releases client `clientId` from runner `runId`, logging a failure to. */
 const releaseQuietly = async (
@@ -90,18 +77,14 @@ export const applySettings = async (
   clientId: string
 ): Promise<string> => {
   const db = consoleDatabase(env.DB);
-  const [client] = await db
-    .select({ status: clients.status })
-    .from(clients)
-    .where(eq(clients.id, clientId));
+  const client = await targetClient(db, clientId);
   if (client === undefined) {
     throw new SettingsError("unknown_client", `No client ${clientId}`);
   }
   if (client.status !== "active") {
     throw new SettingsError("not_active", `${clientId} isn't active`);
   }
-  const releaseId = await runningRelease(db, clientId);
-  if (releaseId === null) {
+  if (runningRelease(client) === null) {
     throw new SettingsError(
       "nothing_deployed",
       `${clientId}'s Workers don't run one release`
@@ -141,11 +124,12 @@ export const applySettings = async (
 };
 
 /**
- * Applies a client's settings: deploys the release it runs again (a
- * `settings` deploy, which its core records as such), as the client's
- * runner, every Worker live at once (`runDeploy`), then releases
- * the client, whether the deploy worked or not. The release is read in the
- * run, which holds the client: no other runner changes it after.
+ * Applies a client's settings: deploys the release it runs again, as the
+ * client's runner, every Worker live at once (`runDeploy`), then releases
+ * the client, whether the deploy worked or not. Its core records it as a
+ * `settings` change, with its secrets' too when a rotation of them waits
+ * for a deploy, which this one is (`redeployKind`). The release is read
+ * in the run, which holds the client: no other runner changes it after.
  */
 export class ApplyClient extends WorkflowEntrypoint<Env, ApplyParams> {
   override async run(
@@ -159,8 +143,10 @@ export class ApplyClient extends WorkflowEntrypoint<Env, ApplyParams> {
         "start",
         quickStep,
         guarded(async () => {
-          const releaseId = await runningRelease(db, clientId);
-          if (releaseId === null) {
+          const client = await targetClient(db, clientId);
+          const releaseId =
+            client === undefined ? null : runningRelease(client);
+          if (client === undefined || releaseId === null) {
             throw stop(
               "nothing_deployed",
               `${clientId}'s Workers don't run one release`
@@ -171,7 +157,7 @@ export class ApplyClient extends WorkflowEntrypoint<Env, ApplyParams> {
             startedBy,
             clientId,
             releaseId,
-            "settings"
+            redeployKind({ settings: true, secrets: client.rotationPending })
           );
         })
       );
