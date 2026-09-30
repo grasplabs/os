@@ -52,11 +52,6 @@ const versionCheckMs = 30_000;
 /** How many problems a screen may report a minute; the rest are dropped. */
 const reportsPerMinute = 20;
 const minuteMs = 60_000;
-/**
- * How long a preview's screen runs before the page tells the agent it
- * rendered: what goes wrong while it starts has been reported by then.
- */
-const renderedAfterMs = 1500;
 
 const failures: Readonly<Record<string, FailureReason>> = {
   "role.forbidden": "forbidden",
@@ -287,8 +282,7 @@ const appTarget = (link: CoreLink, bundle: ScreenBundle): FrameTarget => {
  * The same refusal as core's for a call a preview stub refused
  * (`app.preview_side_effect`), and handled alike: the refusal itself
  * fails no check, and what the screen reports of it is the draft's, as
- * of any failed call (core's preview-reports.ts), since nothing the frame
- * sends can say it came of a refusal.
+ * of any failed call (core's preview-reports.ts).
  */
 const refusedInPreview = async (): Promise<never> => {
   await Promise.resolve();
@@ -393,10 +387,10 @@ interface FrameSource<Bundle extends FrameCode> {
   open: (session: Session) => Promise<Bundle>;
   target: (link: CoreLink, bundle: Bundle) => FrameTarget;
   /**
-   * Called once the screen runs: `cleanups` stop what it starts, and
-   * `onState` says what the page shows.
+   * Called once the screen runs, if given: `cleanups` stop what it
+   * starts, and `onState` says what the page shows.
    */
-  running: (
+  running?: (
     link: CoreLink,
     bundle: Bundle,
     cleanups: (() => void)[],
@@ -450,7 +444,7 @@ const runFrame = <Bundle extends FrameCode>(
     );
     onOpened(bundle.name);
     onState({ status: "running" });
-    source.running(link, bundle, cleanups, onState);
+    source.running?.(link, bundle, cleanups, onState);
   };
 
   const run = async (): Promise<void> => {
@@ -519,8 +513,7 @@ export const runScreen = (
 
 /**
  * Runs `screen` (the draft's first when none is named) of the chat's
- * draft of `app` in `frame`, as a preview, and tells the chat's agent
- * once it rendered (`runFrame`).
+ * draft of `app` in `frame`, as a preview (`runFrame`).
  */
 export const runPreview = (
   frame: HTMLIFrameElement,
@@ -533,22 +526,6 @@ export const runPreview = (
     {
       open: async (session) => await session.chats.preview(chatId, app, screen),
       target: (link, bundle) => previewTarget(link, chatId, bundle),
-      running: (link, { app: id, revision, screen: shown }, cleanups) => {
-        const tell = async (): Promise<void> => {
-          try {
-            const session = await link.session();
-            await session.chats.previewReport(chatId, id, revision, shown);
-          } catch {
-            // Not told: the agent's check finds the preview unseen.
-          }
-        };
-        const timer = setTimeout(() => {
-          void tell();
-        }, renderedAfterMs);
-        cleanups.push(() => {
-          clearTimeout(timer);
-        });
-      },
     },
     onState,
     onOpened
