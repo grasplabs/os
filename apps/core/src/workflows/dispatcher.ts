@@ -167,6 +167,13 @@ const runWorkflow = async (
   if (row.status === "cancelled" || row.status === "failed") {
     throw new Error(`Run ${runId} has ended: ${row.status}`);
   }
+  // Its details were removed (retention.ts), the engine's record of its
+  // steps with them: an instance under its ID now would run every step
+  // again, side effects too, with nothing to replay. Nothing creates one;
+  // if something did, it takes no step.
+  if (row.detailsRemovedAt !== null) {
+    throw new Error(`Run ${runId} has ended: its details were removed`);
+  }
   // The error the engine stopped this execution with (a pause, a cancel),
   // once it has: it stays for the rest of the execution, whose every
   // later engine call stops the same way, and is the one to end it with.

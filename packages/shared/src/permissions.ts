@@ -189,6 +189,7 @@ const platformBindingNames: ReadonlySet<string> = new Set([
   "PLATFORM_CHANGE",
   "ROUTER_SECRET",
   "ROUTER_SECRET_PREVIOUS",
+  "RUN_RETENTION_DAYS",
   "SIGN_IN",
   // An App's statistics (core's src/statistics.ts), next to its permissions.
   "STATISTICS",

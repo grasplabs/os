@@ -79,6 +79,10 @@
   // (src/audit-log.ts), at least 365 and at least `AUDIT_RETENTION_DAYS`;
   // archived events are never purged while it's unset.
   //
+  // And how long an ended workflow run keeps its details: the
+  // `RUN_RETENTION_DAYS` var (src/workflows/retention.ts), 30 days unless
+  // set, at least 1.
+  //
   // Local dev reads none of these from .dev.vars (Wrangler loads only the
   // required secrets and declared vars from it): pass them with
   // `wrangler dev --var NAME:<value>`, as core's dev script does for its own

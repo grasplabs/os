@@ -4,7 +4,8 @@ import type { Json } from "@grasp-os/shared/json";
 import { z } from "zod";
 
 // The engine that runs Apps' workflow runs, behind the little core asks of
-// it: create a run, see where it is, terminate it, send it an event. This
+// it: create a run, see where it is, terminate it, send it an event, remove
+// what it kept of it. This
 // is the only module that touches the engine (`WORKFLOWS`, Cloudflare
 // Workflows), so another profile swaps it here and nowhere else.
 //
@@ -67,7 +68,20 @@ export interface RunEngine {
     id: string,
     event: { type: string; id: string; payload: unknown }
   ) => Promise<void>;
+  /**
+   * Removes the runs' instances with all the engine kept of them: their
+   * input, what their steps returned, their output and error. At most
+   * {@link maxRemovedAtOnce} at once. Answers the runs the engine has
+   * nothing of any more: removed now, or that it had no instance of, so
+   * removing again removes nothing and answers the same. A run it
+   * couldn't remove is left out, to try again. It removes whatever it is
+   * asked to, a live run too: the caller asks only for ended ones.
+   */
+  remove: (ids: readonly string[]) => Promise<string[]>;
 }
+
+/** Most runs one `remove` takes: the engine's most per call. */
+export const maxRemovedAtOnce = 100;
 
 /**
  * The payload of an event as the engine carries it: the event's own ID
@@ -162,5 +176,23 @@ export const runEngine = (env: Env): RunEngine => ({
         typeof sentEventSchema
       >,
     });
+  },
+  remove: async (ids) => {
+    if (ids.length === 0) {
+      return [];
+    }
+    const { deleted, errors } = await env.WORKFLOWS.deleteBatch([...ids]);
+    const gone = new Set(deleted.map(({ id }) => id));
+    // One the engine didn't delete: gone all the same if it has no such
+    // instance, which `status` tells as it does everywhere else, rather
+    // than by this call's own error codes.
+    await Promise.all(
+      errors.map(async ({ id }) => {
+        if ((await runEngine(env).status(id)) === undefined) {
+          gone.add(id);
+        }
+      })
+    );
+    return ids.filter((id) => gone.has(id));
   },
 });

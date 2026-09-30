@@ -127,6 +127,7 @@ type RunFields = Pick<
   | "status"
   | "createdAt"
   | "endedAt"
+  | "detailsRemovedAt"
 >;
 
 /** A run as its row has it; `status` names what the row last saw. */
@@ -142,6 +143,9 @@ const toRun = (row: RunFields): WorkflowRun => ({
   status: shownStatus(row.status),
   createdAt: row.createdAt.toISOString(),
   endedAt: iso(row.endedAt),
+  ...(row.detailsRemovedAt === null
+    ? {}
+    : { detailsRemovedAt: row.detailsRemovedAt.toISOString() }),
 });
 
 /** What runs need of their App: its current version and its owner. */
@@ -538,6 +542,7 @@ export const startRun = async (
     endedAt: null,
     failure: null,
     triggerKey: trigger?.key ?? null,
+    detailsRemovedAt: null,
   } satisfies RunFields & typeof workflowRuns.$inferInsert;
   // Nothing is written, audit event included, for a key a run has.
   const [inserted] = await auditedBatch(env, db, [
@@ -663,8 +668,8 @@ export const runFor = (
 
 /**
  * Where the engine has a run; nothing for one still starting, or that
- * has ended without an instance to ask (its start failed), whose row
- * says all there is.
+ * has ended without an instance to ask (its start failed, or its details
+ * were removed, retention.ts), whose row says all there is.
  */
 const liveOf = async (
   env: Env,

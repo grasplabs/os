@@ -439,15 +439,29 @@ export interface WorkflowRun {
   status: RunStatus;
   createdAt: string;
   endedAt: string | null;
-  /** What it returned, once completed; only from `status`. */
+  /**
+   * What it returned, once completed; only from `status`, and gone once
+   * its details are removed.
+   */
   output?: Json;
-  /** Why it failed; only from `status`. */
+  /**
+   * Why it failed; only from `status`, and gone once its details are
+   * removed.
+   */
   error?: { name: string; message: string };
   /**
    * Why it stopped, once failed: for admins and the person the run acts
-   * for (who started it, or the App's owner for a triggered run).
+   * for (who started it, or the App's owner for a triggered run). Once
+   * its details are removed, its message says only that.
    */
   failure?: RunFailure;
+  /**
+   * When its details were removed (ISO 8601), its retention over: an
+   * ended run keeps them for the deployment's `RUN_RETENTION_DAYS`, 30
+   * days unless set. The run itself stays: what it was, how it ended,
+   * when and for whom.
+   */
+  detailsRemovedAt?: string;
 }
 
 /**

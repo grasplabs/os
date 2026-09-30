@@ -229,13 +229,25 @@ export interface WorkflowRun {
   /** ISO 8601. */
   createdAt: string;
   endedAt: string | null;
-  /** What it returned, once completed: only from `status`, for its starter and admins. */
+  /**
+   * What it returned, once completed: only from `status`, for its starter
+   * and admins, and gone once its details are removed.
+   */
   output?: unknown;
-  /** Why it stopped, once failed: for its starter and admins. */
+  /**
+   * Why it stopped, once failed: for its starter and admins. Once its
+   * details are removed, its message says only that.
+   */
   failure?: {
     step: string | null;
     error: { code: string; message: string };
   };
+  /**
+   * When its details were removed (ISO 8601): an ended run keeps them for
+   * 30 days, unless the deployment sets another number. The run itself
+   * stays listed; show it as one whose details are gone.
+   */
+  detailsRemovedAt?: string;
 }
 
 /**
