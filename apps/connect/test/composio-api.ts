@@ -21,8 +21,9 @@ export interface FakeComposioTool {
   /** The properties its input takes. */
   inputs?: string[];
   /**
-   * Its behaviour tags, such as `readOnlyHint`; by default none. Anything
-   * else stands for an answer of Composio's that connect can't read.
+   * Its behaviour tags, such as `readOnlyHint`; by default the item has no
+   * `tags` at all. Anything but strings stands for an answer of Composio's
+   * that connect can't read.
    */
   tags?: unknown;
 }
@@ -491,7 +492,7 @@ export const fakeComposioApi = (
       );
       return page(
         (toolkit?.tools ?? []).map(
-          ({ slug, description, inputs = [], tags = [] }) => ({
+          ({ slug, description, inputs = [], tags }) => ({
             slug,
             name: slug,
             description,

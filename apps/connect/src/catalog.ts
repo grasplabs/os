@@ -192,7 +192,7 @@ const toolSchema = z.object({
     .object({ properties: z.record(z.string(), z.unknown()).optional() })
     .nullish(),
   /** Its behaviour tags, read on their own ({@link tagsSchema}). */
-  tags: z.unknown(),
+  tags: z.unknown().optional(),
 });
 
 /**
