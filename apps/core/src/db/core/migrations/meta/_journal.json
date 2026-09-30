@@ -274,6 +274,13 @@
       "when": 1790795385179,
       "tag": "0038_drop_platform_version",
       "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "6",
+      "when": 1790797497603,
+      "tag": "0039_drop_app_pending_since",
+      "breakpoints": true
     }
   ]
 }

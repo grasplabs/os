@@ -26,7 +26,7 @@ import { canonicalJson } from "@grasp-os/shared/json";
 import { requireBuilder } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { screenPath } from "@grasp-os/shared/screens";
-import { and, asc, desc, eq, isNull, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, lt, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
@@ -134,8 +134,7 @@ export const changeEntry = (
     | "app.blueprint.marked"
     | "app.blueprint.unmarked"
     | "app.blueprint.connection_dropped"
-    | "app.blueprint.app_dropped"
-    | "app.blueprint.revoked",
+    | "app.blueprint.app_dropped",
   app: AppId,
   detail: Record<string, AuditDetailValue>
 ): AuditEntry => ({
@@ -145,17 +144,14 @@ export const changeEntry = (
   detail,
 });
 
-/**
- * The App `input` names, which must exist, and be in use: one created from
- * a blueprint that is still pending (app-blueprints.ts) isn't found.
- */
+/** The App `input` names, which must exist. */
 export const findApp = async (env: Env, input: unknown): Promise<App> => {
   const id = appIdSchema.safeParse(input);
   const row = id.success
     ? await drizzle(env.DB)
         .select()
         .from(apps)
-        .where(and(eq(apps.id, id.data), isNull(apps.pendingSince)))
+        .where(eq(apps.id, id.data))
         .get()
     : undefined;
   if (!row) {
@@ -399,7 +395,6 @@ export const createApp = async (
     blueprint: blueprint ?? null,
     currentVersion: null,
     pendingVersion: null,
-    pendingSince: null,
     createdAt: new Date(),
   };
   const app = toApp(row);

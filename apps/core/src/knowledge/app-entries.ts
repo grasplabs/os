@@ -25,8 +25,7 @@ import type { Reader } from "./access.ts";
 // own SQL, for the paths of the Apps the reader may open, read from the
 // core database on the same read. Nothing of who may open an App is
 // copied into Knowledge, so unsharing, a team change, a new role or a
-// source the App is granted counts from the next read, and an App created
-// from a blueprint and still pending is found by nobody.
+// source the App is granted counts from the next read.
 //
 // The lookup is made only when a read can reach the collection: not while
 // `apps_collection` is off (access.ts hides the collection then), not for
@@ -35,9 +34,8 @@ import type { Reader } from "./access.ts";
 // permissions.ts `requireCollection`; an App granted it before counts it
 // as a source that doesn't resolve, app-provenance.ts, so the App reaches
 // nobody but its owner and admins), and not for those who may open
-// every App (admins), who find every entry. Entries exist only for Apps in
-// use: a pending copy is never indexed, and Apps are never deleted once in
-// use.
+// every App (admins), who find every entry. Apps are never deleted, so
+// every entry's App exists.
 
 /** The Apps collection, under this ID: no other has it. */
 export const appsCollectionId: CollectionId = collectionIdSchema.parse("apps");

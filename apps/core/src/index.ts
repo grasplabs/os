@@ -1,6 +1,5 @@
 import { errorFields, log } from "@grasp-os/shared/log";
 
-import { sweepPendingCopies } from "./app-blueprints.ts";
 import { auditLog } from "./audit-log.ts";
 import { drainAuditOutboxes } from "./audit-outbox.ts";
 import { refreshDailySignals } from "./daily-signals.ts";
@@ -99,7 +98,6 @@ export default {
         : [
             drainAuditOutboxes(env),
             retryDisconnects(env),
-            sweepPendingCopies(env),
             sweepUploads(env),
             // Deploys apply migrations first (CI's db:migrate, and the
             // console's deploy), so `platform_versions` exists. A version

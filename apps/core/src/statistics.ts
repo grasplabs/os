@@ -21,19 +21,7 @@ import type {
   StatisticGroup,
 } from "@grasp-os/shared/statistics";
 import { runOfStepKey } from "@grasp-os/shared/workflows";
-import {
-  and,
-  asc,
-  count,
-  eq,
-  gte,
-  isNull,
-  lte,
-  max,
-  min,
-  sql,
-  sum,
-} from "drizzle-orm";
+import { and, asc, count, eq, gte, lte, max, min, sql, sum } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
@@ -483,7 +471,7 @@ const runsVisible = async (
     const rows = await drizzle(env.DB)
       .select({ id: appsTable.id })
       .from(appsTable)
-      .where(and(inList(appsTable.id, apps), isNull(appsTable.pendingSince)));
+      .where(inList(appsTable.id, apps));
     const existing = new Set(rows.map(({ id }) => id));
     return {
       visible: apps.filter((app) => existing.has(app)),

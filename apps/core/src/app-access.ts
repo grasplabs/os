@@ -4,7 +4,7 @@ import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
 import { canBuild, isAdmin, roleErrors } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
-import { and, eq, exists, isNull, or, sql } from "drizzle-orm";
+import { and, eq, exists, or, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
@@ -136,7 +136,7 @@ export const requireAppRole = async (
  * Of the Apps `ids`, those `by` may open now as far as what each App read
  * goes (app-provenance.ts): every one for an admin, their own, and any
  * other only while they can read everything it read. That they have a
- * role in each is for the caller to have checked (`appsOpenTo`). For
+ * role in each is for the caller to have checked (`appsFoundBy`). For
  * listing what belongs to many Apps at once, as `requireAppRole` decides
  * for one: a few queries and connect calls, whatever the number of Apps.
  */
@@ -177,7 +177,7 @@ export const appsReadableBy = async (
  * they build, the built-ins. One shared with them that has read data they
  * can't read is listed, and refused when they open it, with why.
  */
-export const appsOpenTo = (env: Env, by: Person): SQL | undefined => {
+export const appsFoundBy = (env: Env, by: Person): SQL | undefined => {
   if (isAdmin(by.role)) {
     return undefined;
   }
@@ -192,16 +192,6 @@ export const appsOpenTo = (env: Env, by: Person): SQL | undefined => {
         .where(and(eq(appMembers.appId, apps.id), rowsOf(by)))
     )
   );
-};
-
-/**
- * The Apps `by` finds, as a condition on `apps`: those in use (never one
- * created from a blueprint that is still pending, app-blueprints.ts) that
- * they have a role in (`appsOpenTo`).
- */
-export const appsFoundBy = (env: Env, by: Person): SQL => {
-  const inUse = isNull(apps.pendingSince);
-  return and(inUse, appsOpenTo(env, by)) ?? inUse;
 };
 
 /**
