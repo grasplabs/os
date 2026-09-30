@@ -11,8 +11,11 @@ const ci = process.env.CI === "true";
 /**
  * The one model the stack's gateway allows. `--local` reaches no AI Gateway,
  * so a call to it fails: the chat test (e2e/chat.e2e.ts) shows that failure.
+ * One whose context window holds the chat agent's instructions and a
+ * question: core refuses a question that doesn't fit before it calls the
+ * model.
  */
-const e2eModel = "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+const e2eModel = "workers-ai/@cf/openai/gpt-oss-120b";
 
 /** A `--var` for wrangler dev, quoted once for the shell. */
 const devVar = (name: string, value: string): string =>
