@@ -14,7 +14,8 @@ import { appWith, workflowFiles } from "./workflow-apps.ts";
 // A failed run tells the person it acted for, in the product. The ways it
 // can fail come first: someone else is told of it, or nobody is; a
 // workflow failing every minute buries the person in notifications; a
-// notification outlives the person's access to its App; it goes
+// notification outlives the person's access to its App, or is made for
+// someone no longer in the organization; it goes
 // unrecorded; the list reads the whole table.
 
 const idp = mockIdp();
@@ -278,7 +279,7 @@ describe("failed runs", slow, () => {
     });
   });
 
-  it("go with a person removed from the organization", async () => {
+  it("go with a person removed from the organization, who is told of no failure after", async () => {
     const owner = await signedInApi(idp, "builder");
     const user = await signedInApi(idp, "user");
     const admin = await signedInApi(idp, "admin");
@@ -291,11 +292,37 @@ describe("failed runs", slow, () => {
     await failedRun(user, app, "careless");
     const before = await storedOf(user.userId);
     await admin.api.members.remove(user.userId);
+    const after = await storedOf(user.userId);
+    // A run acting for them still, as one they started before they were
+    // removed: it fails, and nobody is told, nor does the log say so.
+    const later = await startRun(env, {
+      app: appIdSchema.parse(app),
+      workflow: workflowIdSchema.parse("careless"),
+      input: undefined,
+      startedBy: user.userId,
+      actor: { type: "system" },
+    });
+    await finished(later.id);
+    const events = await allEvents();
 
     expect({
       before: before.length,
-      after: await storedOf(user.userId),
-    }).toStrictEqual({ before: 1, after: [] });
+      after,
+      afterFailure: await storedOf(user.userId),
+      recorded: events
+        .filter(
+          ({ action, target }) =>
+            target?.id === later.id &&
+            (action === "workflow.run.failed" ||
+              action === "workflow.run.notified")
+        )
+        .map(({ action }) => action),
+    }).toStrictEqual({
+      before: 1,
+      after: [],
+      afterFailure: [],
+      recorded: ["workflow.run.failed"],
+    });
   });
 
   it("refuse marking read what no list showed", async () => {

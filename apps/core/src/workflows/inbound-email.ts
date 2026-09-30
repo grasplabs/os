@@ -14,7 +14,7 @@ import type { Address, Email } from "postal-mime";
 import { apps, workflowTriggers } from "../db/core/schema.ts";
 import { featureEnabled } from "../features.ts";
 import { isWorthKeeping, keepMessage, parsedOf } from "./kept-email.ts";
-import { atHourlyCap, maxInputLength, startRun } from "./runs.ts";
+import { deliveryRoom, maxInputLength, startRun } from "./runs.ts";
 
 // Mail to workflows' email triggers (trigger-registry.ts). Email Routing
 // sends every message for the deployment's mail domain to core's email
@@ -35,7 +35,9 @@ import { atHourlyCap, maxInputLength, startRun } from "./runs.ts";
 //
 // A message with an attachment that isn't inline is kept for its runs to
 // read its attachments, while `email_attachments` is on (kept-email.ts);
-// its input names it (`stored`), or says `stored: null`.
+// its input names it (`stored`), or says `stored: null`. It is kept only
+// for the Apps it may start a run of: one delivered again, whose runs
+// started, is not kept again, whatever its bytes are this time.
 //
 // The same message delivered again starts no second run: its key, per
 // App and workflow, is the SHA-256 of its Message-ID, or of its bytes
@@ -329,10 +331,10 @@ export const receiveEmail = async (
   // Each workflow's limit is its own: the message goes to those with room
   // now or its run already, and the others get it when the sender tries
   // again.
-  const capped = await Promise.all(
+  const rooms = await Promise.all(
     receivers.map(
       async (receiver) =>
-        await atHourlyCap(
+        await deliveryRoom(
           env,
           receiver.appId,
           receiver.workflowId,
@@ -341,15 +343,21 @@ export const receiveEmail = async (
         )
     )
   );
-  const withRoom = receivers.filter((_, index) => capped[index] !== true);
-  // Kept before any run starts, so each finds it. Failing to keep it
-  // fails the delivery for now: its sender tries again.
+  const withRoom = receivers.filter((_, index) => rooms[index] !== "capped");
+  // Kept before any run starts, so each finds it, and only for the Apps
+  // it may start a run of now: a workflow that has its run already, past
+  // `starting`, runs on the delivery that started it, which kept its own.
+  // So mail sent again under one Message-ID with other bytes each time
+  // keeps nothing more, and what is kept stays within the hourly limit.
+  // Failing to keep it fails the delivery for now: its sender tries again.
   const stored =
     featureEnabled(env, "email_attachments") &&
     isWorthKeeping(parsed.attachments)
       ? await keepMessage(
           env,
-          withRoom.map(({ appId }) => appId),
+          receivers
+            .filter((_, index) => rooms[index] === "new")
+            .map(({ appId }) => appId),
           id,
           raw
         )

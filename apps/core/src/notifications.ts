@@ -18,6 +18,7 @@ import { z } from "zod";
 
 import { appsFoundBy } from "./app-access.ts";
 import { outboxedWhere } from "./audit-outbox.ts";
+import { activeMember } from "./auth/auth.ts";
 import { apps, notifications } from "./db/core/schema.ts";
 import { inList } from "./db/d1.ts";
 import { withPerson } from "./session-check.ts";
@@ -25,7 +26,8 @@ import type { SessionCheck } from "./session-check.ts";
 
 // What core tells a person in the product: for now, that a workflow
 // failed while acting for them (who started the run, or, for a run a
-// trigger started, the App's owner when it failed). Nobody else is told:
+// trigger started, the App's owner when it failed), while they are a
+// member of the organization still. Nobody else is told:
 // admins see every run's failure on the Workflows page, and the report
 // itself stays there, for those who see it (`seesDetails` in
 // workflows/runs.ts). A notification holds IDs and a count, never what
@@ -62,18 +64,22 @@ export interface FailureNotice {
  * The statements that notify `personId` of the failed run, and audit it,
  * in the batch that records the failure: a new unread notification of
  * the workflow, or one more failure counted on the unread one there is.
+ * Only while they are a member of the organization, as the batch finds
+ * them: someone removed since the run started (members.ts, which deletes
+ * their notifications) is told nothing, and the log doesn't say they were.
  */
 export const failureNoticed = (
   db: DrizzleD1Database,
   { run, personId, entry, recorded }: FailureNotice
 ) => {
   const now = Date.now();
+  const told = sql`${recorded} AND ${activeMember(personId)}`;
   return [
     // The WHERE keeps SQLite from reading ON CONFLICT as a join.
     db
       .insert(notifications)
       .select(
-        sql`SELECT ${crypto.randomUUID()}, ${personId}, 'run_failed', ${run.appId}, ${run.workflowId}, ${run.id}, 1, ${now}, ${now}, NULL WHERE ${recorded}`
+        sql`SELECT ${crypto.randomUUID()}, ${personId}, 'run_failed', ${run.appId}, ${run.workflowId}, ${run.id}, 1, ${now}, ${now}, NULL WHERE ${told}`
       )
       .onConflictDoUpdate({
         target: [
@@ -89,7 +95,7 @@ export const failureNoticed = (
           updatedAt: sql`excluded.updated_at`,
         },
       }),
-    outboxedWhere(db, entry, recorded),
+    outboxedWhere(db, entry, told),
   ] as const;
 };
 

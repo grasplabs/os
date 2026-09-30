@@ -250,6 +250,15 @@ describe("asking the agent to fix a failed run", slow, () => {
     });
     const failed = await endedRun(owner, app, "careless");
     const ended = await endedRun(owner, app, "fine");
+    // A run that acted for the user, whose report they saw, until the App
+    // read what they can't read (a collection Knowledge doesn't know).
+    const ownRun = await endedRun(user, app, "careless");
+    await storedGrant(
+      { type: "app", id: app },
+      { type: "collection", id: crypto.randomUUID() },
+      ["read"],
+      "ARCHIVE"
+    );
     await answering(admin, says("On it."));
     const switchedOff = await openRpc(owner.session, {
       coreEnv: { ...env, FEATURES: withoutNotifications() },
@@ -270,6 +279,8 @@ describe("asking the agent to fix a failed run", slow, () => {
     const refused = {
       // Shared the App, but the run acted for its owner.
       user: await outcome(user.api.chats.fixRun(failed, model)),
+      // Their own run, of an App they can no longer open: as no run.
+      unreadable: await outcome(user.api.chats.fixRun(ownRun, model)),
       stranger: await outcome(stranger.api.chats.fixRun(failed, model)),
       completed: await outcome(owner.api.chats.fixRun(ended, model)),
       unknown: await outcome(
@@ -299,6 +310,7 @@ describe("asking the agent to fix a failed run", slow, () => {
       kept: ownerChats.map(({ title }) => title),
     }).toStrictEqual({
       user: "workflow.run_not_found",
+      unreadable: "workflow.run_not_found",
       stranger: "workflow.run_not_found",
       completed: "workflow.run_not_found",
       unknown: "workflow.run_not_found",

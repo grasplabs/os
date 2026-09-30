@@ -944,31 +944,43 @@ const triggeredRunsPerHour = 60;
 const hourMs = 60 * 60 * 1000;
 
 /**
- * Whether App `app`'s workflow `workflow` is at its hourly limit for the
- * message or event whose run has trigger key `key`: triggers of `type`
- * started `triggeredRunsPerHour` of its runs in the past hour (counted on
- * its index by App, workflow and time), and none of them is this one's. A
- * workflow that has this one's run already is never capped for it, so a
- * delivery tried again because another workflow was capped isn't refused
- * by the run it started itself. Checked before the starts, not with them,
- * so what's delivered at the same moment can go a few over.
+ * Where a message or event stands for a workflow it would start a run of:
+ * `capped` while the workflow is at its hourly limit, `started` when the
+ * workflow has its run already, past `starting`, and `new` otherwise.
  */
-export const atHourlyCap = async (
+export type DeliveryRoom = "capped" | "started" | "new";
+
+/**
+ * Where the message or event whose run has trigger key `key` stands for
+ * App `app`'s workflow `workflow`. It is `capped` when triggers of `type`
+ * started `triggeredRunsPerHour` of the workflow's runs in the past hour
+ * (counted on its index by App, workflow and time), and none of them is
+ * this one's. A workflow that has this one's run already is never capped
+ * for it, so a delivery tried again because another workflow was capped
+ * isn't refused by the run it started itself: it is `started` once that
+ * run is past `starting`, and `new` while it is still starting, as the
+ * delivery's input may yet start it (`restartOrphan`). Checked before the
+ * starts, not with them, so what's delivered at the same moment can go a
+ * few over.
+ */
+export const deliveryRoom = async (
   env: Env,
   app: string,
   workflow: string,
   key: string,
   type: "email" | "event"
-): Promise<boolean> => {
+): Promise<DeliveryRoom> => {
   const recent = and(
     gte(workflowRuns.createdAt, new Date(Date.now() - hourMs)),
     like(workflowRuns.triggerKey, `${type}:%`)
   );
   const mine = eq(workflowRuns.triggerKey, key);
+  const past = and(mine, ne(workflowRuns.status, "starting"));
   const counted = await drizzle(env.DB)
     .select({
       runs: sql<number | null>`sum(case when ${recent} then 1 else 0 end)`,
       delivered: sql<number | null>`max(case when ${mine} then 1 else 0 end)`,
+      started: sql<number | null>`max(case when ${past} then 1 else 0 end)`,
     })
     .from(workflowRuns)
     .where(
@@ -979,7 +991,11 @@ export const atHourlyCap = async (
       )
     )
     .get();
-  return (
-    counted?.delivered !== 1 && (counted?.runs ?? 0) >= triggeredRunsPerHour
-  );
+  if (counted?.started === 1) {
+    return "started";
+  }
+  return counted?.delivered !== 1 &&
+    (counted?.runs ?? 0) >= triggeredRunsPerHour
+    ? "capped"
+    : "new";
 };
