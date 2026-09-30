@@ -20,6 +20,7 @@
     "./decisions": "./src/decisions.ts",
     "./deployment-config": "./src/deployment-config.ts",
     "./encoding": "./src/encoding.ts",
+    "./error-reports": "./src/error-reports.ts",
     "./errors": "./src/errors.ts",
     "./guests": "./src/guests.ts",
     "./http": "./src/http.ts",

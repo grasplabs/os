@@ -13,6 +13,13 @@ export default defineConfig({
     babel({ presets: [reactCompilerPreset({ panicThreshold: "all_errors" })] }),
     tailwindcss(),
   ],
+  define: {
+    // The build a page runs, in the error reports it sends: the commit CI
+    // built it from, or `local`.
+    "import.meta.env.VITE_GRASP_BUILD": JSON.stringify(
+      process.env.GITHUB_SHA ?? "local"
+    ),
+  },
   build: {
     rolldownOptions: {
       output: {

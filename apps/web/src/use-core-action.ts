@@ -1,4 +1,4 @@
-import { messageOf } from "@grasp-os/shared/errors";
+import { failureText } from "@grasp-os/shared/errors";
 import { useState } from "react";
 
 import type { Session } from "./core.ts";
@@ -23,7 +23,7 @@ export const useCoreAction = () => {
     try {
       result = await core.withSession(action);
     } catch (error) {
-      report(messageOf(error));
+      report(failureText(error));
     }
     setBusy(false);
     return result;

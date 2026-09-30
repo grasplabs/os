@@ -3,7 +3,6 @@ import type { Identity } from "@grasp-os/shared/rpc";
 import { Button, buttonVariants } from "@grasp-os/ui/components/button";
 import {
   createFileRoute,
-  ErrorComponent,
   Link,
   Outlet,
   redirect,
@@ -15,6 +14,7 @@ import type { ErrorComponentProps } from "@tanstack/react-router";
 import { loadCoreStatus, signOut } from "../core-connection.ts";
 import { ErrorText } from "../error-text.tsx";
 import { NotificationsLink } from "../notifications/nav-link.tsx";
+import { RouteError } from "../route-error.tsx";
 import { signInErrorSearch } from "../sign-in-errors.ts";
 
 // The signed-in product: a nav of its sections beside the page. Everyone
@@ -118,14 +118,14 @@ class CoreUnreachableError extends Error {
 }
 
 /**
- * Says core can't be reached, with a way to ask again; any other error as
- * the router shows it.
+ * Says core can't be reached, with a way to ask again (not a fault, so
+ * not reported); any other error as every page shows it.
  */
-const ShellError = ({ error }: ErrorComponentProps) => {
+const ShellError = ({ error, reset, info }: ErrorComponentProps) => {
   const router = useRouter();
   const trying = useRouterState({ select: (state) => state.isLoading });
   if (!(error instanceof CoreUnreachableError)) {
-    return <ErrorComponent error={error} />;
+    return <RouteError error={error} reset={reset} info={info} />;
   }
   return (
     <main className="flex min-h-svh flex-col items-center justify-center gap-4 p-6">

@@ -78,7 +78,7 @@ const signInOptions = (env: Env): SignInOption[] => {
  * workers.dev address. Without sign-in config (local development) nobody can
  * have a session, and the page's own origin is accepted.
  */
-const isOwnOrigin = (request: Request, env: Env): boolean =>
+export const isOwnOrigin = (request: Request, env: Env): boolean =>
   request.headers.get("Origin") ===
   (signInConfig(env)?.origin ?? new URL(request.url).origin);
 
@@ -179,9 +179,17 @@ export const rpcResponse = async (
     : undefined;
   newWebSocketRpcSession(server, new CoreRpc(signInOptions(env), session), {
     onSendError: (error) => {
-      const sent = toClientError(error, requestId);
+      // Every call of the tab goes over this one connection, so each
+      // failure gets a request ID of its own for the person to quote, and
+      // its log line names the connection's too.
+      const failureId = crypto.randomUUID();
+      const sent = toClientError(error, failureId);
       if (sent && open) {
-        log.error("rpc.failed", { requestId, ...errorFields(error) });
+        log.error("rpc.failed", {
+          requestId: failureId,
+          connectionRequestId: requestId,
+          ...errorFields(error),
+        });
       }
       return sent;
     },

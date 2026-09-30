@@ -1,5 +1,5 @@
 import type { DecisionView } from "@grasp-os/shared/decisions";
-import { messageOf } from "@grasp-os/shared/errors";
+import { failureText } from "@grasp-os/shared/errors";
 import type { SignInOption } from "@grasp-os/shared/rpc";
 import { Button } from "@grasp-os/ui/components/button";
 import {
@@ -55,7 +55,11 @@ const loadDecision = async (
     if (error instanceof CoreTimeoutError) {
       return { state: "offline" };
     }
-    return { state: "refused", name: identity.name, message: messageOf(error) };
+    return {
+      state: "refused",
+      name: identity.name,
+      message: failureText(error),
+    };
   }
 };
 

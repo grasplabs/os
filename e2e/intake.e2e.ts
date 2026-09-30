@@ -210,7 +210,7 @@ test("an admin invites a stakeholder, who opens the link without an account, wri
   // The local stack reaches no model: the message isn't taken, and says
   // so, and what was typed stays to send again.
   await expect(guestPage.getByRole("alert")).toHaveText(
-    "The chat can't answer right now. Try sending it again in a while."
+    /^The chat can't answer right now\. Try sending it again in a while\. Reference: [\da-f-]{36}$/u
   );
   await expect(guestPage.getByLabel("Your message")).toHaveValue(
     "I approve invoices."
@@ -230,7 +230,7 @@ test("an admin invites a stakeholder, who opens the link without an account, wri
     guestPage.getByRole("heading", { name: `Hi ${name}` })
   ).toHaveCount(0);
   await expect(guestPage.getByRole("alert")).toHaveText(
-    "This link doesn't work. Ask whoever sent it for a new one."
+    /^This link doesn't work\. Ask whoever sent it for a new one\. Reference: [\da-f-]{36}$/u
   );
   await context.close();
 

@@ -1,7 +1,7 @@
 import type { App, VersionReview } from "@grasp-os/shared/apps";
 import { appErrors } from "@grasp-os/shared/apps";
 import type { ChatDraft } from "@grasp-os/shared/chat";
-import { featureErrors, messageOf } from "@grasp-os/shared/errors";
+import { featureErrors, failureText } from "@grasp-os/shared/errors";
 import { roleErrors } from "@grasp-os/shared/roles";
 import { Badge } from "@grasp-os/ui/components/badge";
 import { Button } from "@grasp-os/ui/components/button";
@@ -70,7 +70,7 @@ const readBuilds = async (
     if (featureErrors.codeOf(error) === "feature.disabled") {
       return { state: "off" };
     }
-    return { state: "refused", message: messageOf(error) };
+    return { state: "refused", message: failureText(error) };
   }
 };
 
@@ -95,7 +95,7 @@ const readReview = async (
       featureErrors.codeOf(error) === "feature.disabled";
     return hidden
       ? { state: "hidden" }
-      : { state: "refused", message: messageOf(error) };
+      : { state: "refused", message: failureText(error) };
   }
 };
 
