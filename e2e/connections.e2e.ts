@@ -34,7 +34,7 @@ const cardOf = (
 test("a person comes back from connecting Microsoft 365, sees it with its scope, and is offered to reconnect or disconnect one that needs connecting again", async ({
   browser,
 }) => {
-  const { user } = peopleIn("connections");
+  const { admin, user } = peopleIn("connections");
   const { mine, expired } = seededConnections();
   const page = await pageOf(browser, user);
   // A link can name any ID: only a connection the page lists is news.
@@ -71,6 +71,31 @@ test("a person comes back from connecting Microsoft 365, sees it with its scope,
   await expect(expiredCard.getByRole("alert")).toHaveText(
     "Connecting this provider isn't set up for this deployment."
   );
+  // While an admin doesn't offer Microsoft 365, core refuses every start:
+  // the card offers no Reconnect, and says what has to happen first. The
+  // catalog no longer lists the entry to this person, so its ID stands in
+  // for its name.
+  const { core, api } = apiOf(admin);
+  try {
+    await api.connections.setOffered("native", "microsoft", false);
+    await page.reload();
+    const hiddenCard = cardOf(own, "microsoft", expired);
+    await expect(
+      hiddenCard.getByText(
+        "An admin must offer this connector again before it can be reconnected."
+      )
+    ).toBeVisible();
+    await expect(
+      hiddenCard.getByRole("button", { name: /^Reconnect/u })
+    ).toHaveCount(0);
+  } finally {
+    await api.connections.setOffered("native", "microsoft", true);
+    core[Symbol.dispose]();
+  }
+  await page.reload();
+  await expect(
+    expiredCard.getByRole("button", { name: /^Reconnect/u })
+  ).toBeVisible();
   // It can be disconnected instead.
   await expiredCard
     .getByRole("button", {
