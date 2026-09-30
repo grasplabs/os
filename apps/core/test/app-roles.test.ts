@@ -8,6 +8,7 @@ import { mockIdp } from "./idp.ts";
 import { newTeam } from "./knowledge.ts";
 import {
   auditedDuring,
+  letSessionRecheckPass,
   openRpc,
   outcome,
   signedIn,
@@ -277,6 +278,7 @@ describe("App roles", { timeout: 60_000 }, () => {
         "INSERT INTO team_members (id, team_id, user_id, created_at) VALUES (?, ?, ?, ?)"
       ).bind(crypto.randomUUID(), team, ben.userId, Date.now()),
     ]);
+    using _clock = letSessionRecheckPass();
     await expect(
       Promise.all([
         outcome(anna.api.apps.files.read(app)),
@@ -406,6 +408,7 @@ describe("App roles", { timeout: 60_000 }, () => {
     await env.DB.prepare("UPDATE members SET role = 'user' WHERE user_id = ?")
       .bind(owner.userId)
       .run();
+    using _clock = letSessionRecheckPass();
     await expect(
       Promise.all([
         outcome(owner.api.apps.get(app)),

@@ -10,6 +10,7 @@ import { mockIdp } from "./idp.ts";
 import {
   auditedDuring,
   callAuth,
+  letSessionRecheckPass,
   openRpc,
   outcome,
   signedIn,
@@ -22,7 +23,7 @@ const idp = mockIdp();
 const signedInAs = async (role: Role) => await signedInWithRole(idp, role);
 
 describe("roles and teams", () => {
-  it("are read on every call, so changes apply without reconnecting", async () => {
+  it("are read again within a few seconds, so changes apply without reconnecting", async () => {
     const admin = await signedInAs("admin");
     const person = await signedInAs("user");
     const { core } = await openRpc(person.session);
@@ -45,6 +46,7 @@ describe("roles and teams", () => {
       { teamId: team.id, userId: person.userId }
     );
     expect(added.status).toBe(200);
+    using _clock = letSessionRecheckPass();
 
     await expect(session.whoami()).resolves.toMatchObject({
       role: "builder",

@@ -20,6 +20,7 @@ import { acmeTenant, clientOrigin } from "./sign-in-config.ts";
 import {
   auditedDuring,
   callAuth,
+  letSessionRecheckPass,
   onlyAdmins,
   openRpc,
   outcome,
@@ -97,12 +98,13 @@ const tokensHeld = async (connectionId: string): Promise<number> => {
 };
 
 describe("removing a member", () => {
-  it("fails their open connection's next call, and closes it", async () => {
+  it("fails their open connection's calls within a few seconds, and closes it", async () => {
     const admin = await signedInApi(idp, "admin");
     const person = await signedInApi(idp, "user");
     await expect(person.api.whoami()).resolves.toMatchObject({ role: "user" });
 
     await admin.api.members.remove(person.userId);
+    using _clock = letSessionRecheckPass();
 
     await expect(outcome(person.api.whoami())).resolves.toBe(
       "auth.unauthenticated"
@@ -242,11 +244,15 @@ describe("removing a member", () => {
 });
 
 describe("ending a member's sessions", () => {
-  it("fails their open connection's next call and closes it, but keeps them a member", async () => {
+  it("fails their open connection's calls within a few seconds and closes it, but keeps them a member", async () => {
     const admin = await signedInApi(idp, "admin");
     const person = await signedInApi(idp, "builder");
+    await expect(person.api.whoami()).resolves.toMatchObject({
+      role: "builder",
+    });
 
     await admin.api.members.revokeSessions(person.userId);
+    using _clock = letSessionRecheckPass();
 
     await expect(outcome(person.api.whoami())).resolves.toBe(
       "auth.unauthenticated"

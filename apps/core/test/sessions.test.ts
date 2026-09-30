@@ -1,7 +1,8 @@
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import { sessionEndedCloseCode } from "../src/rpc.ts";
+import { sessionRecheckMs } from "../src/session-check.ts";
 import { mockIdp } from "./idp.ts";
 import { acmeTenant, clientOrigin } from "./sign-in-config.ts";
 import {
@@ -74,21 +75,34 @@ describe("sessions end", () => {
     });
   });
 
-  it("on an open connection too: its next call is refused and it closes", async () => {
+  it("on an open connection too, within a few seconds: its calls are refused, it closes, idle or not, and can't be opened again", async () => {
     const person = entraPerson(acmeTenant);
     const laptop = await signedIn(idp, "microsoft", person);
     const phone = await signedIn(idp, "microsoft", person);
-    const { core, closed } = await openRpc(phone);
-    using session = core.authenticate();
-    await expect(session.whoami()).resolves.toMatchObject({
-      email: person.email,
-    });
+    // Held from before the connections open, so their rechecks keep it.
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+    try {
+      const busy = await openRpc(phone);
+      const idle = await openRpc(phone);
+      using session = busy.core.authenticate();
+      await expect(session.whoami()).resolves.toMatchObject({
+        email: person.email,
+      });
 
-    await callAuth("/revoke-other-sessions", laptop, {});
-    await expect(outcome(session.whoami())).resolves.toBe(
-      "auth.unauthenticated"
-    );
-    await expect(closed).resolves.toBe(sessionEndedCloseCode);
+      await callAuth("/revoke-other-sessions", laptop, {});
+      await vi.advanceTimersByTimeAsync(sessionRecheckMs);
+
+      // Refused, or closed first by its own recheck: either way, unanswered.
+      await expect(session.whoami()).rejects.toBeInstanceOf(Error);
+      await expect(
+        Promise.all([busy.closed, idle.closed])
+      ).resolves.toStrictEqual([sessionEndedCloseCode, sessionEndedCloseCode]);
+      await expect(outcome(whoami(phone))).resolves.toBe(
+        "auth.unauthenticated"
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

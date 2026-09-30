@@ -9,9 +9,11 @@ import type { CoreApi } from "@grasp-os/shared/rpc";
 import { newWebSocketRpcSession } from "capnweb";
 import { createExecutionContext } from "cloudflare:test";
 import { env } from "cloudflare:workers";
+import { vi } from "vite-plus/test";
 import { z } from "zod";
 
 import worker from "../src/index.ts";
+import { sessionRecheckMs } from "../src/session-check.ts";
 import { eventsAfter, logHead } from "./audit-events.ts";
 import type { Claims, Idp } from "./idp.ts";
 import {
@@ -184,6 +186,22 @@ export const openRpc = async (
   socket.accept();
   const core = newWebSocketRpcSession<CoreApi>(socket);
   return { core, closed: closed.promise };
+};
+
+/**
+ * Lets the few seconds pass that an open connection's reading of who is
+ * behind it holds (`sessionRecheckMs`), on a held clock, so its next call
+ * reads again. Only the date is moved, and it goes on from there until
+ * the returned clock is disposed.
+ */
+export const letSessionRecheckPass = (): Disposable => {
+  vi.useFakeTimers({ toFake: ["Date"], shouldAdvanceTime: true });
+  vi.setSystemTime(Date.now() + sessionRecheckMs);
+  return {
+    [Symbol.dispose]: () => {
+      vi.useRealTimers();
+    },
+  };
 };
 
 /** Who the session behind `cookie` is, on a connection of its own. */
