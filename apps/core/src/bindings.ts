@@ -64,15 +64,7 @@ export const signedCall = async (
   { action, idempotencyKey }: Pick<ConnectCall, "action" | "idempotencyKey">,
   confirms?: string
 ) => {
-  // The mask comes from the permission's record as it is now, and goes
-  // only into the signed capability: connect masks by it.
-  const { mask } = await authorize(
-    env,
-    authority,
-    connection,
-    action,
-    permissionId
-  );
+  await authorize(env, authority, connection, action, permissionId);
   const restricted = await isRestricted(env, authority, context);
   const holds = featureEnabled(env, "confirmations");
   if (restricted && !holds) {
@@ -89,7 +81,6 @@ export const signedCall = async (
     authority,
     {
       ...scope,
-      mask,
       restricted,
       origin: holds ? { permissionId, context } : undefined,
       context,

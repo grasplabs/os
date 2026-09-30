@@ -78,7 +78,6 @@ export default defineConnector({
       output: z.strictObject({ items: z.array(itemSchema) }),
       readOnly: true,
       resource: "mailbox",
-      mask: ["items.subject"],
       routes: [
         {
           method: "GET",
@@ -117,7 +116,6 @@ export default defineConnector({
       }),
       readOnly: false,
       resource: "mailbox",
-      mask: ["subject"],
       routes: [
         {
           method: "POST",

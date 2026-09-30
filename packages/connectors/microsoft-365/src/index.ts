@@ -9,15 +9,6 @@ import { mailTools } from "./mail.ts";
  * Native Microsoft 365 connector, on Microsoft Graph: mail and calendars
  * of one mailbox per call, and files in OneDrive and SharePoint, one drive
  * per call.
- *
- * Maskable fields, by name: `subject`, `bodyPreview` and `body` (messages
- * and events) and `content` (attachments and files). A metadata-only
- * permission masking all four still shows: senders and recipients, dates,
- * read, draft and importance flags, folders and conversation IDs, links;
- * attachments' names, types and sizes; events' times, location, organizer
- * and attendees; files' names, types, sizes and folders. Mail and file
- * searches still run, and look through masked fields: which items match
- * can tell something of what those fields hold.
  */
 export default defineConnector({
   name: "microsoft-365",

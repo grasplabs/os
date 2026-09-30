@@ -50,8 +50,6 @@ import { deliveryRoom, startRun } from "./runs.ts";
 // - that allows the read action the event names (`action`);
 // - from the App's current version only if an admin approved it, as for
 //   any call on a connection;
-// - that masks nothing: masking applies to a call's results, and events
-//   aren't masked yet, so a masked permission hears no events;
 // - for a personal connection, only in Apps whose owner (whom a triggered
 //   run acts for) is its owner, as connect lets only calls for its owner
 //   use it.
@@ -62,9 +60,6 @@ import { deliveryRoom, startRun } from "./runs.ts";
 // the event waits in connect's outbox and is delivered again later. A
 // start that fails fails the delivery, after every other has been tried,
 // so the event is delivered again and starts only what didn't start.
-
-/** A permission that masks nothing, as SQL on `permissions`. */
-const unmaskedSql = sql`(${permissions.mask} IS NULL OR json_array_length(${permissions.mask}) = 0)`;
 
 /**
  * The event triggers of Apps' current versions for `event`'s type, in
@@ -102,7 +97,7 @@ const receiversOf = async (env: Env, event: ConnectorEvent) =>
               : { resource: event.resource }),
           },
           event.action
-        )} AND ${unmaskedSql} AND ${
+        )} AND ${
           event.resource === undefined
             ? isNull(permissions.resource)
             : eq(permissions.resource, event.resource)
@@ -215,8 +210,7 @@ export const deliverConnectorEvent = async (
 };
 
 /**
- * Who listens for events of `type` where: each active, unmasked
- * permission on a connection that allows the type's read action
+ * Who listens for events of `type` where: each active permission on a connection that allows the type's read action
  * (`action`), held by an App whose current version has an event trigger
  * for `type` and was approved (`listeningPermissionSql`), with the App's
  * owner. One row per permission, however many of the App's workflows
@@ -234,7 +228,6 @@ const listenersFor = async (env: Env, type: string, action: string) =>
     .where(
       and(
         listeningPermissionSql(apps.id, apps.currentVersion),
-        unmaskedSql,
         sql`EXISTS (SELECT 1 FROM json_each(${permissions.actions}) WHERE value = ${action})`,
         sql`EXISTS (SELECT 1 FROM ${workflowTriggers} WHERE ${workflowTriggers.appId} = ${apps.id} AND ${workflowTriggers.version} = ${apps.currentVersion} AND ${workflowTriggers.type} = 'event' AND ${workflowTriggers.event} = ${type})`
       )

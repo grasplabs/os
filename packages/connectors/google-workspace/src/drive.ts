@@ -249,7 +249,6 @@ const readFile = defineTool({
   }),
   readOnly: true,
   resource: "drive",
-  mask: ["content"],
   // A file has no drive in its path: `run` checks it before its content.
   routes: [
     { method: "GET", host: apisHost, path: `${files}/{item}` },

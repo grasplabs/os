@@ -88,10 +88,6 @@ type Row = typeof permissions.$inferSelect;
 
 const stringListSchema = z.array(z.string());
 
-/** A stored mask: a connection permission's masked fields, if any. */
-const maskOf = (row: Pick<Row, "mask">): string[] =>
-  row.mask === null ? [] : stringListSchema.parse(JSON.parse(row.mask));
-
 /** How a subject is stored. */
 const subjectColumns = (subject: PermissionSubject) =>
   subject.type === "app"
@@ -106,7 +102,6 @@ const objectColumns = (object: PermissionObject) => {
         objectType: object.type,
         objectId: object.connectionId,
         resource: object.resource ?? null,
-        mask: object.mask === undefined ? null : JSON.stringify(object.mask),
       };
     }
     case "collection": {
@@ -114,7 +109,6 @@ const objectColumns = (object: PermissionObject) => {
         objectType: object.type,
         objectId: object.collectionId,
         resource: null,
-        mask: null,
       };
     }
     case "workflow": {
@@ -122,7 +116,6 @@ const objectColumns = (object: PermissionObject) => {
         objectType: object.type,
         objectId: object.appId,
         resource: object.workflowId,
-        mask: null,
       };
     }
     case "app": {
@@ -130,7 +123,6 @@ const objectColumns = (object: PermissionObject) => {
         objectType: object.type,
         objectId: object.appId,
         resource: null,
-        mask: null,
       };
     }
     case "platform": {
@@ -139,7 +131,6 @@ const objectColumns = (object: PermissionObject) => {
         objectType: object.type,
         objectId: "platform",
         resource: null,
-        mask: null,
       };
     }
     default: {
@@ -153,12 +144,10 @@ const objectOf = (row: Row): PermissionObject => {
   const resource = row.resource ?? undefined;
   switch (row.objectType) {
     case "connection": {
-      const mask = maskOf(row);
       return permissionObjectSchema.parse({
         type: row.objectType,
         connectionId: row.objectId,
         ...(resource === undefined ? {} : { resource }),
-        ...(mask.length === 0 ? {} : { mask }),
       });
     }
     case "collection": {
@@ -229,17 +218,14 @@ const auditDetail = ({
   binding,
 }: Permission): Record<string, AuditDetailValue> => {
   // The object's IDs by name: connectionId and resource, collectionId,
-  // appId and workflowId, or appId; a connection's masked fields as one
-  // identifier-sized value, as the actions are.
-  const { type: objectType, ...objectIds } = object;
+  // appId and workflowId, or appId.
+  const { type: objectType, ...ids } = object;
   const { subjectType, subjectId } = subjectColumns(subject);
-  const { mask, ...ids } = { mask: undefined, ...objectIds };
   return {
     subjectType,
     subjectId,
     objectType,
     ...ids,
-    ...(mask === undefined ? {} : { mask: mask.join(" ") }),
     actions: actions.join(" "),
     binding,
   };
@@ -544,16 +530,12 @@ export const requestPermission = async (
  * the actions in any order.
  */
 const grantKey = (
-  row: Pick<
-    Row,
-    "objectType" | "objectId" | "resource" | "mask" | "actions" | "binding"
-  >
+  row: Pick<Row, "objectType" | "objectId" | "resource" | "actions" | "binding">
 ): string =>
   JSON.stringify([
     row.objectType,
     row.objectId,
     row.resource,
-    row.mask,
     stringListSchema.parse(JSON.parse(row.actions)).toSorted(),
     row.binding,
   ]);
@@ -889,7 +871,7 @@ export const grantPermission = async (
 };
 
 /** A stored JSON list of strings, joined by spaces, as SQL. */
-const joined = (list: SQL | typeof permissions.actions): SQL =>
+const joined = (list: typeof permissions.actions): SQL =>
   sql`(SELECT group_concat(value, ' ') FROM json_each(${list}))`;
 
 /**
@@ -904,19 +886,15 @@ const eventIdSql = (fresh: string): SQL =>
 
 /**
  * What `auditDetail` records of a permission row, as SQL: its IDs by name
- * (connectionId, resource and mask; collectionId; appId and workflowId;
- * appId),
- * its actions and its binding.
+ * (connectionId and resource; collectionId; appId and workflowId;
+ * appId), its actions and its binding.
  */
 const auditDetailSql = sql`json_patch(
   json_object('subjectType', ${permissions.subjectType}, 'subjectId', ${permissions.subjectId}, 'objectType', ${permissions.objectType}),
   CASE ${permissions.objectType}
     WHEN 'connection' THEN json_patch(
       json_object('connectionId', ${permissions.objectId}),
-      json_patch(
-        CASE WHEN ${permissions.resource} IS NULL THEN '{}' ELSE json_object('resource', ${permissions.resource}) END,
-        CASE WHEN ${permissions.mask} IS NULL THEN '{}' ELSE json_object('mask', ${joined(sql`${permissions.mask}`)}) END
-      )
+      CASE WHEN ${permissions.resource} IS NULL THEN '{}' ELSE json_object('resource', ${permissions.resource}) END
     )
     WHEN 'collection' THEN json_object('collectionId', ${permissions.objectId})
     WHEN 'app' THEN json_object('appId', ${permissions.objectId})
@@ -1416,8 +1394,7 @@ export const grantedPermissions = async (
  * action that changes things (on a connection, or other than `read`) also
  * needs the version it runs to be one an admin approved (`madeCurrent`).
  * Throws `permission.denied`
- * or `permission.person_inactive` otherwise. Returns the fields that
- * permission masks in a connection's results (none for other objects).
+ * or `permission.person_inactive` otherwise.
  *
  * It doesn't intersect the grant with the person's own access (R5): connect
  * does that for personal connections, and the Knowledge queries for
@@ -1429,10 +1406,10 @@ export const authorize = async (
   object: PermissionObject,
   action: string,
   permissionId: PermissionId
-): Promise<{ mask: string[] }> => {
+): Promise<void> => {
   await requireActivePerson(env, authority);
   const allowing = await drizzle(env.DB)
-    .select({ mask: permissions.mask })
+    .select({ id: permissions.id })
     .from(permissions)
     .where(
       and(
@@ -1449,7 +1426,6 @@ export const authorize = async (
   if (!allowing) {
     throw permissionErrors.create("permission.denied", { action });
   }
-  return { mask: maskOf(allowing) };
 };
 
 /**

@@ -38,12 +38,6 @@ export const provenanceMetaKey = "grasp-os/provenance";
 export const notPerformedMetaKey = "grasp-os/not-performed";
 
 /**
- * Tool `_meta` key: the paths of the output fields that may be masked, such
- * as a message's body where a permission covers only its metadata.
- */
-export const maskMetaKey = "grasp-os/mask";
-
-/**
  * Response header on the answers connect's egress gives itself: `refused`
  * (the request never left) or `failed` (it left, but its answer is
  * withheld: a redirect, or unreachable). A response past the size limit
@@ -228,12 +222,6 @@ const actionManifestSchema = z.strictObject({
     .regex(/^[A-Za-z_]\w*$/u)
     .nullable(),
   input: z.array(z.string().min(1).max(128)).max(128),
-  /**
-   * The output fields (dotted paths, through arrays) that may be masked. A
-   * permission masks fields by name: each of these whose last segment is
-   * one of its names.
-   */
-  mask: z.array(z.string().min(1).max(256)).max(64).default([]),
   describe: actionDescribeSchema.optional(),
 });
 export type ActionManifest = z.infer<typeof actionManifestSchema>;

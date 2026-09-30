@@ -3,7 +3,6 @@ import { z } from "zod";
 
 import {
   connectorManifestSchema,
-  maskMetaKey,
   mcpProtocolVersion,
   notPerformedMetaKey,
   provenanceMetaKey,
@@ -61,11 +60,6 @@ export interface ToolDefinition<
    * other property, at any depth, may select a resource.
    */
   resource?: Extract<keyof z.input<Input>, string>;
-  /**
-   * Output fields (dotted paths, through arrays) that may be masked: each
-   * must allow `null`, which is what a masked field becomes.
-   */
-  mask?: readonly string[];
   /**
    * The only requests it may send (threat model Q11). A path parameter
    * named after the resource property (`{mailbox}`) must hold the resource
@@ -229,27 +223,6 @@ const isClosed = (schema: unknown): boolean => {
   return branches.every(isClosed) && objectClosed && arrayClosed;
 };
 
-/** The node of a JSON Schema a dotted path leads to, through arrays. */
-const nodeAt = (schema: unknown, path: string): unknown => {
-  let node = schema;
-  for (const key of path.split(".")) {
-    while (isObject(node) && typesOf(node).includes("array")) {
-      node = node.items;
-    }
-    node =
-      isObject(node) && isObject(node.properties)
-        ? node.properties[key]
-        : undefined;
-  }
-  return node;
-};
-
-/** Whether a JSON Schema node allows `null`, in any of its branches. */
-const allowsNull = (node: unknown): boolean =>
-  isObject(node) &&
-  (typesOf(node).includes("null") ||
-    (Array.isArray(node.anyOf) && node.anyOf.some(allowsNull)));
-
 /** An error result: its message, its code when it has one, and whether it did nothing. */
 const failure = (
   text: string,
@@ -290,15 +263,6 @@ export const defineTool = <
   if (!isClosed(inputSchema)) {
     throw new Error(`${name}: its input must be strict objects throughout`);
   }
-  for (const path of definition.mask ?? []) {
-    const node = nodeAt(outputSchema, path);
-    if (node === undefined) {
-      throw new Error(`${name}: its output has no ${path} to mask`);
-    }
-    if (!allowsNull(node)) {
-      throw new Error(`${name}: its ${path} must be nullable to be masked`);
-    }
-  }
   const resourceProperty: unknown =
     resource === undefined ? undefined : inputSchema.properties?.[resource];
   if (
@@ -311,9 +275,6 @@ export const defineTool = <
   if (resource !== undefined) {
     meta[resourceMetaKey] = resource;
   }
-  if (definition.mask !== undefined) {
-    meta[maskMetaKey] = [...definition.mask];
-  }
   return {
     name,
     action: {
@@ -321,7 +282,6 @@ export const defineTool = <
       readOnly,
       resource: resource ?? null,
       input: Object.keys(inputSchema.properties ?? {}),
-      mask: [...(definition.mask ?? [])],
       ...(definition.describe === undefined
         ? {}
         : {

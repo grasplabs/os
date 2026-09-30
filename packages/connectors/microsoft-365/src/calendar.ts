@@ -139,7 +139,6 @@ const listEvents = defineTool({
   }),
   readOnly: true,
   resource: "mailbox",
-  mask: ["events.subject", "events.bodyPreview"],
   routes: [{ method: "GET", host: graphHost, path: `${users}/calendarView` }],
   run: async ({ mailbox, start, end, top, page }) => {
     if (Date.parse(end) <= Date.parse(start)) {
@@ -197,7 +196,6 @@ const getEvent = defineTool({
   }),
   readOnly: true,
   resource: "mailbox",
-  mask: ["event.subject", "event.bodyPreview", "event.body"],
   routes: [{ method: "GET", host: graphHost, path: `${users}/events/{event}` }],
   run: async ({ mailbox, event: id }) => {
     const event = await graphJson(

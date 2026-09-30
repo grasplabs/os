@@ -1,7 +1,4 @@
-import {
-  capabilityMaxTtlMs,
-  signCapability,
-} from "@grasp-os/shared/capability";
+import { capabilityMaxTtlMs } from "@grasp-os/shared/capability";
 import { bindingNameSchema } from "@grasp-os/shared/permissions";
 import { env, exports } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
@@ -9,8 +6,6 @@ import { beforeEach, describe, expect, it } from "vite-plus/test";
 import {
   addConnection,
   agentFor,
-  auditEvents,
-  callAs,
   capabilityFor,
   outcome,
   serverUrl,
@@ -29,8 +24,6 @@ const server = fakeMcpServer(serverUrl, [
     run: () => ({ output: { messages: [] } }),
   },
 ]);
-
-const audit = auditEvents();
 
 const anna = agentFor("user-anna");
 
@@ -141,27 +134,5 @@ describe("calls to connect", () => {
       )
     );
     expect(refused).toStrictEqual(notCalls.map(() => "connect.invalid"));
-  });
-
-  it("take what to mask from the capability alone, never from the call", async () => {
-    const capability = await signCapability(env.CAPABILITY_SIGNING_KEY, anna, {
-      ...call,
-      mask: ["body"],
-    });
-    await expect(callWith(capability, { ...call, mask: [] })).resolves.toBe(
-      "connect.invalid"
-    );
-    expect(server.requests).toBe(0);
-  });
-
-  it("aren't given, and are audited as refused, for a masked permission on a server connect can't mask", async () => {
-    await expect(outcome(callAs(anna, call, { mask: ["body"] }))).resolves.toBe(
-      "connect.mask_unsupported"
-    );
-    expect(server.requests).toBe(0);
-    const events = await audit.events();
-    expect(events.map(({ detail }) => detail)).toMatchObject([
-      { outcome: "refused", reason: "connect.mask_unsupported" },
-    ]);
   });
 });

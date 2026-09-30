@@ -132,9 +132,7 @@ const objectOf = (
 ): string => {
   if (object.type === "connection") {
     const within = object.resource === undefined ? "" : `, ${object.resource}`;
-    const masked =
-      object.mask === undefined ? "" : ` (hides ${object.mask.join(", ")})`;
-    return `Connection ${object.connectionId}${within}${masked}`;
+    return `Connection ${object.connectionId}${within}`;
   }
   if (object.type === "collection") {
     return `Collection ${object.collectionId}`;

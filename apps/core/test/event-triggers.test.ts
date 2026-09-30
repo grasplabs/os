@@ -76,8 +76,7 @@ const deliver = async (event: unknown): Promise<{ runs: number }> =>
 
 /**
  * An App with the inbox workflow, granted Outlook: on `resource` when
- * given, for `actions` (listing mail by default), masking `mask`. The
- * workflow's `triggers` replace its one, on `filter`, when given.
+ * given, for `actions` (listing mail by default). The workflow's `triggers` replace its one, on `filter`, when given.
  */
 const inboxApp = async (
   builder: Person,
@@ -86,13 +85,11 @@ const inboxApp = async (
     triggers,
     resource,
     actions,
-    mask,
   }: {
     filter?: string;
     triggers?: string;
     resource?: string;
     actions?: string[];
-    mask?: string[];
   } = {}
 ): Promise<string> => {
   const app = await appWith(builder, inbox(filter, triggers));
@@ -103,7 +100,6 @@ const inboxApp = async (
     object: {
       ...request.object,
       ...(resource === undefined ? {} : { resource }),
-      ...(mask === undefined ? {} : { mask }),
     },
   });
   return app;
@@ -250,7 +246,6 @@ describe("event triggers", () => {
       resource: "mailbox-sender",
       actions: ["mail.send"],
     });
-    await inboxApp(builder, { resource: "mailbox-masked", mask: ["body"] });
     const unapproved = await inboxApp(builder, {
       resource: "mailbox-unapproved",
     });
@@ -290,15 +285,11 @@ describe("event triggers", () => {
     await expect(runsOf(builder, app)).resolves.toHaveLength(0);
   });
 
-  it("reach only Apps whose permission allows the event's read action and masks nothing", async () => {
+  it("reach only Apps whose permission allows the event's read action", async () => {
     const builder = await personApi("builder");
     const sender = await inboxApp(builder, {
       filter: `{ folder: "rules" }`,
       actions: ["mail.send"],
-    });
-    const masked = await inboxApp(builder, {
-      filter: `{ folder: "rules" }`,
-      mask: ["body"],
     });
     const reader = await inboxApp(builder, {
       filter: `{ folder: "rules" }`,
@@ -309,12 +300,12 @@ describe("event triggers", () => {
 
     await expect(
       Promise.all(
-        [sender, masked, reader].map(async (app) => {
+        [sender, reader].map(async (app) => {
           const runs = await runsOf(builder, app);
           return runs.length;
         })
       )
-    ).resolves.toStrictEqual([0, 0, 1]);
+    ).resolves.toStrictEqual([0, 1]);
   });
 
   it("reach, from a personal connection, only the Apps its owner owns", async () => {

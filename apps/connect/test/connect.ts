@@ -116,7 +116,7 @@ export const capabilityFor = async (
 /** What core signs into a capability besides the call itself. */
 export type Signed = Pick<
   CapabilityScope,
-  "mask" | "restricted" | "origin" | "confirms"
+  "restricted" | "origin" | "confirms"
 >;
 
 /** Where a chat's call comes from, as core signs it for connect to hold. */
@@ -127,9 +127,8 @@ export const chatOrigin: NonNullable<Signed["origin"]> = {
 
 /**
  * Makes `call` for `authority`, as core does: with a capability that also
- * says what `signed` says (the permission's masked fields, whether the
- * caller's context is restricted, where it comes from), none of which the
- * call itself names.
+ * says what `signed` says (whether the caller's context is restricted,
+ * where it comes from), none of which the call itself names.
  */
 export const callAs = async (
   authority: Authority,

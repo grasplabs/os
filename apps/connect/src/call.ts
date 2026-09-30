@@ -19,7 +19,6 @@ import type { Connection } from "./connections.ts";
 import { nativeAction, nativeServer } from "./connectors.ts";
 import { hashCall, idempotencyStore, replay } from "./idempotency.ts";
 import type { StoredAnswer } from "./idempotency.ts";
-import { fieldOf, masked, maskedPaths } from "./mask.ts";
 import { McpError } from "./mcp.ts";
 import type {
   McpServer,
@@ -97,64 +96,15 @@ const maxInputBytes = 64 * 1024;
 const isInput = (input: Json): input is Input =>
   typeof input === "object" && input !== null && !Array.isArray(input);
 
-/** An answer with the fields at `masks` masked (an error has none). */
-const maskedAnswer = (
-  answer: StoredAnswer,
-  masks: readonly string[]
-): StoredAnswer =>
-  answer.failed
-    ? answer
-    : {
-        ...answer,
-        result: {
-          ...answer.result,
-          output: masked(answer.result.output, masks),
-        },
-      };
-
-/**
- * The tool's answer, as connect stores and returns it, masked. Stored
- * masked, and masked again as the capability of each repeat says.
- */
-const answerOf = (
-  { output, provenance, isError }: McpToolResult,
-  masks: readonly string[]
-): StoredAnswer =>
-  maskedAnswer({ result: { output, provenance }, failed: isError }, masks);
-
-/**
- * The output paths to mask for a call, as its capability says: the paths
- * the native action declares maskable whose field the capability names.
- * A mask is a restriction someone set, so it is never silently ignored: a
- * call connect can't mask for is refused, on a remote server (its tools
- * declare nothing connect trusts) or with a field no tool of the
- * connector declares maskable (a slip that would mask nothing). The
- * check is per connector, not per tool, as a permission's mask covers
- * every tool of its connection. From the release's manifest alone:
- * nothing is loaded and no token is read.
- */
-const masksFor = (
-  connection: Connection,
-  claims: CapabilityClaims,
-  action: string
-): string[] => {
-  if (claims.mask.length === 0) {
-    return [];
-  }
-  if (connection.serverKind !== "native") {
-    throw connectErrors.create("connect.mask_unsupported");
-  }
-  const { connector, declared } = nativeAction(connection, action);
-  const maskable = new Set(
-    Object.values(connector.manifest.actions).flatMap(({ mask }) =>
-      mask.map(fieldOf)
-    )
-  );
-  if (!claims.mask.every((field) => maskable.has(field))) {
-    throw connectErrors.create("connect.mask_unsupported");
-  }
-  return maskedPaths(claims.mask, declared.mask);
-};
+/** The tool's answer, as connect stores and returns it. */
+const answerOf = ({
+  output,
+  provenance,
+  isError,
+}: McpToolResult): StoredAnswer => ({
+  result: { output, provenance },
+  failed: isError,
+});
 
 /** Finds the action's tool, exactly as named. */
 const toolFor = async (
@@ -249,11 +199,8 @@ export const connectionFor = async (
 /**
  * How the held call `claims` name ended, for a caller whose capability for
  * that call is verified: authorised now as the call itself would be, on a
- * connection it may use now, and for the resource the call was for. The
- * answer is the stored one, masked again as this capability says, which
- * is the permission's mask as it is now; a mask connect can't apply is
- * refused, never ignored. Throws `connect.pending_not_found` when no such
- * call was held or stored. `pendingActionId` is the held action, while it
+ * connection it may use now, and for the resource the call was for.
+ * Throws `connect.pending_not_found` when no such call was held or stored. `pendingActionId` is the held action, while it
  * waits.
  */
 export const heldOutcome = async (
@@ -264,8 +211,7 @@ export const heldOutcome = async (
   if (idempotencyKey === null) {
     throw connectErrors.create("connect.invalid");
   }
-  const connection = await connectionFor(env, claims, connectionId);
-  const masks = masksFor(connection, claims, action);
+  await connectionFor(env, claims, connectionId);
   const pendingActionId = await waitingUnder(env, claims);
   if (pendingActionId !== undefined) {
     return { outcome: { state: "waiting" }, pendingActionId };
@@ -288,7 +234,7 @@ export const heldOutcome = async (
   }
   let answer: StoredAnswer;
   try {
-    answer = maskedAnswer(replay(row, row.inputHash, Date.now()), masks);
+    answer = replay(row, row.inputHash, Date.now());
   } catch (error) {
     const reason = connectErrors.codeOf(error);
     if (reason === "connect.declined") {
@@ -343,10 +289,6 @@ export const carryOut = async (
   ) {
     throw connectErrors.create("connect.input_too_large");
   }
-  // Before a repeat is answered too: its answer is masked as this
-  // capability says, and a mask connect can't apply is refused as ever.
-  const masks = masksFor(connection, claims, call.action);
-
   // A repeat of a side effect gets its stored result before anything goes
   // out, not even a look at the server's tools.
   const inputHash = await hashCall(resource, input);
@@ -368,7 +310,7 @@ export const carryOut = async (
   const stored = await store?.replay();
   if (stored !== undefined) {
     progress.sideEffect = true;
-    return { ...maskedAnswer(stored, masks), sideEffect: true, replayed: true };
+    return { ...stored, sideEffect: true, replayed: true };
   }
 
   const { tool, open } = await actionFor(env, connection, claims, call.action);
@@ -411,7 +353,7 @@ export const carryOut = async (
     if (didNothing(connection.serverKind, read)) {
       throw notPerformed(read);
     }
-    return { ...answerOf(read, masks), sideEffect, replayed: false };
+    return { ...answerOf(read), sideEffect, replayed: false };
   }
 
   if (store === undefined) {
@@ -421,7 +363,7 @@ export const carryOut = async (
   const server = await open();
   const earlier = await store.claim();
   if (earlier !== undefined) {
-    return { ...maskedAnswer(earlier, masks), sideEffect, replayed: true };
+    return { ...earlier, sideEffect, replayed: true };
   }
   let done: McpToolResult;
   try {
@@ -446,7 +388,7 @@ export const carryOut = async (
     await store.release();
     throw notPerformed(done);
   }
-  const answer = answerOf(done, masks);
+  const answer = answerOf(done);
   return {
     ...answer,
     sideEffect,

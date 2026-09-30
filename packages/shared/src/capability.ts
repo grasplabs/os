@@ -9,7 +9,6 @@ import {
 } from "./ids.ts";
 import {
   authoritySchema,
-  maskFieldsSchema,
   permissionActionSchema,
   workContextSchema,
 } from "./permissions.ts";
@@ -71,11 +70,6 @@ export const capabilityClaimsSchema = z.strictObject({
   /** A side effect's key; connect stores its result under it. */
   idempotencyKey: identifierSchema.nullable(),
   /**
-   * The fields of the result connect masks, from the permission. Only the
-   * capability says it, never the call: the caller can't drop it.
-   */
-  mask: maskFieldsSchema.default([]),
-  /**
    * The chat, App or run making the call has read restricted data (threat
    * model R12, Q12): connect lets it read, as a tool declares, and holds
    * every side effect for the person. Only the capability says it.
@@ -108,8 +102,6 @@ export interface CapabilityScope {
   resource?: string | undefined;
   action: string;
   idempotencyKey?: string | undefined;
-  /** The permission's masked fields: signed, not compared with the call. */
-  mask?: readonly string[] | undefined;
   /** The caller's context is in restricted mode: signed, not compared. */
   restricted?: boolean | undefined;
   /** What core checks again when a held call is confirmed: signed. */
@@ -158,7 +150,6 @@ export const signCapability = async (
   scope: CapabilityScope,
   now: number = Date.now()
 ): Promise<string> => {
-  const mask = [...(scope.mask ?? [])];
   const claims = {
     v: 1,
     aud: "connect",
@@ -170,11 +161,7 @@ export const signCapability = async (
     resource: scope.resource ?? null,
     action: scope.action,
     idempotencyKey: scope.idempotencyKey ?? null,
-    // Only when there is one: a connect of the release before, which
-    // knows no mask, still takes every other capability while a release
-    // rolls out, and refuses a masked one.
-    ...(mask.length === 0 ? {} : { mask }),
-    // The same for restricted mode: a connect that knows none refuses a
+    // Only when set: a connect that knows no restricted mode refuses a
     // capability that says it, which fails closed.
     ...(scope.restricted === true ? { restricted: true } : {}),
     ...(scope.origin === undefined ? {} : { origin: scope.origin }),

@@ -246,9 +246,7 @@ export class ConnectionsApi extends WorkerEntrypoint<Env, AgentScope> {
    * person (connect finds no other), and authorised exactly as that call
    * would be now: by a permission the agent holds now for that action on
    * that connection and that same resource, checked and signed as any
-   * call's (`signedCall`), so the answer comes back under that
-   * permission's mask as it is now, or is refused where connect can't
-   * apply it. Connect records it, as it records a call; what is refused
+   * call's (`signedCall`). Connect records it, as it records a call; what is refused
    * before connect has the call is recorded here, once. What it hands
    * over is recorded with the chat first, as a direct call's answer.
    */
@@ -268,22 +266,14 @@ export class ConnectionsApi extends WorkerEntrypoint<Env, AgentScope> {
         chatId: scope.chatId,
         id: id.data,
       });
-      // The agent's permissions for exactly that call, as they are now;
-      // of several, the one that masks least, as the agent could call by
-      // it directly.
+      // A permission the agent holds for exactly that call, as it is now.
       const grants = await connectionGrants(this.env, scope);
-      const [grant] = grants
-        .filter(
-          ({ connection, actions }) =>
-            connection.connectionId === held.connectionId &&
-            (connection.resource ?? null) === held.resource &&
-            actions.includes(held.action)
-        )
-        .toSorted(
-          (one, other) =>
-            (one.connection.mask?.length ?? 0) -
-            (other.connection.mask?.length ?? 0)
-        );
+      const grant = grants.find(
+        ({ connection, actions }) =>
+          connection.connectionId === held.connectionId &&
+          (connection.resource ?? null) === held.resource &&
+          actions.includes(held.action)
+      );
       if (grant === undefined) {
         throw permissionErrors.create("permission.denied", {
           action: held.action,

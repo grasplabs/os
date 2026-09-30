@@ -663,7 +663,7 @@ export const eventListenersMax = 5000;
 
 /**
  * Who listens for events of `type` on a connection: an App whose current
- * version has an event trigger for `type` and holds an active, unmasked
+ * version has an event trigger for `type` and holds an active
  * permission on the connection that allows the type's read action
  * (`connectorEventActions`), from a version an admin approved. The
  * permission is on the whole connection (`resource` null) or on one
@@ -796,9 +796,8 @@ export interface ConnectApi {
   heldCall: (request: HeldCallRequest) => Promise<HeldCall>;
   /**
    * How a held call ended, for a caller core authorised for that call as
-   * it would be now: its capability is checked as any call's, and the
-   * answer is masked as that capability says, or refused
-   * (`connect.mask_unsupported`) where connect can't. Recorded as a call.
+   * it would be now: its capability is checked as any call's. Recorded as
+   * a call.
    */
   heldOutcome: (request: HeldOutcomeRequest) => Promise<HeldOutcome>;
   /**
@@ -911,8 +910,6 @@ export const connectErrors = defineErrorFamily({
     "This action has a side effect, and changes from chat need the person to confirm them first.",
   "connect.resource_out_of_scope":
     "This call reaches beyond the one resource it may use.",
-  "connect.mask_unsupported":
-    "This permission masks fields this connection's server can't mask, so nothing was done.",
   "connect.idempotency_key_required":
     "This action has a side effect, so it needs an idempotency key.",
   "connect.idempotency_conflict":

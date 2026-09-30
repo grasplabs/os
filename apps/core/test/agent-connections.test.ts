@@ -446,7 +446,7 @@ describe("a chat's connections", setUpTime, () => {
     ]);
   });
 
-  it("read a held call's outcome only as the call would be allowed now: not once its resource's permission is revoked, and under the mask in force now", async () => {
+  it("read a held call's outcome only as the call would be allowed now: not once its resource's permission is revoked", async () => {
     const person = await signedInApi(idp, "user");
     const admin = await signedInApi(idp, "admin");
     // Searches held to the query they name, as the admin's rule says.
@@ -461,19 +461,10 @@ describe("a chat's connections", setUpTime, () => {
       ),
       says("It waits for you.")
     );
-    const permissionFor = async (
-      binding: string,
-      resource: string,
-      mask?: string[]
-    ) =>
+    const permissionFor = async (binding: string, resource: string) =>
       await requestGranted(idp, admin, {
         subject: chat.agent,
-        object: {
-          type: "connection",
-          connectionId: mail.id,
-          resource,
-          ...(mask === undefined ? {} : { mask }),
-        },
+        object: { type: "connection", connectionId: mail.id, resource },
         actions: ["mail.search"],
         binding,
       });
@@ -488,19 +479,12 @@ describe("a chat's connections", setUpTime, () => {
 
     // The permission for that resource goes; one for another stays.
     await admin.api.permissions.revoke(invoices);
-    await pointAtGateway(
-      chat.stub,
-      fakeGateway(outcomeOf(id), says("No."), outcomeOf(id), says("No."))
-    );
+    await pointAtGateway(chat.stub, fakeGateway(outcomeOf(id), says("No.")));
     await chat.ask("What did it find?");
-    // A new permission for it masks a field: this server can't mask.
-    await permissionFor("MASKED", "invoice", ["body"]);
-    await chat.ask("And now?");
 
     await expect(texts(chat.stub, chat.chat.id)).resolves.toStrictEqual([
       `Returned:\n${JSON.stringify({ output: null, pending: { id } })}`,
       `Returned:\n${permissionErrors.create("permission.denied").message}`,
-      `Returned:\n${connectErrors.create("connect.mask_unsupported").message}`,
     ]);
   });
 

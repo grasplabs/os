@@ -16,23 +16,21 @@ export interface Connection {
   person: ConnectionPerson;
 }
 
-export type Extra = Partial<Omit<Call, "connectionId" | "action" | "input">> & {
-  /** The fields the call's permission masks. */
-  mask?: string[];
-};
+export type Extra = Partial<Omit<Call, "connectionId" | "action" | "input">>;
 
 /** Calls `action` as an agent's workflow run for the connection's owner. */
 export const callTool = async (
   connection: Connection,
   action: string,
   input: Call["input"],
-  { mask, ...extra }: Extra = {}
+  extra: Extra = {}
 ): Promise<ConnectResult> =>
-  await callAs(
-    agentFor(connection.person.userId),
-    { connectionId: connection.id, action, input, ...extra },
-    { mask }
-  );
+  await callAs(agentFor(connection.person.userId), {
+    connectionId: connection.id,
+    action,
+    input,
+    ...extra,
+  });
 
 /** A tool's input, as a call carries it. */
 export type Input = Extract<Call["input"], Record<string, unknown>>;

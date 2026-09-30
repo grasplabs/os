@@ -195,7 +195,6 @@ const readFile = defineTool({
   }),
   readOnly: true,
   resource: "drive",
-  mask: ["content"],
   routes: [
     get("/items/{item}"),
     // Graph answers with a redirect to the file on SharePoint, which the
