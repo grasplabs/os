@@ -6,6 +6,7 @@ import type {
   Message,
   SystemMessage,
 } from "@earendil-works/pi-ai";
+import { agentErrors } from "@grasp-os/shared/agent";
 import type { CatalogSkill } from "@grasp-os/shared/knowledge";
 import type { Memory } from "@grasp-os/shared/memory";
 
@@ -298,32 +299,25 @@ export const isMessage = (
 ): message is Message => messageRoles.has(message.role);
 
 /**
- * The share of what a request may send (`AgentModel.inputTokens`) that a
- * chat's turns take. The rest is for what isn't counted, the instructions
- * and the API declarations, and for the estimate being off.
- */
-const historyShare = 0.85;
-
-/**
  * Characters of a transcript's JSON to a token, for sizing without a
  * tokenizer: on the low side (prose is nearer 4), so that code and data,
- * which take more tokens, still fit.
+ * which take more tokens, still fit, and the estimate has room to be off.
  */
 const charsPerToken = 3;
 
-/** {@link historyChars} of a model whose window the catalog doesn't give. */
+/** {@link requestChars} of a model whose window the catalog doesn't give. */
 const unknownWindowChars = 300_000;
 
 /**
- * Most characters of a chat's turns sent with each request, as JSON: what
- * fits in {@link historyShare} of the tokens the model takes, so a model
- * with a large window reads more of a long chat and one with a small
- * window is never sent more than it can take.
+ * Most characters a request sends, as JSON: what fits in the tokens the
+ * model takes (`AgentModel.inputTokens`), so a model with a large window
+ * reads more of a long chat and one with a small window is never sent
+ * more than it can take. The system messages come first (the
+ * instructions, the API declarations, memory and skills, measured as they
+ * are), and the chat's turns get what they leave ({@link recentHistory}).
  */
-export const historyChars = (inputTokens?: number): number =>
-  inputTokens === undefined
-    ? unknownWindowChars
-    : Math.floor(inputTokens * historyShare * charsPerToken);
+export const requestChars = (inputTokens?: number): number =>
+  inputTokens === undefined ? unknownWindowChars : inputTokens * charsPerToken;
 
 /** Where a request leaves a chat's earlier turns out. */
 const leftOut =
@@ -371,41 +365,48 @@ const fitTurnUnderWay = (
 };
 
 /**
- * Which turn each message is in (-1 before the first question), and each
- * turn's size as JSON, its system messages left out.
+ * Which turn each message is in (-1 before the first question), each
+ * turn's size as JSON, its system messages left out, and the size of all
+ * the system messages, which every request sends.
  */
 const measureTurns = (
   messages: readonly Message[]
-): { turns: number[]; sizes: number[] } => {
+): { turns: number[]; sizes: number[]; system: number } => {
   const turns: number[] = [];
   const sizes: number[] = [];
+  let system = 0;
   for (const message of messages) {
     if (message.role === "user") {
       sizes.push(0);
     }
     const turn = sizes.length - 1;
     turns.push(turn);
-    if (message.role !== "system" && turn >= 0) {
-      sizes[turn] = (sizes[turn] ?? 0) + JSON.stringify(message).length;
+    const size = JSON.stringify(message).length;
+    if (message.role === "system") {
+      system += size;
+    } else if (turn >= 0) {
+      sizes[turn] = (sizes[turn] ?? 0) + size;
     }
   }
-  return { turns, sizes };
+  return { turns, sizes, system };
 };
 
 /**
- * What a request sends of a long chat: the system messages (instructions
- * and API declarations), the newest turns that fit in `budget` characters
- * (the model's {@link historyChars}) and always the turn under way (its
- * oldest code results shortened when it alone is over), with a note where
+ * What a request sends of a long chat, in at most `chars` characters (the
+ * model's {@link requestChars}) where it can: the system messages
+ * (instructions, API declarations, memory and skills), the newest turns
+ * that fit in what those leave, and always the turn under way (its oldest
+ * code results shortened when it alone is over), with a note where
  * earlier turns were left out. A turn is a question and everything after
  * it up to the next, so a tool call is never parted from its result.
  */
 export const recentHistory = (
   history: readonly Message[],
-  budget: number
+  chars: number
 ): Message[] => {
   const messages = [...history];
-  const { turns, sizes } = measureTurns(messages);
+  const { turns, sizes, system } = measureTurns(messages);
+  const budget = Math.max(chars - system, 0);
   const turn = sizes.length - 1;
   if (turn >= 0 && (sizes[turn] ?? 0) > budget) {
     sizes[turn] = fitTurnUnderWay(
@@ -531,7 +532,14 @@ export const runTurn = async ({
     { role: "user", content: question, timestamp: Date.now() },
   ];
   const progress: Progress = { steps: 0, runs: 0 };
-  const budget = historyChars(model.inputTokens);
+  const chars = requestChars(model.inputTokens);
+  // A question that doesn't fit next to the system messages is refused
+  // here, before anything is kept or sent: the provider would refuse the
+  // request, and nothing can be left out to make room for it.
+  const asked = measureTurns([...history, ...prompts]);
+  if (asked.system + (asked.sizes.at(-1) ?? 0) > chars) {
+    throw agentErrors.create("agent.question_too_long");
+  }
   await runAgentLoop(
     prompts,
     {
@@ -542,7 +550,7 @@ export const runTurn = async ({
       model: model.model,
       // The transcript holds only pi's own messages.
       convertToLlm: (messages) =>
-        recentHistory(messages.filter(isMessage), budget),
+        recentHistory(messages.filter(isMessage), chars),
       toolExecution: "sequential",
       // Checked again before every model request.
       prepareRequest: async () => {
