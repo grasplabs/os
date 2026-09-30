@@ -311,6 +311,12 @@ const deploymentsOf = (
     );
 };
 
+/** The release each of the client's Workers runs, as the console recorded it. */
+const releasesOf = async (clientId: string): Promise<(string | null)[]> => {
+  const workers = await workersOf(clientId);
+  return workers.map(({ releaseId }) => releaseId);
+};
+
 /** How many deployments each of the account's scripts has had. */
 const deploymentCounts = (account: AccountState): Record<string, number> =>
   Object.fromEntries(
@@ -353,10 +359,11 @@ const runnerOf = async (clientId: string) => {
   return row ?? null;
 };
 
-/** The `FEATURES` var of the core version the console made live on the client. */
-const liveFeaturesOf = async (
+/** The var `name` of the core version the console made live on the client. */
+const liveVarOf = async (
   clientId: string,
-  account: AccountState
+  account: AccountState,
+  name: string
 ): Promise<unknown> => {
   const workers = await workersOf(clientId);
   const core = workers.find(({ worker }) => worker === "core");
@@ -368,7 +375,40 @@ const liveFeaturesOf = async (
         ?.versions.find(({ id }) => id === core?.versionId)?.metadata
         .bindings ?? []
     )
-    .find(({ name }) => name === "FEATURES")?.json;
+    .find((binding) => binding.name === name)?.json;
+};
+
+/** The `FEATURES` var of the core version the console made live on the client. */
+const liveFeaturesOf = async (
+  clientId: string,
+  account: AccountState
+): Promise<unknown> => await liveVarOf(clientId, account, "FEATURES");
+
+/**
+ * What the client's latest deploy changed: as the console audited its
+ * start (`audited`), and as the core version it made live tells the
+ * client's own Activity (`told`, its `PLATFORM_CHANGE`).
+ */
+const latestChangeOf = async (clientId: string, account: AccountState) => {
+  const [started] = await db
+    .select({ detail: auditEvents.detail })
+    .from(auditEvents)
+    .where(
+      and(
+        eq(auditEvents.clientId, clientId),
+        eq(auditEvents.action, "deploy.start")
+      )
+    )
+    // Events of one millisecond in the order they were written.
+    .orderBy(desc(auditEvents.at), desc(sql`rowid`))
+    .limit(1);
+  const { kind } = z
+    .object({ kind: z.string() })
+    .parse(JSON.parse(started?.detail ?? "null"));
+  const { by, what } = platformChangeSchema.parse(
+    await liveVarOf(clientId, account, "PLATFORM_CHANGE")
+  );
+  return { audited: kind, told: { by, what } };
 };
 
 /**
@@ -554,9 +594,14 @@ describe("rolling a release out", () => {
     expect({
       gateway: vars.MODEL_GATEWAY,
       origin: z.object({ origin: z.string() }).parse(vars.SIGN_IN).origin,
+      change: await latestChangeOf(acme.clientId, acme.account),
     }).toMatchObject({
       gateway: { gateway: "grasp-os" },
       origin: `https://${acme.clientId}.grasp.test`,
+      change: {
+        audited: "release",
+        told: { by: staff.email, what: "release" },
+      },
     });
   });
 
@@ -749,12 +794,17 @@ describe("rolling a release out", () => {
     racing.mockRestore();
 
     const [connectNow] = await workersOf(internal.clientId);
+    const actions = await rolloutActions(rolloutId);
     expect({
       recorded: {
         release: connectNow?.releaseId,
         version: connectNow?.versionId,
       },
       targets: await targetsOf(rolloutId),
+      // Stopped by whoever took its client, not by a failure of its own:
+      // its audit trail says what its status does.
+      rollout: await rolloutRow(rolloutId),
+      stopped: actions.at(-1),
       runner: await runnerOf(internal.clientId),
     }).toStrictEqual({
       recorded: { release: before, version: connect?.versionId },
@@ -765,6 +815,8 @@ describe("rolling a release out", () => {
           error: "runner_replaced",
         },
       },
+      rollout: { status: "cancelled", ring: 0 },
+      stopped: "rollout.cancel",
       runner: { runId: "someone-else", kind: "rollout" },
     });
   });
@@ -827,6 +879,8 @@ describe("rolling a release out", () => {
       ),
       newVersion: workers[0]?.versionId !== before?.versionId,
       rotationLive: client?.rotationLiveAt instanceof Date,
+      // Its own secrets on the release it ran already: not a release.
+      change: await latestChangeOf(internal.clientId, internal.account),
     }).toStrictEqual({
       targets: {
         [internal.clientId]: { ring: 0, status: "done", error: null },
@@ -834,10 +888,14 @@ describe("rolling a release out", () => {
       connect: [[100]],
       newVersion: true,
       rotationLive: true,
+      change: {
+        audited: "secrets",
+        told: { by: staff.email, what: "secrets" },
+      },
     });
   });
 
-  it("deploys a client on the release already once staff changed a flag, every Worker at once, so its core gets the flag, and skips it again after", async () => {
+  it("deploys a client on the release already once staff changed a flag, every Worker at once, so its core gets the flag as a settings change, and skips it again after", async () => {
     const release = await importedRelease("feat(core): flagged on it");
     const internal = await activeClient(0, release);
     const [, before] = await workersOf(internal.clientId);
@@ -861,6 +919,8 @@ describe("rolling a release out", () => {
       features: await liveFeaturesOf(internal.clientId, internal.account),
       // Only its config changed, which may be a kill switch: no stages.
       shares: await liveSharesOf(internal.clientId, internal.account, skip),
+      // In the console's audit trail and the client's Activity alike.
+      change: await latestChangeOf(internal.clientId, internal.account),
       again: await targetsOf(again),
     }).toStrictEqual({
       deployed: {
@@ -869,12 +929,52 @@ describe("rolling a release out", () => {
       newVersion: true,
       features: { apps: true },
       shares: { connect: [[100]], core: [[100]] },
+      change: {
+        audited: "settings",
+        told: { by: staff.email, what: "settings" },
+      },
       again: {
         [internal.clientId]: {
           ring: 0,
           status: "skipped",
           error: "on_release",
         },
+      },
+    });
+  });
+
+  it("records a deploy that takes both a flag and a secrets rotation live, on the release the client runs, as both", async () => {
+    const release = await importedRelease("feat(core): flagged and rotated");
+    const internal = await activeClient(0, release);
+    await setFeature(env, staff, {
+      clientId: internal.clientId,
+      feature: "apps",
+      on: true,
+    });
+    await rotateClientSecrets(db, staff, internal.clientId, new Date());
+    await using run = await followRollouts();
+
+    const rolloutId = await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+
+    const [client] = await db
+      .select({ rotationLiveAt: clients.rotationLiveAt })
+      .from(clients)
+      .where(eq(clients.id, internal.clientId));
+    expect({
+      targets: await targetsOf(rolloutId),
+      features: await liveFeaturesOf(internal.clientId, internal.account),
+      rotationLive: client?.rotationLiveAt instanceof Date,
+      change: await latestChangeOf(internal.clientId, internal.account),
+    }).toStrictEqual({
+      targets: {
+        [internal.clientId]: { ring: 0, status: "done", error: null },
+      },
+      features: { apps: true },
+      rotationLive: true,
+      change: {
+        audited: "settings_and_secrets",
+        told: { by: staff.email, what: "settings_and_secrets" },
       },
     });
   });
@@ -1187,6 +1287,79 @@ const cancelled = (
   runner: null,
 });
 
+/**
+ * Makes the next upload of `script` in `account` a refusal no retry
+ * fixes: a rollout that made the Workers before it live stops there, its
+ * client left between two releases.
+ */
+const refuseNextUploadOf = (account: AccountState, script: string): void => {
+  cloudflare.failNext(
+    (call) =>
+      call.method === "POST" &&
+      call.path ===
+        `/accounts/${account.id}/workers/scripts/${script}/versions`,
+    400
+  );
+};
+
+/** The status and error of each deploy of `releaseId` to client `clientId`, oldest first. */
+const deploysOf = async (clientId: string, releaseId: string) =>
+  await db
+    .select({ status: clientDeploys.status, error: clientDeploys.error })
+    .from(clientDeploys)
+    .where(
+      and(
+        eq(clientDeploys.clientId, clientId),
+        eq(clientDeploys.releaseId, releaseId)
+      )
+    )
+    .orderBy(asc(clientDeploys.createdAt), sql`rowid`);
+
+/**
+ * Loses the answer of the `nth` batch from now that starts a deploy: the
+ * batch lands, `meanwhile` runs, and its caller sees it fail, as when the
+ * console's database commits a write and the step dies before it hears
+ * so. `lost` says whether it happened; `restore` puts the database back.
+ */
+const loseDeployStart = (
+  nth: number,
+  meanwhile: () => Promise<void> = async () => {
+    await Promise.resolve();
+  }
+) => {
+  const prepare = env.DB.prepare.bind(env.DB);
+  const batch = env.DB.batch.bind(env.DB);
+  let starts = 0;
+  let starting = false;
+  let lost = false;
+  const prepared = vi.spyOn(env.DB, "prepare").mockImplementation((query) => {
+    if (query.includes('insert into "client_deploys"')) {
+      starts += 1;
+      starting = starts === nth;
+    }
+    return prepare(query);
+  });
+  const batched = vi
+    .spyOn(env.DB, "batch")
+    .mockImplementation(async (statements) => {
+      const results = await batch(statements);
+      if (starting) {
+        starting = false;
+        lost = true;
+        await meanwhile();
+        throw new Error("The answer was lost");
+      }
+      return results;
+    });
+  return {
+    lost: (): boolean => lost,
+    restore: (): void => {
+      prepared.mockRestore();
+      batched.mockRestore();
+    },
+  };
+};
+
 /** The Microsoft OAuth app's secret after a rotation in 1Password. */
 const rotatedMicrosoft = "microsoft-secret-rotated-4b7e1c";
 
@@ -1372,6 +1545,32 @@ describe("rolling new secrets out", () => {
     expect(
       JSON.stringify({ logged, events, deploys, steps, view })
     ).not.toContain(rotatedMicrosoft);
+  });
+
+  it("records a secrets rollout's deploy as settings too when it takes a flag that waited live with the secrets", async () => {
+    const release = await importedRelease("feat(core): a flag was waiting");
+    const internal = await activeClient(0, release);
+    await setFeature(env, staff, {
+      clientId: internal.clientId,
+      feature: "apps",
+      on: true,
+    });
+    await rotateMicrosoftSecret();
+    await using run = await followRollouts();
+
+    await rollOutSecrets({ scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+
+    expect({
+      features: await liveFeaturesOf(internal.clientId, internal.account),
+      change: await latestChangeOf(internal.clientId, internal.account),
+    }).toStrictEqual({
+      features: { apps: true },
+      change: {
+        audited: "settings_and_secrets",
+        told: { by: staff.email, what: "settings_and_secrets" },
+      },
+    });
   });
 
   it("never says the old secrets can go after a rollout that started before deploy-ops wrote a new value, nor once the store changes after it", async () => {
@@ -2611,6 +2810,204 @@ describe("controlling a rollout", () => {
     });
   });
 
+  it("skips and releases a client the rollout claimed when its claim step runs again after a rollback cancelled the rollout", async () => {
+    const before = await importedRelease("feat(core): the release before");
+    const { first, second } = await twoClients(before);
+    const release = await importedRelease(
+      "feat(core): claimed, then cancelled"
+    );
+    const secondCounts = deploymentCounts(second.account);
+    await using rollbacks = await followRollbacks();
+    // The rollout has claimed the second client and reads what it runs:
+    // the first client's rollback lands then, and the next read times
+    // out, so the claim step runs again, with the rollout cancelled.
+    const readsWhatRuns = (call: { method: string; path: string }): boolean =>
+      call.method === "GET" &&
+      call.path.startsWith(`/accounts/${second.account.id}/`) &&
+      call.path.endsWith("/deployments");
+    cloudflare.beforeAnswering(readsWhatRuns, async () => {
+      await rollbacks.rollBack(await openRollout(), first.clientId);
+      cloudflare.failNext(readsWhatRuns, 408);
+    });
+    await using run = await followRollouts();
+
+    const rolloutId = await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+
+    const deploys = await db
+      .select({ id: clientDeploys.id })
+      .from(clientDeploys)
+      .where(
+        and(
+          eq(clientDeploys.clientId, second.clientId),
+          eq(clientDeploys.releaseId, release)
+        )
+      );
+    expect({
+      targets: await targetsOf(rolloutId),
+      rollout: await rolloutRow(rolloutId),
+      secondRunner: await runnerOf(second.clientId),
+      secondDeployments: deploymentCounts(second.account),
+      deploys: deploys.length,
+    }).toStrictEqual({
+      targets: {
+        [first.clientId]: { ring: 0, status: "rolled_back", error: null },
+        [second.clientId]: { ring: 0, status: "skipped", error: "cancelled" },
+      },
+      rollout: { status: "cancelled", ring: 0 },
+      secondRunner: null,
+      secondDeployments: secondCounts,
+      deploys: 0,
+    });
+  });
+
+  it("rolls a client back to what it last ran whole when the rollout that reached it follows one that stopped part way", async () => {
+    const before = await importedRelease("feat(core): the release before");
+    const internal = await activeClient(0, before);
+    const previous = await recordedVersionsOf(internal.clientId);
+    const [connect, core] = await workersOf(internal.clientId);
+    const connectScript = connect?.scriptName ?? "";
+    const release = await importedRelease("feat(core): fails part way");
+    // Connect goes live on the release; core's upload is refused.
+    refuseNextUploadOf(internal.account, core?.scriptName ?? "");
+    await using run = await followRollouts();
+    await using rollbacks = await followRollbacks();
+    const failed = await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("errored");
+    const partWay = {
+      releases: await releasesOf(internal.clientId),
+      targets: await targetsOf(failed),
+    };
+    const skip = deploymentCounts(internal.account)[connectScript] ?? 0;
+
+    // Staff start the rollout again, and it finishes.
+    const again = await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+    const finished = {
+      releases: await releasesOf(internal.clientId),
+      // Connect's new version shared traffic with the one live when the
+      // rollout started again: none went back to the release before.
+      connectBefore: deploymentsOf(internal.account, connectScript, skip, [
+        previous.connect ?? "",
+      ]),
+      // The first rollout's deploy is no longer the client's latest.
+      first: await codeOf(
+        rollbackClient(env, staff, failed, internal.clientId)
+      ),
+    };
+
+    await rollbacks.rollBack(again, internal.clientId);
+
+    expect({
+      partWay,
+      finished,
+      live: await liveVersionsOf(internal.clientId, internal.account),
+      recorded: await recordedVersionsOf(internal.clientId),
+      releases: await releasesOf(internal.clientId),
+      targets: await targetsOf(again),
+    }).toMatchObject({
+      partWay: {
+        releases: [release, before],
+        targets: { [internal.clientId]: { ring: 0, status: "failed" } },
+      },
+      finished: {
+        releases: [release, release],
+        connectBefore: [[0], [0], [0]],
+        first: "superseded",
+      },
+      live: previous,
+      recorded: previous,
+      releases: [before, before],
+      targets: {
+        [internal.clientId]: { ring: 0, status: "rolled_back", error: null },
+      },
+    });
+  });
+
+  it("keeps what a rollback puts back, and starts one deploy, when the claim of a rollout started again runs twice, its first try's answer lost", async () => {
+    const before = await importedRelease("feat(core): the release before");
+    const internal = await activeClient(0, before);
+    const previous = await recordedVersionsOf(internal.clientId);
+    const [, core] = await workersOf(internal.clientId);
+    const release = await importedRelease("feat(core): claimed twice");
+    refuseNextUploadOf(internal.account, core?.scriptName ?? "");
+    await using run = await followRollouts();
+    await using rollbacks = await followRollbacks();
+    await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("errored");
+    const deploysBefore = await deploysOf(internal.clientId, release);
+    // The claim's batch lands, its deploy started, and the step never
+    // hears so: it runs again.
+    const losing = loseDeployStart(1);
+
+    const again = await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+    losing.restore();
+    const onRelease = await releasesOf(internal.clientId);
+    const deploys = await deploysOf(internal.clientId, release);
+    await rollbacks.rollBack(again, internal.clientId);
+
+    expect({
+      lost: losing.lost(),
+      started: deploys.length - deploysBefore.length,
+      onRelease,
+      live: await liveVersionsOf(internal.clientId, internal.account),
+      releases: await releasesOf(internal.clientId),
+      targets: await targetsOf(again),
+    }).toStrictEqual({
+      lost: true,
+      // The second try went on with the deploy the first started.
+      started: 1,
+      onRelease: [release, release],
+      live: previous,
+      releases: [before, before],
+      targets: {
+        [internal.clientId]: { ring: 0, status: "rolled_back", error: null },
+      },
+    });
+  });
+
+  it("leaves no deploy running when a claim that started one runs again after a rollback cancelled the rollout", async () => {
+    const before = await importedRelease("feat(core): the release before");
+    const { first, second } = await twoClients(before);
+    const release = await importedRelease(
+      "feat(core): started, then cancelled"
+    );
+    const secondCounts = deploymentCounts(second.account);
+    await using rollbacks = await followRollbacks();
+    await using run = await followRollouts();
+    // The second client's claim starts its deploy, and the step dies
+    // before it hears so; the first client's rollback lands meanwhile, so
+    // the step runs again with the rollout cancelled.
+    const losing = loseDeployStart(2, async () => {
+      await rollbacks.rollBack(await openRollout(), first.clientId);
+    });
+
+    const rolloutId = await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+    losing.restore();
+
+    expect({
+      lost: losing.lost(),
+      targets: await targetsOf(rolloutId),
+      rollout: await rolloutRow(rolloutId),
+      deploys: await deploysOf(second.clientId, release),
+      runner: await runnerOf(second.clientId),
+      deployments: deploymentCounts(second.account),
+    }).toStrictEqual({
+      lost: true,
+      targets: {
+        [first.clientId]: { ring: 0, status: "rolled_back", error: null },
+        [second.clientId]: { ring: 0, status: "skipped", error: "cancelled" },
+      },
+      rollout: { status: "cancelled", ring: 0 },
+      // The one it started, ended: none left running with no target.
+      deploys: [{ status: "failed", error: "cancelled" }],
+      runner: null,
+      deployments: secondCounts,
+    });
+  });
+
   it("stops a client whose rollout is cancelled while it's prepared, before any upload", async () => {
     const before = await importedRelease("feat(core): the release before");
     const { first, second } = await twoClients(before);
@@ -3357,7 +3754,7 @@ describe("applying a client's settings now", () => {
     };
   };
 
-  it("deploys the release a client runs again with its new flag, every Worker at once, audited, and releases the client", async () => {
+  it("deploys the release a client runs again with its new flag, every Worker at once, audited and told to its core as a settings change, and releases the client", async () => {
     const release = await importedRelease("feat(core): apply me");
     const client = await activeClient(1, release);
     const skip = deploymentCounts(client.account);
@@ -3390,6 +3787,8 @@ describe("applying a client's settings now", () => {
       pending: shown?.configPending,
       runner: await runnerOf(client.clientId),
       event,
+      // Not a release: the client's Activity says what staff changed.
+      change: await latestChangeOf(client.clientId, client.account),
     }).toStrictEqual({
       runId: true,
       features: { memory: true },
@@ -3398,6 +3797,44 @@ describe("applying a client's settings now", () => {
       pending: false,
       runner: null,
       event: { actor: staff.email, target: null },
+      change: {
+        audited: "settings",
+        told: { by: staff.email, what: "settings" },
+      },
+    });
+  });
+
+  it("records applying a client's settings as its secrets' too when a rotation of them waited for a deploy", async () => {
+    const release = await importedRelease(
+      "feat(core): applied with a rotation"
+    );
+    const client = await activeClient(1, release);
+    await setFeature(env, staff, {
+      clientId: client.clientId,
+      feature: "memory",
+      on: true,
+    });
+    await rotateClientSecrets(db, staff, client.clientId, new Date());
+    await using applies = await followApplies();
+
+    await applySettings(env, staff, client.clientId);
+    await applies.settledLatest();
+
+    const [record] = await db
+      .select({ rotationLiveAt: clients.rotationLiveAt })
+      .from(clients)
+      .where(eq(clients.id, client.clientId));
+    expect({
+      features: await liveFeaturesOf(client.clientId, client.account),
+      rotationLive: record?.rotationLiveAt instanceof Date,
+      change: await latestChangeOf(client.clientId, client.account),
+    }).toStrictEqual({
+      features: { memory: true },
+      rotationLive: true,
+      change: {
+        audited: "settings_and_secrets",
+        told: { by: staff.email, what: "settings_and_secrets" },
+      },
     });
   });
 

@@ -15,8 +15,10 @@ export const platformChangeSchema = z.object({
   /** The staff member, or the rollout, that made the change. */
   by: identifierSchema,
   /**
-   * What changed, e.g. `release`, `secrets` (new shared secrets on the
-   * same release), `settings` or `rollback`.
+   * What changed, e.g. `release`, `secrets` (new secrets on the same
+   * release: shared ones, or the deployment's own after a rotation),
+   * `settings` (its flags or sign-in, on the same release),
+   * `settings_and_secrets` (both in one version) or `rollback`.
    */
   what: identifierSchema,
   /** The release the version runs, e.g. `r000123-abcdef0`. */

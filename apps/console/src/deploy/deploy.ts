@@ -44,6 +44,7 @@ import type { ReleaseManifest, WorkerEntry } from "@grasp-os/shared/release";
 import { deriveRouterSecret, newClientIdSchema } from "@grasp-os/shared/router";
 import { and, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
+import type { BatchItem } from "drizzle-orm/batch";
 import { z } from "zod";
 
 import { CloudflareApiError } from "../cloudflare/api.ts";
@@ -145,22 +146,45 @@ export const errorCode = (error: unknown): string => {
 const actorName = (actor: Actor): string =>
   actor === "system" ? actor : actor.email;
 
-/** What a deploy deploys: a release, or only new secrets on the one the client runs. */
+/**
+ * What a deploy deploys: a release, or only new secrets, only the
+ * client's settings, or both on the one it runs.
+ */
 export type DeployKind = (typeof clientDeploys.kind.enumValues)[number];
+
+/**
+ * What a deploy of the release a client runs already takes live, as its
+ * core records it: its `settings`, new `secrets`, or both in one version
+ * (`settings_and_secrets`). Every deploy carries whatever of the two
+ * waits, so its record names each that does.
+ */
+export const redeployKind = (changes: {
+  settings: boolean;
+  secrets: boolean;
+}): DeployKind => {
+  if (changes.settings && changes.secrets) {
+    return "settings_and_secrets";
+  }
+  return changes.settings ? "settings" : "secrets";
+};
 
 /**
  * Starts deploying release `releaseId` to client `clientId`, and returns
  * the deploy's id for `runDeploy`. The client's older deploys that hadn't
  * finished are superseded in the same batch. A client whose id can't be
- * its hostname (`newClientIdSchema`) is refused. A `secrets` deploy runs
- * the same steps; core records it as new secrets rather than a release.
+ * its hostname (`newClientIdSchema`) is refused. A `secrets` or
+ * `settings` deploy runs the same steps; core records it as new secrets
+ * or settings rather than a release. `recording` gives what else records
+ * the deploy (a rollout's target naming it), written in the same batch:
+ * no deploy starts that its starter has no record of.
  */
 export const startDeploy = async (
   db: ConsoleDatabase,
   actor: Actor,
   clientId: string,
   releaseId: string,
-  kind: DeployKind = "release"
+  kind: DeployKind = "release",
+  recording: (deployId: string) => readonly BatchItem<"sqlite">[] = () => []
 ): Promise<string> => {
   if (!newClientIdSchema.safeParse(clientId).success) {
     throw new DeployError(
@@ -193,6 +217,7 @@ export const startDeploy = async (
         createdAt: now,
         updatedAt: now,
       }),
+      ...recording(id),
     ],
     {
       action: "deploy.start",
@@ -353,8 +378,8 @@ const settingValue = (key: string, value: string): unknown => {
  * client's setting of the same name, if it has one; its other settings,
  * each a JSON var named by its deployment config var (and nothing else:
  * `unknown_setting`); and `PLATFORM_CHANGE`, which core records as
- * `platform.updated`: a `release`, or new `secrets` on the release it
- * runs. Refused unless core would take every one of them
+ * `platform.updated`: a `release`, or new `secrets` or `settings` on the
+ * release it runs. Refused unless core would take every one of them
  * (`checkDeployedConfig`; `setting_invalid` too for a setting that isn't
  * JSON).
  */

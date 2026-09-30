@@ -56,7 +56,10 @@ export class MissingStoreSecretError extends Error {
  * and nothing of its value: deploy-ops writes every one of them, so a gap
  * is a store to fix, not a secret to leave off.
  */
-const storeSecret = async (env: Env, name: StoreSecret): Promise<string> => {
+export const storeSecret = async (
+  env: Env,
+  name: StoreSecret
+): Promise<string> => {
   let value = "";
   try {
     value = await env[name].get();

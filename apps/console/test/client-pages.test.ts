@@ -11,6 +11,7 @@ import { importReleases } from "../src/releases/import.ts";
 import { mockAccess } from "./access.ts";
 import { page } from "./pages.ts";
 import { publishRelease } from "./releases.ts";
+import { adminOf } from "./secrets-store.ts";
 
 mockAccess();
 
@@ -302,14 +303,21 @@ describe("the client pages", () => {
 
   it("show a client's ring, flags and sign-in to change, what waits for its next deploy, and its history", async () => {
     const client = await recordClient("active");
-    await setSignIn(env, staff, {
-      clientId: client.id,
-      signIn: {
-        domains: ["acme.test"],
-        admins: ["ada@acme.test"],
-        googleHostedDomain: "acme.test",
-      },
-    });
+    // The key a sign-in change fingerprints its admins with, for its audit.
+    const store = await adminOf(env.CLIENT_KEY);
+    const key = await store.create("test-client-key");
+    try {
+      await setSignIn(env, staff, {
+        clientId: client.id,
+        signIn: {
+          domains: ["acme.test"],
+          admins: ["ada@acme.test"],
+          googleHostedDomain: "acme.test",
+        },
+      });
+    } finally {
+      await store.delete(key);
+    }
     await setFeature(env, staff, {
       clientId: client.id,
       feature: "knowledge_uploads",

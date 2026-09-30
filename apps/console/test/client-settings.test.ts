@@ -12,6 +12,8 @@ import {
 } from "../src/clients/settings.ts";
 import { act, consoleDatabase } from "../src/db/act.ts";
 import { auditEvents, clients, settings } from "../src/db/schema.ts";
+import { racingDb } from "./racing-db.ts";
+import { emptyStoreSecret, useStoreSecrets } from "./secrets-store.ts";
 
 const db = consoleDatabase(env.DB);
 const staff = { email: "staff@grasp.test", sub: "sub-staff" };
@@ -84,7 +86,29 @@ const recordOf = async (clientId: string) => {
   return row;
 };
 
+/** A keyed fingerprint, as the audit log records one: an HMAC-SHA256, hex. */
+const fingerprintPattern = /^[0-9a-f]{64}$/u;
+
+/** A sign-in change's audit detail: what it says of the admins it set. */
+const signInDetailSchema = z.looseObject({
+  admins: z.number(),
+  adminsFingerprint: z.string(),
+});
+
+/** What each of client `clientId`'s sign-in changes recorded, oldest first. */
+const signInDetailsOf = async (clientId: string) => {
+  const events = await eventsOf(clientId, "client.sign_in");
+  return events.map(({ detail }) =>
+    signInDetailSchema.parse(JSON.parse(detail ?? "null"))
+  );
+};
+
 describe("a client's settings", () => {
+  useStoreSecrets({
+    deployer: "test-deployer-token-settings-2b9d41",
+    tenant: "test-tenant-admin-token-settings-7e0c63",
+  });
+
   it("move a client to another ring, audited once per change, and leave its config as it was", async () => {
     const clientId = await recordClient();
 
@@ -204,7 +228,7 @@ describe("a client's settings", () => {
     });
   });
 
-  it("change a client's sign-in, audited with its domains and IdP but never its admins' emails, and mark its config changed", async () => {
+  it("change a client's sign-in, audited with its domains, its IdP and a fingerprint of its admins but never their emails, and mark its config changed", async () => {
     const clientId = await recordClient();
     const changedTo = {
       domains: ["acme.test", "acme-group.test"],
@@ -219,13 +243,19 @@ describe("a client's settings", () => {
 
     const record = await recordOf(clientId);
     const events = await eventsOf(clientId, "client.sign_in");
+    const details = await signInDetailsOf(clientId);
     const shown = await clientSettings(db, clientId);
     expect({
       changed,
       signIn: z.unknown().parse(JSON.parse(record?.signIn ?? "null")),
       marked: record?.configChangedAt instanceof Date,
       shown: shown?.signIn,
-      events,
+      events: events.map(({ actor, target }) => ({ actor, target })),
+      // Every field it records: its admins as a count and a fingerprint.
+      details: details.map((detail) => ({
+        ...detail,
+        adminsFingerprint: fingerprintPattern.test(detail.adminsFingerprint),
+      })),
       emailsAudited: events.some(
         ({ detail }) => detail?.includes("@") === true
       ),
@@ -234,18 +264,146 @@ describe("a client's settings", () => {
       signIn: changedTo,
       marked: true,
       shown: changedTo,
-      events: [
+      events: [{ actor: staff.email, target: null }],
+      details: [
         {
-          actor: staff.email,
-          target: null,
-          detail: JSON.stringify({
-            domains: "acme.test,acme-group.test",
-            admins: 1,
-            entraTenantId: "8f3c9a52-1d4e-4b6f-9a2c-3e5d7f9b1c2a",
-          }),
+          domains: "acme.test,acme-group.test",
+          admins: 1,
+          adminsFingerprint: true,
+          entraTenantId: "8f3c9a52-1d4e-4b6f-9a2c-3e5d7f9b1c2a",
         },
       ],
       emailsAudited: false,
+    });
+  });
+
+  it("tell which admins each sign-in change set: another fingerprint for another admin, the same for the same people in any order, and another at another client", async () => {
+    const clientId = await recordClient();
+    const elsewhere = await recordClient();
+    const withAdmins = (...admins: string[]) => ({ ...signIn, admins });
+
+    await setSignIn(env, staff, {
+      clientId,
+      signIn: withAdmins("ada@acme.test", "bo@acme.test"),
+    });
+    await setSignIn(env, staff, {
+      clientId,
+      signIn: withAdmins("ada@acme.test", "cy@acme.test"),
+    });
+    await setSignIn(env, staff, {
+      clientId,
+      signIn: withAdmins("bo@acme.test", "ada@acme.test"),
+    });
+    await setSignIn(env, staff, {
+      clientId: elsewhere,
+      signIn: withAdmins("ada@acme.test", "bo@acme.test"),
+    });
+
+    const [first, swapped, back] = await signInDetailsOf(clientId);
+    const [atOther] = await signInDetailsOf(elsewhere);
+    expect({
+      // The count alone can't tell the three apart.
+      counts: [first?.admins, swapped?.admins, back?.admins],
+      swapped: swapped?.adminsFingerprint === first?.adminsFingerprint,
+      back: back?.adminsFingerprint === first?.adminsFingerprint,
+      elsewhere: atOther?.adminsFingerprint === first?.adminsFingerprint,
+    }).toStrictEqual({
+      counts: [2, 2, 2],
+      swapped: false,
+      back: true,
+      elsewhere: false,
+    });
+  });
+
+  it("apply and audit a sign-in saved as the client had it when another staff member changed it a moment before, never calling it no change", async () => {
+    const clientId = await recordClient();
+    const shown = { ...signIn, admins: ["cy@acme.test"] };
+    await setSignIn(env, staff, { clientId, signIn: shown });
+    // Another staff member's change lands right before this save's write.
+    let raced = false;
+    const racing = racingDb(async () => {
+      if (!raced) {
+        raced = true;
+        await setSignIn(env, other, {
+          clientId,
+          signIn: { ...signIn, admins: ["bo@acme.test"] },
+        });
+      }
+    });
+
+    const changed = await setSignIn({ ...env, DB: racing }, staff, {
+      clientId,
+      signIn: shown,
+    });
+
+    const record = await recordOf(clientId);
+    // By who made each, whatever order their moments put them in: this
+    // save's event is timed before the other's write, which lands first.
+    const events = await eventsOf(clientId, "client.sign_in");
+    const admins = (actor: string): string[] =>
+      events
+        .filter((event) => event.actor === actor)
+        .map(
+          ({ detail }) =>
+            signInDetailSchema.parse(JSON.parse(detail ?? "null"))
+              .adminsFingerprint
+        );
+    const [first, again, ...more] = admins(staff.email);
+    const theirs = admins(other.email);
+    expect({
+      raced,
+      changed,
+      signIn: z.unknown().parse(JSON.parse(record?.signIn ?? "null")),
+      // Both of this staff member's saves audited, the second as the same
+      // admins as the first; the other's one change as others.
+      audited: { again: again === first, more: more.length },
+      theirs: theirs.map((fingerprint) => fingerprint === first),
+    }).toStrictEqual({
+      raced: true,
+      changed: true,
+      signIn: shown,
+      audited: { again: true, more: 0 },
+      theirs: [false],
+    });
+  });
+
+  it("refuse a change of sign-in while Secrets Store has no key to fingerprint its admins with, and still take the one it has as no change", async () => {
+    const clientId = await recordClient();
+    const current = { ...signIn, admins: ["cy@acme.test"] };
+    await setSignIn(env, staff, { clientId, signIn: current });
+    // What an open form still shows, from before that change.
+    const stale = signIn;
+    const before = await recordOf(clientId);
+    await emptyStoreSecret(env.CLIENT_KEY, "CLIENT_KEY");
+
+    const saved = {
+      // The form saved as it is: nothing to record, so no key is needed.
+      unchanged: await setSignIn(env, staff, { clientId, signIn: current }),
+      changed: await codeOf(
+        setSignIn(env, staff, {
+          clientId,
+          signIn: { ...signIn, admins: ["bo@acme.test"] },
+        })
+      ),
+      // Unchanged as its form saw it, but not what the client has now:
+      // refused, never called no change.
+      stale: await codeOf(setSignIn(env, staff, { clientId, signIn: stale })),
+    };
+
+    const events = await eventsOf(clientId, "client.sign_in");
+    expect({
+      saved,
+      record: await recordOf(clientId),
+      events: events.length,
+    }).toStrictEqual({
+      saved: {
+        unchanged: false,
+        changed: "store_secret_missing",
+        stale: "store_secret_missing",
+      },
+      record: before,
+      // The one change made while the store had its key.
+      events: 1,
     });
   });
 

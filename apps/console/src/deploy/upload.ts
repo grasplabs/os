@@ -199,7 +199,10 @@ export interface UploadInputs {
 }
 
 /** HMAC-SHA256 of `inputs`, as canonical JSON, under `key`: hex. */
-const keyedHash = async (key: CryptoKey, inputs: unknown): Promise<string> => {
+export const keyedHash = async (
+  key: CryptoKey,
+  inputs: unknown
+): Promise<string> => {
   const mac = await crypto.subtle.sign(
     "HMAC",
     key,

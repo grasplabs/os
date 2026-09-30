@@ -30,7 +30,7 @@
 import { log } from "@grasp-os/shared/log";
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
-import { and, desc, eq, inArray, lt } from "drizzle-orm";
+import { and, desc, eq, inArray, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 
 import type { Staff } from "../access.ts";
@@ -191,7 +191,9 @@ const storedConfirmed = async (
         eq(auditEvents.action, "rollout.client_rolled_back")
       )
     )
-    .orderBy(desc(auditEvents.at))
+    // Newest first, as every read of the audit log orders it: by time,
+    // then in the order written.
+    .orderBy(desc(auditEvents.at), desc(sql`rowid`))
     .limit(1);
   const parsed = detailSchema.safeParse(JSON.parse(row?.detail ?? "null"));
   const detail = parsed.success ? parsed.data : {};

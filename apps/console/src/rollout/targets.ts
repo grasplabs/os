@@ -21,6 +21,7 @@ import {
   releases,
   rolloutTargets,
 } from "../db/schema.ts";
+import { latestDeployOf } from "../deploy/deploy.ts";
 import { mappedGeneration } from "../deploy/router.ts";
 import type { RouterHosts } from "../deploy/router.ts";
 
@@ -298,4 +299,41 @@ export const parsePrevious = (previous: string | null): PreviousRun | null => {
   }
   const parsed = previousRunSchema.safeParse(JSON.parse(previous));
   return parsed.success ? parsed.data : null;
+};
+
+/**
+ * A target's statuses while its rollout started on the client and never
+ * finished it: part way (its rollout's run ended without recording it),
+ * failed, or stopped.
+ */
+const unfinished = ["deploying", "failed", "stopped"] as const;
+
+/**
+ * What client `clientId` ran before the rollout that last deployed to it,
+ * when that rollout never finished it and nothing was deployed since (its
+ * deploy is the client's latest, and not done); null otherwise. The
+ * client may be part way between that and the rollout's release (one
+ * Worker live, the next failed), so what it runs now is nothing to roll
+ * back to: the next rollout carries this forward as its own `previous`,
+ * and a rollback of it puts the client back where it last ran whole.
+ */
+export const unfinishedPrevious = async (
+  db: ConsoleDatabase,
+  clientId: string
+): Promise<PreviousRun | null> => {
+  const latest = await latestDeployOf(db, clientId);
+  if (latest === undefined || latest.status === "done") {
+    return null;
+  }
+  const [target] = await db
+    .select({ previous: rolloutTargets.previous })
+    .from(rolloutTargets)
+    .where(
+      and(
+        eq(rolloutTargets.clientId, clientId),
+        eq(rolloutTargets.deployId, latest.id),
+        inArray(rolloutTargets.status, [...unfinished])
+      )
+    );
+  return parsePrevious(target?.previous ?? null);
 };
