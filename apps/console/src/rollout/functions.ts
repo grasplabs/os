@@ -161,8 +161,9 @@ export const pinClientFn = createServerFn({ method: "POST" })
 
 /**
  * A client's drift, read live from its account, with whether it runs the
- * shared secrets in Secrets Store now (null while the store can't be
- * read).
+ * shared secrets in Secrets Store now: null when that can't be told, the
+ * store unreadable or, as `sharedSecretsStatus` finds it, the client's
+ * drift unknown.
  */
 export type DriftCheck = ClientDrift & { sharedSecretsCurrent: boolean | null };
 
@@ -194,7 +195,8 @@ export const fetchDrift = createServerFn({ method: "GET" })
 
 /**
  * Whether secrets rollout `rolloutId`'s old shared secrets can be
- * revoked, read live from every active client's account when staff ask.
+ * revoked, read live from every active client's account when staff ask,
+ * a few at a time, each within a deadline.
  */
 export const checkRevocationFn = createServerFn({ method: "GET" })
   .validator(rolloutSchema)

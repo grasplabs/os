@@ -52,7 +52,8 @@ export const fetchClientGrid = createServerFn({ method: "GET" }).handler(
 
 /**
  * Each active client's live columns, by id, read after the grid shows
- * (`gridLive`): a few at a time, each within a deadline, kept a minute.
+ * (`gridLive`): a few at a time, each within a deadline, kept a minute
+ * unless anything in them is unknown.
  */
 export const fetchGridLive = createServerFn({ method: "GET" }).handler(
   async () => await gridLive(env, new Date())

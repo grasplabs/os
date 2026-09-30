@@ -308,11 +308,12 @@ const Clients = () => {
           </Table>
           <p className="text-muted-foreground text-sm">
             Drift, shared secrets, health and cost are read from each active
-            client&apos;s account after the page shows, and kept for a minute.
-            Cost is an estimate for the calendar month: its Workers Paid plan
-            with requests and CPU time past what it includes (which resets on
-            its billing cycle, not the 1st), and AI Gateway spend. Storage (D1,
-            R2) and Durable Objects aren&apos;t in it.
+            client&apos;s account after the page shows, and kept for a minute; a
+            client with anything unknown is read again on the next load. Cost is
+            an estimate for the calendar month: its Workers Paid plan with
+            requests and CPU time past what it includes (which resets on its
+            billing cycle, not the 1st), and AI Gateway spend. Storage (D1, R2)
+            and Durable Objects aren&apos;t in it.
           </p>
         </>
       )}

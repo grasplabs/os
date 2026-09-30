@@ -206,14 +206,33 @@ describe("the client grid", () => {
     });
   });
 
-  it("reads a few clients at a time, stops one that takes too long, aborting its requests, and keeps each answer a minute", async () => {
+  it("reads a few clients at a time, stops one that takes too long, aborting its requests, keeps each whole answer a minute, and reads one with anything unknown again", async () => {
     const release = await importedRelease("feat(core): many live");
     const all = [];
     for (let index = 0; index < 4; index += 1) {
       // oxlint-disable-next-line no-await-in-loop -- one deploy at a time
-      all.push(await liveClient(release));
+      const client = await liveClient(release);
+      client.account.usage = someUsage;
+      all.push(client);
     }
-    const [slow] = all;
+    const [slow, unread, ...whole] = all;
+    // An unknown answer for a client that answers, kept a moment ago as
+    // the console kept them before: never served.
+    const [stale] = whole;
+    const kept = await caches.open("grid-live");
+    await kept.put(
+      `https://grid-live.console.invalid/${encodeURIComponent(stale?.clientId ?? "")}`,
+      Response.json(
+        {
+          drift: "unknown",
+          sharedSecretsCurrent: null,
+          reach: "unknown",
+          day: null,
+          costUsd: null,
+        },
+        { headers: { "cache-control": "max-age=60" } }
+      )
+    );
     // The slow client's account doesn't answer until the test lets it.
     const held = Promise.withResolvers<boolean>();
     cloudflare.beforeAnswering(
@@ -222,6 +241,14 @@ describe("the client grid", () => {
       async () => {
         await held.promise;
       }
+    );
+    // Another's account refuses one Worker's deployments listing, once.
+    cloudflare.failNext(
+      ({ path }) =>
+        path.startsWith(
+          `/accounts/${unread?.account.id ?? ""}/workers/scripts/`
+        ) && path.endsWith("/deployments"),
+      400
     );
     const options: LiveOptions = {
       ...defaultLiveOptions,
@@ -233,35 +260,51 @@ describe("the client grid", () => {
     const first = await gridLive(env, new Date(), options);
     const peak = cloudflare.peakAccounts();
     const aborted = cloudflare.abortedCalls();
-    const callsBefore = all.map(({ account }) => callsFor(account));
-    const again = await gridLive(env, new Date(), options);
-    const callsAfter = all.map(({ account }) => callsFor(account));
+    // Both accounts answer from here on.
     held.resolve(true);
+    const callsBefore = whole.map(({ account }) => callsFor(account));
+    const again = await gridLive(env, new Date(), options);
+    const callsAfter = whole.map(({ account }) => callsFor(account));
 
     expect({
       peak,
       // Its stalled request was aborted, not left running past the deadline.
       aborted: aborted > 0,
-      slow: first[slow?.clientId ?? ""],
-      others: all.slice(1).map(({ clientId }) => first[clientId]?.reach),
-      // Kept: the second read asked no account anything.
-      again: again[all[1]?.clientId ?? ""]?.reach,
+      first: {
+        slow: first[slow?.clientId ?? ""],
+        unread: first[unread?.clientId ?? ""],
+        whole: whole.map(({ clientId }) => first[clientId]?.reach),
+      },
+      again: {
+        // Not kept while unknown: read again, now that they answer.
+        slow: again[slow?.clientId ?? ""],
+        unread: again[unread?.clientId ?? ""],
+        whole: whole.map(({ clientId }) => again[clientId]?.reach),
+      },
+      // Kept: the second read asked their accounts nothing.
       calls: callsAfter.map(
         (count, index) => count - (callsBefore[index] ?? 0)
       ),
-    }).toStrictEqual({
+    }).toMatchObject({
       peak: 2,
       aborted: true,
-      slow: {
-        drift: "unknown",
-        sharedSecretsCurrent: null,
-        reach: "unknown",
-        day: null,
-        costUsd: null,
+      first: {
+        slow: {
+          drift: "unknown",
+          sharedSecretsCurrent: null,
+          reach: "unknown",
+          day: null,
+          costUsd: null,
+        },
+        unread: { drift: "unknown", reach: "reachable" },
+        whole: whole.map(() => "reachable"),
       },
-      others: all.slice(1).map(() => "reachable"),
-      again: "reachable",
-      calls: all.map(() => 0),
+      again: {
+        slow: { drift: "in_sync", reach: "reachable" },
+        unread: { drift: "in_sync", reach: "reachable" },
+        whole: whole.map(() => "reachable"),
+      },
+      calls: whole.map(() => 0),
     });
   });
 

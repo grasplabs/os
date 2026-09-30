@@ -10,9 +10,10 @@
  * (Secrets Store, the analytics of all their accounts, release manifests)
  * read once. Each client's answer is kept for a minute, so reloading the
  * page doesn't read the accounts again. Whatever doesn't answer in time
- * shows as unknown; nothing live fails the grid.
+ * shows as unknown, and is read again the next time: only an answer with
+ * nothing unknown in it is kept. Nothing live fails the grid.
  */
-import { deadline, whenAborted } from "@grasp-os/shared/deadline";
+import { deadline } from "@grasp-os/shared/deadline";
 import { log } from "@grasp-os/shared/log";
 import { deriveRouterSecret } from "@grasp-os/shared/router";
 import { asc, sql } from "drizzle-orm";
@@ -36,6 +37,8 @@ import { importedManifest } from "../deploy/release.ts";
 import { answeringVersion, mappedRoute } from "../deploy/router.ts";
 import type { RouterHosts } from "../deploy/router.ts";
 import type { DeploySecrets } from "../deploy/secrets.ts";
+import { defaultLiveReadLimits, eachLimited, within } from "../live-reads.ts";
+import type { LiveReadLimits } from "../live-reads.ts";
 import { driftOf } from "../rollout/drift.ts";
 import type { ManifestOf } from "../rollout/drift.ts";
 import { sharedSecretsStatus, storeCheck } from "../rollout/shared-secrets.ts";
@@ -89,21 +92,16 @@ export interface GridRow {
 const healthTimeoutMs = 5000;
 
 /**
- * How reading live columns may go: how many clients at once, how long one
- * client may take all told, and whether answers are kept a minute.
+ * How reading live columns may go: how many clients at once and how long
+ * one client may take all told (`LiveReadLimits`), and whether answers are
+ * kept a minute.
  */
-export interface LiveOptions {
-  concurrency: number;
-  rowDeadlineMs: number;
-  /** The most an API call waits between its retries, all told. */
-  waitBudgetMs: number;
+export interface LiveOptions extends LiveReadLimits {
   cache: boolean;
 }
 
 export const defaultLiveOptions: LiveOptions = {
-  concurrency: 4,
-  rowDeadlineMs: 15_000,
-  waitBudgetMs: 5000,
+  ...defaultLiveReadLimits,
   cache: true,
 };
 
@@ -125,6 +123,18 @@ const unknownStatus: LiveStatus = {
   day: null,
   costUsd: null,
 };
+
+/**
+ * Whether every column of `live` was read. Only such an answer is kept:
+ * an unknown is an account, the store or the analytics not answering, and
+ * kept, it would still show as unknown a minute after they answer again.
+ */
+const allKnown = (live: LiveStatus): boolean =>
+  live.drift !== "unknown" &&
+  live.sharedSecretsCurrent !== null &&
+  live.reach !== "unknown" &&
+  live.day !== null &&
+  live.costUsd !== null;
 
 /**
  * Every client, as the console recorded it, by id: two queries, whatever
@@ -316,26 +326,6 @@ const ifStored = async <T>(read: () => Promise<T>): Promise<T | null> => {
 };
 
 /**
- * What `task` answers within `ms`, or `fallback` once that's up. The
- * signal it's given aborts then, stopping the requests it has under way,
- * so none outlives the deadline.
- */
-const within = async <T>(
-  ms: number,
-  task: (signal: AbortSignal) => Promise<T>,
-  fallback: T
-): Promise<T> => {
-  const limit = deadline(ms);
-  try {
-    return await Promise.race([task(limit.signal), whenAborted(limit.signal)]);
-  } catch {
-    return fallback;
-  } finally {
-    limit.clear();
-  }
-};
-
-/**
  * `accountIds`' usage, its requests stopped after `ms`: each request's
  * answer stands as it comes, and one still going then is aborted, so only
  * its own accounts are unknown (`accountUsage` never throws).
@@ -354,34 +344,11 @@ const usageWithin = async (
   }
 };
 
-/** `run` for each of `items`, at most `limit` at once, in order. */
-const eachLimited = async <T, R>(
-  items: readonly T[],
-  limit: number,
-  run: (item: T) => Promise<R>
-): Promise<R[]> => {
-  const results: R[] = [];
-  let next = 0;
-  const worker = async (): Promise<void> => {
-    while (next < items.length) {
-      const index = next;
-      next += 1;
-      const item = items[index];
-      if (item !== undefined) {
-        // oxlint-disable-next-line no-await-in-loop -- one at a time per worker
-        results[index] = await run(item);
-      }
-    }
-  };
-  await Promise.all(
-    Array.from({ length: Math.min(limit, items.length) }, worker)
-  );
-  return results;
-};
-
 /**
  * Client `clientId`'s live answer kept within the last minute, if any. A
- * cache that fails to answer is a miss: the answer is read again.
+ * cache that fails to answer is a miss, and so is a kept answer with
+ * anything unknown in it (`allKnown`; none is kept now, but one kept
+ * before that rule may still be there): the answer is read again.
  */
 const cached = async (clientId: string): Promise<LiveStatus | undefined> => {
   try {
@@ -391,7 +358,7 @@ const cached = async (clientId: string): Promise<LiveStatus | undefined> => {
       return undefined;
     }
     const parsed = liveStatusSchema.safeParse(await hit.json());
-    return parsed.success ? parsed.data : undefined;
+    return parsed.success && allKnown(parsed.data) ? parsed.data : undefined;
   } catch (error) {
     log.warn("grid.cache_unread", { clientId, error: errorCode(error) });
     return undefined;
@@ -399,8 +366,9 @@ const cached = async (clientId: string): Promise<LiveStatus | undefined> => {
 };
 
 /**
- * Keeps client `clientId`'s live answer for a minute. A cache that fails
- * to keep it is logged, and the answer stands.
+ * Keeps client `clientId`'s live answer for a minute: one with nothing
+ * unknown in it (`allKnown`). A cache that fails to keep it is logged,
+ * and the answer stands.
  */
 const keep = async (clientId: string, live: LiveStatus): Promise<void> => {
   try {
@@ -429,7 +397,8 @@ export const clientGrid = async (env: Env): Promise<GridRow[]> => {
 /**
  * Each active client's live status, by id, as of `now`: kept answers
  * from the last minute, and the rest read `options.concurrency` clients
- * at a time, each within `options.rowDeadlineMs`.
+ * at a time, each within `options.rowDeadlineMs`. An answer with anything
+ * unknown in it isn't kept, so the next call reads that client again.
  */
 export const gridLive = async (
   env: Env,
@@ -507,9 +476,11 @@ export const gridLive = async (
     }
     if (options.cache) {
       await Promise.all(
-        read.map(async ([id, live]) => {
-          await keep(id, live);
-        })
+        read
+          .filter(([, live]) => allKnown(live))
+          .map(async ([id, live]) => {
+            await keep(id, live);
+          })
       );
     }
   }
