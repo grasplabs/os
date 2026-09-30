@@ -185,6 +185,8 @@ describe("signing in", () => {
       const configs = [
         `{"origin": "https://acme.test"`,
         { ...signInConfig, domains: "acme.test" },
+        // No IdP of the client's own: not even staff sign in.
+        { ...signInConfig, entra: undefined, google: undefined },
       ];
       const offered = await Promise.all(
         configs.map(async (config) => {
@@ -199,7 +201,7 @@ describe("signing in", () => {
           }
         })
       );
-      expect(offered).toStrictEqual([[], []]);
+      expect(offered).toStrictEqual([[], [], []]);
       // Once per config, however often it's read: it's parsed once.
       const invalid = logged.mock.calls
         .map(([line]: unknown[]) => line)
@@ -208,14 +210,15 @@ describe("signing in", () => {
             z.object({ event: z.literal("config.invalid") }).safeParse(line)
               .success
         );
-      // In either order: the two connections run at once.
+      // In any order: the connections run at once.
       expect(new Set(invalid)).toStrictEqual(
         new Set([
           { event: "config.invalid", var: "SIGN_IN", paths: "<root>" },
           { event: "config.invalid", var: "SIGN_IN", paths: "domains" },
+          { event: "config.invalid", var: "SIGN_IN", paths: "entra" },
         ])
       );
-      expect(invalid).toHaveLength(2);
+      expect(invalid).toHaveLength(3);
     } finally {
       logged.mockRestore();
     }
