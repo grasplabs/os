@@ -91,6 +91,10 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
       // longer than Vitest's 5 s default, most of all on a loaded CI runner.
       testTimeout: 60_000,
       ...test,
+      // Setup files one after another, as listed (Vitest's default runs
+      // them at once): the check of the runtime reports before
+      // start-each-file.ts fails on its `cloudflare:` imports.
+      sequence: { ...test?.sequence, setupFiles: "list" },
     },
     // The built-ins the global setup embeds, the tests' own included, in a
     // module of their own: core's build ships dist/blueprints.js.
