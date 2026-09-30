@@ -9,11 +9,13 @@ import { expectTypeOf } from "vite-plus/test";
 
 import type { AppConnectionBinding } from "../src/app-bindings.ts";
 import type { AppExportBinding } from "../src/app-calls.ts";
+import type { AppGuestsBinding } from "../src/guests-binding.ts";
 import type { AppCollectionBinding } from "../src/knowledge/app-binding.ts";
 import type {
   PreviewCollection,
   PreviewConnection,
   PreviewExports,
+  PreviewGuests,
   PreviewStatistics,
 } from "../src/preview-bindings.ts";
 import type { AppStatisticsBinding } from "../src/statistics-binding.ts";
@@ -32,4 +34,7 @@ expectTypeOf<MethodsOf<PreviewCollection>>().toEqualTypeOf<
 >();
 expectTypeOf<MethodsOf<PreviewStatistics>>().toEqualTypeOf<
   MethodsOf<AppStatisticsBinding>
+>();
+expectTypeOf<MethodsOf<PreviewGuests>>().toEqualTypeOf<
+  MethodsOf<AppGuestsBinding>
 >();

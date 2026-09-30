@@ -1,5 +1,7 @@
 // oxlint-disable max-classes-per-file -- one stub per kind of binding, each with exactly its real binding's methods
 import { appErrors } from "@grasp-os/shared/apps";
+import type { GuestChat } from "@grasp-os/shared/guests";
+import { guestErrors } from "@grasp-os/shared/guests";
 import type { AppId, ChatId, WorkspaceId } from "@grasp-os/shared/ids";
 import type {
   DocumentPage,
@@ -7,10 +9,12 @@ import type {
   SearchResults,
 } from "@grasp-os/shared/knowledge";
 import { knowledgeErrors } from "@grasp-os/shared/knowledge";
+import { platformActionSchema } from "@grasp-os/shared/permissions";
+import type { Permission, PlatformAction } from "@grasp-os/shared/permissions";
 import type { StatisticAnswer } from "@grasp-os/shared/statistics";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 
-import { collectionGrantOf, exportGrantOf, stubsOf } from "./bindings.ts";
+import { stubsOf } from "./bindings.ts";
 import { workspace } from "./durable-objects.ts";
 import { activeOrRequestedPermissions } from "./permissions.ts";
 
@@ -46,6 +50,10 @@ import { activeOrRequestedPermissions } from "./permissions.ts";
 //   are real, whatever its export says it does.
 // - Statistics (`STATISTICS`, and the platform's under a grant): a point
 //   is dropped, and a read answers no groups.
+// - Guest chats (`GUESTS`): the App has none. The list is empty and a
+//   chat named isn't found; inviting a guest, which makes a link anyone
+//   can open and spends a member's budget, is refused, and so is revoking
+//   one.
 // - Its own storage: a SQLite database of the preview's own, empty at
 //   first and dropped whenever the draft changes (preview.ts); never the
 //   App's.
@@ -196,12 +204,85 @@ export class PreviewStatistics extends WorkerEntrypoint<Env> {
   }
 }
 
+/** Guest chats, in a preview (`AppGuestsBinding`'s methods). */
+export class PreviewGuests extends WorkerEntrypoint<Env, PreviewOf> {
+  async invite(caller: unknown): Promise<never> {
+    return await refuse(this.env, this.ctx.props, caller);
+  }
+
+  // oxlint-disable-next-line class-methods-use-this -- a preview's stubs answer the same, whoever holds them
+  list(): GuestChat[] {
+    return [];
+  }
+
+  // oxlint-disable-next-line class-methods-use-this -- a preview's stubs answer the same, whoever holds them
+  read(): never {
+    throw guestErrors.create("guest.not_found");
+  }
+
+  async revoke(caller: unknown): Promise<never> {
+    return await refuse(this.env, this.ctx.props, caller);
+  }
+}
+
 /** A stub a draft's previewed server code holds. */
 type PreviewStub =
   | Fetcher<PreviewConnection>
   | Fetcher<PreviewExports>
   | Fetcher<PreviewCollection>
-  | Fetcher<PreviewStatistics>;
+  | Fetcher<PreviewStatistics>
+  | Fetcher<PreviewGuests>;
+
+/** The preview stub of what a platform permission's one `action` offers. */
+const platformStubOf = (of: PreviewOf, action: PlatformAction): PreviewStub => {
+  switch (action) {
+    case "statistics": {
+      return exports.PreviewStatistics({});
+    }
+    case "guests": {
+      return exports.PreviewGuests({ props: of });
+    }
+    default: {
+      return action satisfies never;
+    }
+  }
+};
+
+/**
+ * The preview stub of `permission`, by the kind of binding it gives an
+ * App's server code (app-bindings.ts): every kind has one here, so a
+ * draft's call never fails in a preview on a binding of the wrong kind.
+ * A kind the permission system gains fails to compile until it has a
+ * stub too. Nothing for a workflow permission, which gives server code no
+ * binding, live or in a preview.
+ */
+const previewStubOf = (
+  of: PreviewOf,
+  { object, actions }: Permission
+): PreviewStub | undefined => {
+  switch (object.type) {
+    case "connection": {
+      return exports.PreviewConnection({ props: of });
+    }
+    case "collection": {
+      return exports.PreviewCollection({ props: of });
+    }
+    case "app": {
+      return exports.PreviewExports({ props: of });
+    }
+    case "workflow": {
+      return undefined;
+    }
+    case "platform": {
+      // A platform permission has one action, which its stub does.
+      const action = platformActionSchema.safeParse(actions[0]);
+      return action.success ? platformStubOf(of, action.data) : undefined;
+    }
+    default: {
+      return object satisfies never;
+    }
+  }
+};
 
 /**
  * The env of `of`, a preview of App `app`'s draft: a preview stub under
@@ -212,24 +293,9 @@ export const previewBindings = async (
   env: Env,
   of: PreviewOf
 ): Promise<Record<string, PreviewStub>> => {
-  const { app } = of;
-  const collectionOf = collectionGrantOf({ type: "app", appId: app });
   const granted = stubsOf<PreviewStub>(
-    await activeOrRequestedPermissions(env, app),
-    (permission) => {
-      if (permission.object.type === "connection") {
-        return exports.PreviewConnection({ props: of });
-      }
-      if (exportGrantOf(permission) !== undefined) {
-        return exports.PreviewExports({ props: of });
-      }
-      if (permission.object.type === "platform") {
-        return exports.PreviewStatistics({});
-      }
-      return collectionOf(permission) === undefined
-        ? undefined
-        : exports.PreviewCollection({ props: of });
-    }
+    await activeOrRequestedPermissions(env, of.app),
+    (permission) => previewStubOf(of, permission)
   );
   return { ...granted, STATISTICS: exports.PreviewStatistics({}) };
 };

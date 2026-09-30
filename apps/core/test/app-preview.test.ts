@@ -91,8 +91,9 @@ ${
   tries
     ? `
   async tries(caller: Caller, documentId: string): Promise<Record<string, unknown>> {
-    const { MAIL, ARCHIVE, HANDBOOK, LEDGER, STATISTICS } = env(this);
+    const { MAIL, ARCHIVE, GUESTS, HANDBOOK, LEDGER, STATISTICS } = env(this);
     const listed = await HANDBOOK.listDocuments(caller);
+    const guests = await GUESTS.list(caller);
     const found = await HANDBOOK.search(caller, "note");
     const records = await HANDBOOK.listRecords(caller);
     const stats = await STATISTICS.read(caller, { measure: "opened", days: 1, where: {} });
@@ -110,6 +111,10 @@ ${
       ledger: await outcome(LEDGER.call(caller, "book", {})),
       point: await outcome(STATISTICS.record(caller, { measure: "opened", value: 1 })),
       stats: stats.groups.length,
+      invite: await outcome(GUESTS.invite(caller, { name: "Ann", skill: "interview" })),
+      guests: guests.length,
+      guest: await outcome(GUESTS.read(caller, "guest-1")),
+      revoke: await outcome(GUESTS.revoke(caller, "guest-1")),
       fetch: await outcome(fetch("https://example.com/")),
     };
   }
@@ -230,8 +235,9 @@ const chatWithDraft = async (
 /**
  * An App with a mail connection (`MAIL`), a collection with a note
  * (`HANDBOOK`) and another App's exports (`LEDGER`), each granted by an
- * admin, the same mail connection asked for again and not granted
- * (`ARCHIVE`), and a draft of it in a chat of its builder's.
+ * admin, the same mail connection (`ARCHIVE`) and guest chats
+ * (`GUESTS`) asked for and not granted, and a draft of it in a chat of
+ * its builder's.
  */
 const setUp = async () => {
   const admin = await signedInApi(idp, "admin");
@@ -273,6 +279,12 @@ const setUp = async () => {
     object: { type: "connection", connectionId: mail.id },
     actions: ["mail.send"],
     binding: "ARCHIVE",
+  });
+  await builder.api.permissions.request({
+    subject,
+    object: { type: "platform" },
+    actions: ["guests"],
+    binding: "GUESTS",
   });
   const draft = await chatWithDraft(builder, app, {
     "app/server.ts": serverCode(true),
@@ -401,7 +413,14 @@ describe("previewing a chat's draft", { timeout: 120_000 }, () => {
         // What the App asked for and wasn't granted has a name in the
         // preview only, so the draft's code runs as written; the App's
         // own env has it once an admin grants it.
-        preview: ["ARCHIVE", "HANDBOOK", "LEDGER", "MAIL", "STATISTICS"],
+        preview: [
+          "ARCHIVE",
+          "GUESTS",
+          "HANDBOOK",
+          "LEDGER",
+          "MAIL",
+          "STATISTICS",
+        ],
         app: ["HANDBOOK", "LEDGER", "MAIL", "STATISTICS"],
       },
       tried: {
@@ -418,6 +437,11 @@ describe("previewing a chat's draft", { timeout: 120_000 }, () => {
         ledger: refused,
         point: "ok",
         stats: 0,
+        // No guest is invited (a link anyone could open), and none is there.
+        invite: refused,
+        guests: 0,
+        guest: "guest.not_found",
+        revoke: refused,
         fetch: "failed",
       },
       mail: { calls: 0, sent: [] },
