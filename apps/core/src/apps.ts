@@ -48,7 +48,7 @@ import { appMemoryPath, requireWithinLimit } from "./knowledge/memory-files.ts";
 import { requireOwnTypes } from "./knowledge/record-types.ts";
 import { madeCurrent } from "./permissions.ts";
 import { buildOnSave } from "./save-builds.ts";
-import { requireWorkflowTestsPass } from "./workflows/code.ts";
+import { requireWorkflowTestsPass, workflowCallsIn } from "./workflows/code.ts";
 import {
   registerTriggers,
   registrationHolds,
@@ -559,6 +559,7 @@ export const commitFiles = async (
     throw appErrors.create("app.nothing_to_commit");
   }
   const exported = exportsIn(files);
+  const workflowCalls = workflowCallsIn(Object.fromEntries(files));
   const records = recordTypesIn(files);
   // None another App already has where this one may write.
   await requireOwnTypes(env, appId, records);
@@ -575,6 +576,7 @@ export const commitFiles = async (
     createdAt: new Date(),
     approved: null,
     workflows: workflowsIn(files),
+    workflowCalls,
     exports: exported,
     proposedBy: null,
     records,
@@ -717,6 +719,7 @@ export const proposeDraft = async (
     throw appErrors.create("app.nothing_to_commit");
   }
   const exported = exportsIn(files);
+  const workflowCalls = workflowCallsIn(Object.fromEntries(files));
   const records = recordTypesIn(files);
   // None another App already has where this one may write.
   await requireOwnTypes(env, appId, records);
@@ -732,6 +735,7 @@ export const proposeDraft = async (
     createdAt: new Date(),
     approved: null,
     workflows: workflowsIn(files),
+    workflowCalls,
     exports: exported,
     proposedBy: by.via ?? null,
     records,

@@ -295,6 +295,61 @@ describe("workflow tests", () => {
     ]);
   });
 
+  it("hold each step's calls to what its review shows, failing a step that catches the refusal", async () => {
+    const reached: string[] = [];
+    const binding = (name: string) => ({
+      call: async () => {
+        reached.push(name);
+        return "ok";
+      },
+    });
+    const tidy = workflow("tidy", { params: {} }, async (step, { env }) => {
+      const found = await step.do("find", { description: "Find" }, async () =>
+        String(await env.CRM?.call?.("find"))
+      );
+      const tidied = await step.do(
+        "tidy",
+        { description: "Tidy" },
+        async () => {
+          try {
+            await env.MAIL?.call?.("send");
+            return "sent";
+          } catch (error) {
+            return error instanceof Error ? error.message : "refused";
+          }
+        }
+      );
+      return { found, tidied };
+    });
+    const tests = workflowTests(tidy, [
+      {
+        name: "runs",
+        env: { CRM: binding("CRM"), MAIL: binding("MAIL") },
+        expect: {},
+      },
+    ]);
+
+    const held = await runWorkflowTests(tests, {
+      steps: { find: ["CRM"], tidy: [] },
+      all: ["CRM"],
+    });
+    const unheld = await runWorkflowTests(tests);
+
+    expect({
+      held: held.results[0]?.failures,
+      unheld: unheld.passed,
+      reached,
+    }).toStrictEqual({
+      held: [
+        expect.stringContaining(
+          'Expected the run to complete; it failed: Step "tidy" called MAIL'
+        ),
+      ],
+      unheld: true,
+      reached: ["CRM", "CRM", "MAIL"],
+    });
+  });
+
   it("fail for a workflow without tests", async () => {
     const report = await runWorkflowTests(
       workflowTests(invoiceWorkflow(unusedSystems), [])

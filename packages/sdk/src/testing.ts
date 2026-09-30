@@ -3,11 +3,13 @@ import { runIdSchema } from "@grasp-os/shared/ids";
 import { canonicalJson } from "@grasp-os/shared/json";
 import type { Json } from "@grasp-os/shared/json";
 import {
+  callReviewed,
   inboundEmailIndexSchema,
   isRetryable,
   storedEmailSchema,
   workflowErrors,
 } from "@grasp-os/shared/workflows";
+import type { WorkflowCalls } from "@grasp-os/shared/workflows";
 import { z } from "zod";
 
 import type {
@@ -99,6 +101,15 @@ export interface TestEngineOptions {
    * none when missing, and mocked steps don't need them.
    */
   env?: WorkflowEnv;
+  /**
+   * The bindings each step calls, as the review of the workflow's version
+   * shows them (`reviewedCalls` in `@grasp-os/sdk/describe`): a call of a
+   * binding in `env` that the running step's review doesn't show, or one
+   * outside any step, fails as it does on the platform, and fails its
+   * step even when the workflow catches it. Core passes it to the tests
+   * and dry runs it runs; not held when missing or null.
+   */
+  calls?: WorkflowCalls | null;
   /**
    * Step results by step name, instead of running the step. A keyed step
    * takes the mock for `name:key` (the key as the workflow gives it), or
@@ -227,6 +238,34 @@ const fromStored = (stored: string | undefined): unknown =>
   stored === undefined ? undefined : JSON.parse(stored);
 
 /**
+ * `env` with each of its bindings' methods held to `calls`, as core
+ * holds a run's (`RunHost`): `check` hears the binding of each call first,
+ * and throws for one the running step may not make.
+ */
+const heldEnv = (
+  env: WorkflowEnv,
+  check: (binding: string) => void
+): WorkflowEnv =>
+  Object.fromEntries(
+    Object.entries(env).map(([binding, methods]) => [
+      binding,
+      new Proxy(methods, {
+        get: (target, method, receiver) => {
+          const value: unknown = Reflect.get(target, method, receiver);
+          if (typeof value !== "function") {
+            return value;
+          }
+          return async (...args: Json[]): Promise<unknown> => {
+            check(binding);
+            const answer: unknown = await Reflect.apply(value, target, args);
+            return answer;
+          };
+        },
+      }),
+    ])
+  );
+
+/**
  * An in-memory engine with the durable semantics workflows rely on: a step's
  * result is stored as JSON under its name, and running the workflow again on
  * the same engine replays it (completed steps return their stored result), as
@@ -249,11 +288,34 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
 
   // How many steps' functions run now: `readAttachment` works only inside one.
   let stepsRunning = 0;
+  // The step whose function runs now, by its engine name, and the first
+  // of its calls refused as one its review doesn't show.
+  let running: { step: string; refused?: Error } | undefined;
+  const { calls } = options;
+  const checkCall = (binding: string): void => {
+    if (calls === undefined || calls === null) {
+      return;
+    }
+    if (running === undefined) {
+      throw workflowErrors.create("workflow.outside_step");
+    }
+    // As on the platform, a step that had a call refused has every later
+    // call refused at once.
+    if (running.refused !== undefined) {
+      throw running.refused;
+    }
+    if (!callReviewed(calls, running.step, binding)) {
+      const error = workflowErrors.create("workflow.call_not_reviewed");
+      error.message = `Step "${stepNameOf(running.step).name}" called ${binding}, which the review of this version doesn't show it calling: call each binding only in the step's own function, where the review shows it.`;
+      running.refused = error;
+      throw error;
+    }
+  };
 
   const engine: WorkflowEngine = {
     runId: runIdSchema.parse(options.runId ?? "run-1"),
     params: options.params ?? {},
-    env: options.env ?? {},
+    env: heldEnv(options.env ?? {}, checkCall),
     do: async (name, { retries, sideEffect = false, input }, fn) => {
       if (results.has(name)) {
         // SAFETY: only `do` stores under a name, with the result of the same
@@ -281,8 +343,25 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
           status = "recorded";
         } else {
           stepsRunning += 1;
+          const outer = running;
           try {
-            output = await attempt(retries?.limit ?? 0, fn);
+            output = await attempt(retries?.limit ?? 0, async () => {
+              const current: { step: string; refused?: Error } = { step: name };
+              running = current;
+              // A refused call fails the step, caught or not.
+              let result: Awaited<ReturnType<typeof fn>>;
+              try {
+                result = await fn();
+              } catch (error) {
+                throw current.refused ?? error;
+              } finally {
+                running = outer;
+              }
+              if (current.refused !== undefined) {
+                throw current.refused;
+              }
+              return result;
+            });
           } finally {
             stepsRunning -= 1;
           }
@@ -665,18 +744,20 @@ const missedExpectations = (test: WorkflowTest, run: TestRun): string[] => {
 };
 
 /**
- * Runs a workflow's tests, one after another. Activation refuses a version
- * whose report hasn't `passed`; a workflow without tests doesn't pass.
+ * Runs a workflow's tests, one after another, each held to `calls` (see
+ * `TestEngineOptions`), whatever a test's own options say. Activation
+ * refuses a version whose report hasn't `passed`; a workflow without
+ * tests doesn't pass.
  */
-export const runWorkflowTests = async <Output>({
-  definition,
-  tests,
-}: WorkflowTests<Output>): Promise<TestReport> => {
+export const runWorkflowTests = async <Output>(
+  { definition, tests }: WorkflowTests<Output>,
+  calls?: WorkflowCalls | null
+): Promise<TestReport> => {
   const results: TestResult[] = [];
   for (const test of tests) {
     const { name, expect: _expect, ...options } = test;
     // oxlint-disable-next-line no-await-in-loop -- tests run one at a time
-    const run = await testRun(definition, options);
+    const run = await testRun(definition, { ...options, calls });
     const failures = missedExpectations(test, run);
     results.push({ name, passed: failures.length === 0, failures });
   }

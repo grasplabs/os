@@ -60,6 +60,7 @@ import {
 } from "./permissions.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
+import { workflowCallsIn } from "./workflows/code.ts";
 
 // Blueprints. A builder of an App marks one of its versions as a
 // blueprint; whoever has a role in the App (app-access.ts) and builds
@@ -326,6 +327,7 @@ export const createFromBlueprint = async (
     // builder commits; otherwise approved as any version is.
     approved: (await approvedSource(env, source, number)) ? 1 : null,
     workflows: workflowsIn(files),
+    workflowCalls: workflowCallsIn(Object.fromEntries(files)),
     exports: exportsIn(files),
     proposedBy: null,
     records: recordTypesIn(files),
@@ -611,6 +613,7 @@ export const installBuiltinBlueprint = async (
           createdAt: now,
           approved: 1,
           workflows: workflowsIn(files),
+          workflowCalls: workflowCallsIn(Object.fromEntries(files)),
           exports: exportsIn(files),
           proposedBy: null,
           records: recordTypesIn(files),

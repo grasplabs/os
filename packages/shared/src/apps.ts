@@ -223,7 +223,8 @@ export interface VersionReview {
      * its code calls (`APP`, a connection, another App's exports). While `shared` code changed, every step is listed
      * (`sharedCode`), as any may now behave differently through it, and
      * may change things if the workflow calls bindings at all. Null when
-     * the code can't be read as steps.
+     * the code can't be read as steps. Its runs are held to what each
+     * step calls, by binding, not by method.
      */
     steps:
       | {
@@ -234,6 +235,11 @@ export interface VersionReview {
           sharedCode: boolean;
         }[]
       | null;
+    /**
+     * Every one of the App's bindings its code calls, in any step: what
+     * each step is held to when `steps` is null; none once it's removed.
+     */
+    calls: string[];
     /** Its parameters that differ, by name; null when they can't be read. */
     params: { name: string; change: ReviewChange }[] | null;
     /**

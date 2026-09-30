@@ -46,6 +46,12 @@ export const workflowErrors = defineErrorFamily({
     "This App has no such attachment: the message isn't kept for it, or its 30 days have passed.",
   "workflow.attachment_unreadable":
     "The kept message can't be read any more, so none of its attachments can.",
+  "workflow.call_not_reviewed":
+    "A step called a binding its version's review doesn't show it calling: call each binding only in the step's own function.",
+  "workflow.step_not_reviewed":
+    "A step ran that its version's review doesn't show: run steps only as the workflow's function writes them.",
+  "workflow.calls_not_kept":
+    "This version keeps no reading of what the workflow calls, so it doesn't run: commit the workflow again.",
   // What a step or run failed with when its error named no code of its
   // own: the audit log and failure reports carry these instead.
   "workflow.step_failed": "A step of the workflow failed.",
@@ -550,6 +556,81 @@ export type OutlineNode = StepOutline | BranchOutline | LoopOutline;
 export interface WorkflowOutline {
   steps: OutlineNode[];
 }
+
+/** An outline's steps, wherever they are in its branches and loops. */
+export const outlineSteps = (nodes: readonly OutlineNode[]): StepOutline[] =>
+  nodes.flatMap((node) => {
+    if (node.type === "step") {
+      return [node];
+    }
+    return node.type === "loop"
+      ? outlineSteps(node.steps)
+      : [...outlineSteps(node.steps), ...outlineSteps(node.otherwise)];
+  });
+
+/**
+ * The App's bindings a workflow's code calls, as the review of its version
+ * shows them, which its runs are held to. Bindings by name only (`APP` for
+ * the App's own server, a collection's, a connection's or another App's
+ * exports' binding name), not by method: the reader names no more, so a
+ * step shown calling a binding may call any of its methods.
+ */
+export interface WorkflowCalls {
+  /**
+   * The bindings each step calls, by step name, every step included, as
+   * its outline names them (`StepOutline.env`); null when the steps can't
+   * be read, and every step is then held to `all`.
+   */
+  steps: Record<string, string[]> | null;
+  /** Every binding the workflow's code calls, in any step. */
+  all: string[];
+}
+
+/** What ends a step's name in its engine name: a key, or a decision's part. */
+const engineNameSeparator = /[:#]/u;
+
+/** The SDK's own step, which reads the run's parameters and calls nothing. */
+const paramsStep = "$params";
+
+/**
+ * The name a step has in its outline, from its engine name (`name`,
+ * `name:key` for a keyed step, `name#ask` for a part of a decision): step
+ * names hold neither `:` nor `#`.
+ */
+const outlineNameOf = (engineStep: string): string =>
+  engineStep.split(engineNameSeparator, 1)[0] ?? "";
+
+/**
+ * Whether a step of this name may run: one the review shows, or the
+ * SDK's `$params`. Any name may when the steps can't be read.
+ */
+export const stepReviewed = (
+  calls: WorkflowCalls,
+  engineStep: string
+): boolean =>
+  calls.steps === null ||
+  engineStep === paramsStep ||
+  Object.hasOwn(calls.steps, outlineNameOf(engineStep));
+
+/**
+ * Whether a step's function may call `binding`, by the step's engine name:
+ * its review shows the step calling it, or, when the steps can't be read,
+ * the workflow's code calls it at all.
+ */
+export const callReviewed = (
+  calls: WorkflowCalls,
+  engineStep: string,
+  binding: string
+): boolean => {
+  if (calls.steps === null) {
+    return calls.all.includes(binding);
+  }
+  const name = outlineNameOf(engineStep);
+  return (
+    Object.hasOwn(calls.steps, name) &&
+    (calls.steps[name]?.includes(binding) ?? false)
+  );
+};
 
 /**
  * What the Runs list is filtered by: runs waiting for a decision, running

@@ -288,8 +288,11 @@ const ReviewDetails = ({
               )}
               {workflow.steps === null ? (
                 <span className="text-muted-foreground">
-                  Its steps can&apos;t be read from its code, so it may do
-                  anything its code does.
+                  Its steps can&apos;t be read from its code, so any step may do
+                  anything its code does
+                  {workflow.calls.length === 0
+                    ? ", calling none of the App's bindings."
+                    : `, calling ${workflow.calls.join(", ")}.`}
                 </span>
               ) : (
                 workflow.steps.map((step) => (
@@ -302,7 +305,8 @@ const ReviewDetails = ({
                     ) : null}
                     {step.calls.length === 0 ? null : (
                       <Badge variant="outline">
-                        Calls {step.calls.join(", ")}: may change things
+                        Calls {step.calls.join(", ")} (any of its methods): may
+                        change things
                       </Badge>
                     )}
                     {step.sharedCode ? (

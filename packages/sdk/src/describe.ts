@@ -9,10 +9,12 @@ import type {
   ObjectExpression,
 } from "@babel/types";
 import { messageOf } from "@grasp-os/shared/errors";
+import { outlineSteps } from "@grasp-os/shared/workflows";
 import type {
   OptionValue,
   OutlineNode,
   StepOutline,
+  WorkflowCalls,
   WorkflowOutline,
 } from "@grasp-os/shared/workflows";
 import { z } from "zod";
@@ -1333,4 +1335,58 @@ export const describeWorkflow = (source: string): WorkflowOutline => {
       ? describeStatement(reader, run.body, false)
       : describeExpression(reader, run.body, false);
   return { steps };
+};
+
+/**
+ * `describeWorkflow`, or null when its steps can't be read. Only the
+ * describer's own refusals count as unreadable: anything else it throws
+ * is thrown on, so a fault in the reader never passes for a workflow it
+ * refused.
+ */
+export const readOutline = (source: string): WorkflowOutline | null => {
+  try {
+    return describeWorkflow(source);
+  } catch (error) {
+    if (error instanceof WorkflowError) {
+      return null;
+    }
+    throw error;
+  }
+};
+
+/**
+ * The App's bindings the workflow in `source` calls, as a review shows
+ * them and its runs are held to: by step, as its outline names them, and
+ * all together. A workflow whose steps can't be read (a step in a `try`,
+ * say) still has its calls read (`checkWorkflowBindings`), and each of its
+ * steps is held to all of them. When even those can't be read (a binding
+ * kept in a variable, code not written with the SDK's `workflow`), it
+ * calls none: no review could show one, so its runs may make none, as a
+ * review then says. As with `readOutline`, only the describer's own
+ * refusals count as unreadable.
+ */
+export const reviewedCalls = (source: string): WorkflowCalls => {
+  let context: ReturnType<typeof readContext>;
+  try {
+    context = readContext(source);
+  } catch (error) {
+    if (error instanceof WorkflowError) {
+      return { steps: null, all: [] };
+    }
+    throw error;
+  }
+  const { run, bindings } = context;
+  const outline = readOutline(source);
+  return {
+    steps:
+      outline === null
+        ? null
+        : Object.fromEntries(
+            outlineSteps(outline.steps).map(({ name, env }) => [
+              name,
+              env ?? [],
+            ])
+          ),
+    all: envCallsIn(bindings, [run.body]),
+  };
 };

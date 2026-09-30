@@ -637,7 +637,14 @@ ${mailStep("after")}`,
     } catch (error) {
       read = error.code;
     }
-    return { env: Object.keys(env).toSorted(), fetched, read };
+    let other;
+    try {
+      await env.DRIVE.call("files.list", {});
+      other = "ok";
+    } catch (error) {
+      other = error.code;
+    }
+    return { fetched, read, other };
   });`,
         { probe: null }
       )
@@ -658,8 +665,9 @@ ${mailStep("after")}`,
       // A read still reaches connect (there is no such connection). Side
       // effects wait for the person (the tests of held side effects).
       output: {
-        env: ["APP", "OUTLOOK"],
         read: "connect.connection_not_found",
+        // Only what it was granted: a binding it wasn't is none.
+        other: "permission.denied",
       },
       offline: true,
     });
@@ -1066,35 +1074,31 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
   });
 });
 
+/** Workflow code that sends the invoice mail with idempotency key `key`. */
+const sendWith = (key: string) =>
+  `await env.MAIL.call("mail.send", ${JSON.stringify(invoiceMail)}, { idempotencyKey: ${key} })`;
+
 describe("workflow side effects and failures", { timeout: 60_000 }, () => {
   afterEach(endLiveRuns);
 
   it("take a connection call only inside a step, and with the step's own key", async () => {
     const admin = await personApi("admin");
     const mail = await mailConnection();
-    const app = await appWith(
-      admin,
-      workflowFiles(
-        "keys",
+    // Calls between steps can't be read as a step's, so the workflow that
+    // makes them is held to none: they are refused as outside a step
+    // first. The one that makes its calls in its step is held to them.
+    const app = await appWith(admin, {
+      ...workflowFiles(
+        "outside",
         `  const codeOf = async (key) => {
     try {
-      await env.MAIL.call("mail.send", ${JSON.stringify(invoiceMail)}, { idempotencyKey: key });
+      ${sendWith("key")};
       return "sent";
     } catch (error) {
       return error.code;
     }
   };
   const outside = await codeOf("keys-outside");
-  const inside = await step.do(
-    "send",
-    { description: "Send the invoice", sideEffect: true, input: null },
-    async ({ idempotencyKey }) => ({
-      // A key of each attempt's own would send once per attempt.
-      perAttempt: await codeOf(idempotencyKey + ":attempt-2"),
-      // A constant key would answer every run with the first run's mail.
-      constant: await codeOf("invoice-INV-7"),
-    })
-  );
   // A step whose last attempt hangs: once it has settled, calls between
   // steps are refused again.
   try {
@@ -1103,25 +1107,57 @@ describe("workflow side effects and failures", { timeout: 60_000 }, () => {
     });
   } catch {}
   const afterHang = await codeOf("keys-after-hang");
-  return { outside, ...inside, afterHang };`,
-        { send: {}, hang: null }
-      )
-    );
+  return { outside, afterHang };`,
+        { hang: null }
+      ),
+      ...workflowFiles(
+        "keys",
+        `  return await step.do(
+    "send",
+    { description: "Send the invoice", sideEffect: true, input: null },
+    async ({ idempotencyKey }) => {
+      // A key of each attempt's own would send once per attempt.
+      let perAttempt = "sent";
+      try {
+        ${sendWith('idempotencyKey + ":attempt-2"')};
+      } catch (error) {
+        perAttempt = error.code;
+      }
+      // A constant key would answer every run with the first run's mail.
+      let constant = "sent";
+      try {
+        ${sendWith('"invoice-INV-7"')};
+      } catch (error) {
+        constant = error.code;
+      }
+      return { perAttempt, constant };
+    }
+  );`,
+        { send: {} }
+      ),
+    });
     await grantMail(idp, admin, app, mail.id);
-    const run = await admin.api.workflows.start(app, "keys");
-    await finished(run.id);
+    const outside = await admin.api.workflows.start(app, "outside");
+    const keys = await admin.api.workflows.start(app, "keys");
+    await Promise.all([finished(outside.id), finished(keys.id)]);
 
     expect({
-      run: await admin.api.workflows.status(run.id),
+      outside: await admin.api.workflows.status(outside.id),
+      keys: await admin.api.workflows.status(keys.id),
       server: await mail.did(),
     }).toMatchObject({
-      run: {
+      outside: {
         status: "completed",
         output: {
           outside: "workflow.outside_step",
+          afterHang: "workflow.outside_step",
+        },
+      },
+      keys: {
+        status: "completed",
+        output: {
           perAttempt: "workflow.idempotency_key_invalid",
           constant: "workflow.idempotency_key_invalid",
-          afterHang: "workflow.outside_step",
         },
       },
       server: { calls: 0, sent: [] },

@@ -3,7 +3,7 @@ import {
   serverFiles,
   workflowPaths,
 } from "@grasp-os/compiler";
-import { describeWorkflow } from "@grasp-os/sdk/describe";
+import { readOutline } from "@grasp-os/sdk/describe";
 import type {
   AppExports,
   AppFiles,
@@ -13,11 +13,12 @@ import type {
 import { workspaceIdSchema } from "@grasp-os/shared/ids";
 import type { AppId, WorkflowId } from "@grasp-os/shared/ids";
 import { canonicalJson } from "@grasp-os/shared/json";
-import { workflowErrors } from "@grasp-os/shared/workflows";
+import { outlineSteps, workflowErrors } from "@grasp-os/shared/workflows";
 import type {
   OutlineNode,
   StepOutline,
   TriggerDeclaration,
+  WorkflowCalls,
 } from "@grasp-os/shared/workflows";
 import { z } from "zod";
 
@@ -107,23 +108,8 @@ const sameJson = (one: unknown, other: unknown): boolean =>
   JSON.stringify(one) === JSON.stringify(other);
 
 /** A workflow's steps by name, wherever they are in its branches and loops. */
-const stepsIn = (nodes: readonly OutlineNode[]): Map<string, StepOutline> => {
-  const steps = new Map<string, StepOutline>();
-  const walk = (list: readonly OutlineNode[]): void => {
-    for (const node of list) {
-      if (node.type === "step") {
-        steps.set(node.name, node);
-      } else if (node.type === "loop") {
-        walk(node.steps);
-      } else {
-        walk(node.steps);
-        walk(node.otherwise);
-      }
-    }
-  };
-  walk(nodes);
-  return steps;
-};
+const stepsIn = (nodes: readonly OutlineNode[]): Map<string, StepOutline> =>
+  new Map(outlineSteps(nodes).map((step) => [step.name, step]));
 
 /** A workflow's steps as its code reads; null when it can't be read. */
 const stepsOf = (
@@ -134,11 +120,8 @@ const stepsOf = (
   if (source === undefined) {
     return new Map();
   }
-  try {
-    return stepsIn(describeWorkflow(source).steps);
-  } catch {
-    return null;
-  }
+  const outline = readOutline(source);
+  return outline === null ? null : stepsIn(outline.steps);
 };
 
 /** A step without where it is written, to compare. */
@@ -379,6 +362,9 @@ const stepChanges = (
         (found?.sideEffect ?? false) ||
         (found?.env ?? []).length > 0 ||
         (shared && usesBindings),
+      // What the version's runs are held to, by binding, not by method:
+      // a call of any other binding from this step is refused
+      // (`workflowCallsOf`, workflows/host.ts).
       calls: found?.env ?? [],
       sharedCode: shared,
     };
@@ -391,6 +377,12 @@ interface VersionAt {
   files: AppFiles;
 }
 
+/** Every binding workflow `id` calls, as its version keeps it; none if it has no such workflow. */
+const allCallsOf = (
+  kept: Readonly<Record<string, WorkflowCalls>>,
+  id: string
+): string[] => (Object.hasOwn(kept, id) ? (kept[id]?.all ?? []) : []);
+
 /** A version's workflows that differ from the current version's. */
 const workflowsOf = async (
   env: Env,
@@ -398,10 +390,13 @@ const workflowsOf = async (
   {
     before,
     proposed,
+    kept,
     changedPaths,
   }: {
     before: VersionAt | undefined;
     proposed: VersionAt;
+    /** What the proposed version's workflows call, as its row keeps it. */
+    kept: Readonly<Record<string, WorkflowCalls>>;
     changedPaths: ReadonlySet<string>;
   }
 ): Promise<VersionReview["workflows"]> => {
@@ -460,6 +455,9 @@ const workflowsOf = async (
           ({ sideEffect, env: calls }) => sideEffect || (calls ?? []).length > 0
         ),
       steps,
+      // What its runs are held to, by binding: each step to its own when
+      // its steps can be read, every step to all of them when they can't.
+      calls: allCallsOf(kept, id),
       triggers:
         triggersBefore === null || triggersNow === null
           ? null
@@ -500,6 +498,7 @@ export const reviewVersion = async (
   const workflows = await workflowsOf(env, found.id, {
     before,
     proposed: { version: row.version, files },
+    kept: row.workflowCalls,
     changedPaths,
   });
   const serverChanges = differences(

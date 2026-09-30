@@ -6,6 +6,7 @@ import {
   workflowIdOf,
   workflowPaths,
 } from "@grasp-os/compiler";
+import { reviewedCalls } from "@grasp-os/sdk/describe";
 import { paramValueSchemas } from "@grasp-os/sdk/params";
 import type { ParamKind } from "@grasp-os/sdk/params";
 import type { AppFiles } from "@grasp-os/shared/apps";
@@ -17,17 +18,20 @@ import {
   triggerDeclarationsSchema,
   workflowErrors,
 } from "@grasp-os/shared/workflows";
-import type { TriggerDeclaration } from "@grasp-os/shared/workflows";
+import type {
+  TriggerDeclaration,
+  WorkflowCalls,
+} from "@grasp-os/shared/workflows";
 import type { RpcTarget } from "cloudflare:workers";
 import { z } from "zod";
 
 import { sandbox } from "../sandbox.ts";
 import { buildWorkflows } from "../screens.ts";
-import { fromIsolate } from "./host.ts";
+import { collectionMethods, fromIsolate } from "./host.ts";
 
 // An App's workflows are its code, written by the agent: they run as its
-// server code does, in a Worker Loader isolate with no network, no
-// importable env and an env of stubs only (dispatcher.ts builds it). Each
+// server code does, in a Worker Loader isolate with no network and an
+// empty env: every binding is a call to core's host (host.ts). Each
 // isolate loads one version's workflows and the SDK's modules, and a main
 // module of core's that connects the one workflow it runs to the engine
 // (host.ts) over RPC. Everything in the isolate is untrusted, core's main
@@ -62,13 +66,15 @@ export type Settled<T> =
 
 /**
  * What the run's main module takes from core: the run, the parameter
- * values people set, its input, and the binding names of its connections
- * and of other Apps' exports, which it calls through the host (host.ts).
+ * values people set, its input, and the binding names of its collections,
+ * connections and other Apps' exports, which it calls through the host
+ * (host.ts).
  */
 export interface RunStart {
   runId: RunId;
   params: Record<string, string | number>;
   input: unknown;
+  collections: string[];
   connections: string[];
   apps: string[];
 }
@@ -209,10 +215,10 @@ const settled = async (run) => {
  * audited on core's side of the RPC, whatever code makes it.
  *
  * It also keeps which attempt of a step the code running belongs to
- * (`inAttempt`), as the host names it: every App call says which attempt
- * it comes from, so the host can tell a call of an attempt the engine
- * gave up on. Its storage's methods are kept here too, bound as the
- * runtime made them.
+ * (`inAttempt`), as the host names it: every binding call says which
+ * attempt it comes from, so the host can tell a call of an attempt the
+ * engine gave up on, or of another step's. Its storage's methods are kept
+ * here too, bound as the runtime made them.
  */
 const runBindingsModule = "grasp-run-bindings.js";
 const runBindings = `import { AsyncLocalStorage } from "node:async_hooks";
@@ -250,19 +256,30 @@ const guarded = (env) =>
     },
   });
 
-export const bindings = (env, host, connections, apps) => {
+const collectionMethods = ${JSON.stringify(collectionMethods)};
+
+export const bindings = (host, { connections, apps, collections }) => {
   const all = {
     __proto__: null,
-    ...env,
     APP: {
       call: async (method, ...args) => unwrapped(await host.callApp(method, args, attemptOf())),
     },
   };
+  for (let index = 0; index < collections.length; index += 1) {
+    const name = collections[index];
+    const methods = { __proto__: null };
+    for (let at = 0; at < collectionMethods.length; at += 1) {
+      const method = collectionMethods[at];
+      methods[method] = async (...args) =>
+        unwrapped(await host.callCollection(name, method, args, attemptOf()));
+    }
+    all[name] = methods;
+  }
   for (let index = 0; index < connections.length; index += 1) {
     const name = connections[index];
     all[name] = {
       call: async (action, input, options) =>
-        unwrapped(await host.callConnection(name, [action, input, options])),
+        unwrapped(await host.callConnection(name, [action, input, options], attemptOf())),
     };
   }
   for (let index = 0; index < apps.length; index += 1) {
@@ -278,22 +295,26 @@ export const bindings = (env, host, connections, apps) => {
 /**
  * The main module of a run of workflow `id`: the engine the SDK runs on,
  * each of its calls sent to core's host (host.ts), and each error in plain
- * data both ways. Its connections and its App go through the host too,
- * which knows the step running; each App call says which attempt of the
- * step its code runs in. A binding the run doesn't have (a permission revoked
- * since, or never granted) fails with a permission error, not `undefined`.
- * It imports what builds the bindings (`runBindings`) before the
- * workflow's module, so that is built from the runtime's own built-ins.
+ * data both ways. Every binding (its App, its collections, connections
+ * and other Apps' exports) goes through the host too, which knows the
+ * step running; each call says which attempt of the step its code runs
+ * in. A binding the run doesn't have (a permission revoked since, or
+ * never granted) fails with a permission error, not `undefined`. It
+ * imports what builds the bindings (`runBindings`), then the SDK's
+ * `workflow`, before the workflow's module: the bindings are built from
+ * the runtime's own built-ins, and the definition the SDK makes is frozen
+ * with the runtime's `Object.freeze`, so no module replaces its `run`.
  */
 const runMain = (
   id: WorkflowId
 ): string => `import { WorkerEntrypoint } from "cloudflare:workers";
 import { bindings, inAttempt, unwrapped } from ${JSON.stringify(runBindingsModule)};
+import ${JSON.stringify(kitModuleName("@grasp-os/sdk/workflow"))};
 import definition from ${JSON.stringify(appModuleName(workflowPaths(id).workflow))};
 ${settling}
 
 export class Run extends WorkerEntrypoint {
-  async run(host, { runId, params, input, connections, apps }) {
+  async run(host, { runId, params, input, connections, apps, collections }) {
     return await settled(async () => {
       if (definition?.metadata?.id !== ${JSON.stringify(id)} || typeof definition.run !== "function") {
         throw new Error(${JSON.stringify(`workflows/${id}.ts must export the workflow "${id}" as its default export.`)});
@@ -301,7 +322,7 @@ export class Run extends WorkerEntrypoint {
       const engine = {
         runId,
         params,
-        env: bindings(this.env, host, connections, apps),
+        env: bindings(host, { connections, apps, collections }),
         do: async (name, options, fn) => unwrapped(await host.do(name, options, async (attempt) => await inAttempt(attempt, async () => await settled(fn)))),
         sleep: async (name, milliseconds) => unwrapped(await host.sleep(name, milliseconds)),
         callModel: async (request) => unwrapped(await host.callModel(request)),
@@ -318,7 +339,8 @@ export class Run extends WorkerEntrypoint {
 
 /** The main module that runs workflow `id`'s tests (`runWorkflowTests`). */
 const testsMain = (
-  id: WorkflowId
+  id: WorkflowId,
+  calls: string
 ): string => `import { WorkerEntrypoint } from "cloudflare:workers";
 import { runWorkflowTests } from ${JSON.stringify(kitModuleName("@grasp-os/sdk/testing"))};
 import tests from ${JSON.stringify(appModuleName(workflowPaths(id).tests))};
@@ -329,7 +351,7 @@ export class Tests extends WorkerEntrypoint {
       if (tests?.definition?.metadata?.id !== ${JSON.stringify(id)}) {
         throw new Error(${JSON.stringify(`workflows/${id}.workflow-tests.ts must export the tests of "${id}" as its default export.`)});
       }
-      return JSON.parse(JSON.stringify(await runWorkflowTests(tests)));
+      return JSON.parse(JSON.stringify(await runWorkflowTests(tests, ${calls})));
     });
   }
 }
@@ -341,7 +363,8 @@ export class Tests extends WorkerEntrypoint {
  * Each report is cut to what core keeps of it.
  */
 const dryRunMain = (
-  id: WorkflowId
+  id: WorkflowId,
+  calls: string
 ): string => `import { WorkerEntrypoint } from "cloudflare:workers";
 import { dryRun } from ${JSON.stringify(kitModuleName("@grasp-os/sdk/testing"))};
 import tests from ${JSON.stringify(appModuleName(workflowPaths(id).tests))};
@@ -354,7 +377,7 @@ export class DryRuns extends WorkerEntrypoint {
       }
       const runs = [];
       for (const { name, expect: _expect, ...options } of tests.tests.slice(0, ${maxDryRuns})) {
-        const run = await dryRun(tests.definition, { ...options, params: { ...options.params, ...params } });
+        const run = await dryRun(tests.definition, { ...options, params: { ...options.params, ...params }, calls: ${calls} });
         runs.push({ name: String(name).slice(0, 200), status: run.status, report: run.report.slice(0, ${maxDryRunReport}) });
       }
       return runs;
@@ -397,6 +420,30 @@ export const hasWorkflow = (files: AppFiles, id: string): boolean =>
   workflowIdsIn(files).some((workflow) => workflow === id);
 
 /**
+ * What workflow `id` in `files` calls of the App's bindings, as a review
+ * of it shows them (`reviewedCalls`): what a version keeps of each of its
+ * workflows as it is committed (`workflowCallsIn`), which its runs are
+ * held to, and what its tests and dry runs are held to, so a call a run
+ * would refuse fails before the version is made current.
+ */
+export const workflowCallsOf = (
+  files: AppFiles,
+  id: WorkflowId
+): WorkflowCalls => reviewedCalls(files[workflowPaths(id).workflow] ?? "");
+
+/** What each workflow in a version's `files` calls, by ID (`workflowCallsOf`). */
+export const workflowCallsIn = (
+  files: AppFiles
+): Record<string, WorkflowCalls> =>
+  Object.fromEntries(
+    workflowIdsIn(files).map((id) => [id, workflowCallsOf(files, id)])
+  );
+
+/** `workflowCallsOf`, as JavaScript for a main module. */
+const callsOf = (files: AppFiles, id: WorkflowId): string =>
+  JSON.stringify(workflowCallsOf(files, id));
+
+/**
  * An App version's workflows built into modules (cached in R2), with the
  * SDK's modules they import.
  */
@@ -420,28 +467,23 @@ const modulesOf = async (
   return { ...sdk.modules, ...build.modules };
 };
 
-/** What a run's isolate is loaded for: its code, and its env. */
+/** What a run's isolate is loaded for: its code. */
 export interface RunCode {
   /** The version the run is pinned to. */
   version: number;
   workflow: WorkflowId;
   /** The version's files (`versionFiles`). */
   files: AppFiles;
-  /** The run's env, from the permissions as they are now. */
-  env: Record<string, unknown>;
 }
 
 /**
  * The run's main module, in an isolate of its own running the run's
  * pinned version. Each load is a new isolate, which the loader keeps for
- * no other (it has no name): its env is the one just built, never one kept
- * warm from before a revoke, and no two runs, or loads of one run, share
+ * no other (it has no name): its env is empty, as every binding it has
+ * goes through the host, and no two runs, or loads of one run, share
  * memory. Loads are few: a run's start, and each resume after a wait.
  */
-export const loadRun = (
-  env: Env,
-  { version, workflow, files, env: runEnv }: RunCode
-) =>
+export const loadRun = (env: Env, { version, workflow, files }: RunCode) =>
   env.LOADER.get(null, async () => ({
     ...workflowSandbox,
     mainModule: runModule,
@@ -450,7 +492,7 @@ export const loadRun = (
       [runBindingsModule]: runBindings,
       [runModule]: runMain(workflow),
     },
-    env: runEnv,
+    env: {},
   })).getEntrypoint<RunEntrypoint>("Run");
 
 /** The most of why an isolate didn't start that a failure keeps. */
@@ -567,12 +609,13 @@ export const declaredTriggers = async (
 const testFailures = async (
   env: Env,
   id: WorkflowId,
-  modules: Record<string, string>
+  modules: Record<string, string>,
+  calls: string
 ): Promise<string[]> => {
   const tests = env.LOADER.get(null, () => ({
     ...workflowSandbox,
     mainModule: testsModule,
-    modules: { ...modules, [testsModule]: testsMain(id) },
+    modules: { ...modules, [testsModule]: testsMain(id, calls) },
     env: {},
   })).getEntrypoint<TestsEntrypoint>("Tests");
   let outcome: Settled<unknown>;
@@ -627,6 +670,7 @@ export const dryRunTests = async (
    */
   { draft = false }: { draft?: boolean } = {}
 ): Promise<DryRuns> => {
+  const calls = callsOf(files, id);
   const code = env.LOADER.get(
     draft
       ? null
@@ -636,7 +680,7 @@ export const dryRunTests = async (
       mainModule: dryRunModule,
       modules: {
         ...(await modulesOf(env, version, files)),
-        [dryRunModule]: dryRunMain(id),
+        [dryRunModule]: dryRunMain(id, calls),
       },
       env: {},
     })
@@ -678,8 +722,9 @@ export const workflowTestFailures = async (
   const failures: string[] = [];
   for (const id of ids) {
     if (Object.hasOwn(files, workflowPaths(id).tests)) {
+      const calls = callsOf(files, id);
       // oxlint-disable-next-line no-await-in-loop -- one isolate at a time
-      failures.push(...(await testFailures(env, id, modules)));
+      failures.push(...(await testFailures(env, id, modules, calls)));
     } else {
       // Often a helper, not a workflow: say where shared code goes.
       failures.push(

@@ -65,6 +65,13 @@ export type {
   WorkflowEnv,
 } from "./engine.ts";
 
+/**
+ * The runtime's `Object.freeze`, kept as this module loads: a run's main
+ * module (core's workflows/code.ts) loads it before any of the App's code,
+ * which could otherwise put its own in its place.
+ */
+const { freeze } = Object;
+
 const workflowErrorCodes = [
   "workflow.invalid_definition",
   "workflow.invalid_step_call",
@@ -1217,7 +1224,10 @@ export const workflow = <
     );
   };
 
-  return {
+  // Frozen, so no code can put another `run` in its place once it is
+  // made (a module that imports the workflow's own file, say): the run
+  // is held to the steps its review shows this one running.
+  const definition: WorkflowDefinition<Output> = {
     metadata: {
       id: workflowId,
       params: describeParams(config.params),
@@ -1233,4 +1243,5 @@ export const workflow = <
       }
     },
   };
+  return freeze(definition);
 };

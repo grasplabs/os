@@ -10,13 +10,15 @@ import { errorFields, log } from "@grasp-os/shared/log";
 import { modelErrors } from "@grasp-os/shared/models";
 import type { Authority } from "@grasp-os/shared/permissions";
 import {
+  callReviewed,
+  stepReviewed,
   isRetryable,
   stepIdempotencyKey,
   inboundEmailIndexSchema,
   storedEmailSchema,
   workflowErrors,
 } from "@grasp-os/shared/workflows";
-import type { InputShape } from "@grasp-os/shared/workflows";
+import type { InputShape, WorkflowCalls } from "@grasp-os/shared/workflows";
 import { RpcTarget } from "cloudflare:workers";
 import type {
   WorkflowStepConfig,
@@ -43,6 +45,7 @@ import type {
   DecisionOutcome,
   DecisionRecipient,
 } from "../decisions/decisions.ts";
+import type { CollectionBinding } from "../knowledge/binding.ts";
 import { models } from "../models.ts";
 import { requireActivePerson, requireApprovedVersion } from "../permissions.ts";
 import { commitStepStatistics } from "../statistic-steps.ts";
@@ -63,6 +66,23 @@ import { attachmentOf, keptMessage } from "./kept-email.ts";
 // the isolate as the sandbox sees them: expected ones as they are, anything
 // else as `internal.unexpected`.
 
+/**
+ * What a run may call of a collection it may read (`CollectionBinding`):
+ * the isolate's stub of each has these methods, each a call through the
+ * host (`callCollection`).
+ */
+export const collectionMethods = [
+  "listDocuments",
+  "getDocument",
+  "history",
+  "backlinks",
+  "search",
+  "read",
+  "follow",
+] as const satisfies readonly (keyof CollectionBinding)[];
+
+const collectionMethodSchema = z.enum(collectionMethods);
+
 /** The run a host serves, as the dispatcher loaded it. */
 export interface HostedRun {
   app: AppId;
@@ -71,10 +91,17 @@ export interface HostedRun {
   runId: RunId;
   /** Who the run acts for in this execution. */
   authority: Authority;
+  /** Its collections' stubs, by binding name (`runBindingsFor`). */
+  collections: Record<string, Fetcher<CollectionBinding>>;
   /** Its connection permissions, by binding name (`runBindingsFor`). */
   connections: Record<string, ConnectionGrant>;
   /** Its permissions on other Apps' exports, by binding name. */
   apps: Record<string, ExportGrant>;
+  /**
+   * The bindings its workflow calls, by step, as the review of its version
+   * shows them (`app_versions.workflow_calls`).
+   */
+  calls: WorkflowCalls;
 }
 
 /**
@@ -117,6 +144,12 @@ interface StepAttempt {
   step: string;
   held: boolean;
   calledApp: boolean;
+  /**
+   * The first of its calls refused as one its review doesn't show, or
+   * made from another attempt's code that had one refused: the attempt
+   * fails with it, whatever its code made of the refusal.
+   */
+  refused?: Error;
   keptMessages?: Map<string, Email>;
 }
 
@@ -643,6 +676,8 @@ export class RunHost extends RpcTarget {
    * abandoned attempt that ends late can't clear a newer one's.
    */
   #running: StepAttempt | undefined;
+  /** Every attempt of a step this execution started, by its ID. */
+  readonly #attempts = new Map<string, StepAttempt>();
 
   constructor(env: Env, step: RunStep, run: HostedRun, hooks: HostHooks) {
     super();
@@ -822,6 +857,13 @@ export class RunHost extends RpcTarget {
     let input: InputShape | null = null;
     try {
       step = checked(stepNameSchema, name);
+      // The step's name is the isolate's to say: one its review doesn't
+      // show can't run, so no code runs under a name of its own making.
+      if (!stepReviewed(this.#run.calls, step)) {
+        const error = workflowErrors.create("workflow.step_not_reviewed");
+        error.message = `Step "${step}" isn't one the review of this version shows: run steps only as the workflow's function writes them.`;
+        throw error;
+      }
       const parsed = checked(doOptionsSchema, options);
       sideEffect = parsed.sideEffect === true;
       input = inputShape(parsed.input);
@@ -836,6 +878,7 @@ export class RunHost extends RpcTarget {
           held: false,
           calledApp: false,
         };
+        this.#attempts.set(attempt.id, attempt);
         this.#running = attempt;
         let result: Settled<unknown>;
         // Whether no newer attempt began, and the step didn't end, while
@@ -863,6 +906,12 @@ export class RunHost extends RpcTarget {
           current &&
           (attempt.held ||
             (attempt.calledApp && (await this.#stillHeldOrUnknown(step))));
+        // A call its review doesn't show fails the step for good, even
+        // when its code caught the refusal and carried on.
+        if (attempt.refused !== undefined) {
+          failed = forIsolate(attempt.refused);
+          throw toStepError(failed);
+        }
         if (held) {
           return heldMarker;
         }
@@ -1026,12 +1075,84 @@ export class RunHost extends RpcTarget {
   /**
    * The attempt an App call comes from, as the isolate says (`from`, the
    * ID the attempt's function was started with): the one running now, or
-   * one the engine gave up on, whose code still runs. The statistics
-   * points the call records are kept by it, so a late call of an
-   * abandoned attempt never counts with the attempt that replaced it.
+   * one the engine gave up on, whose code still runs, of any step this
+   * execution ran; an ID of none is refused. Without one, the one running
+   * now. The statistics points the call records are kept by it, so a late
+   * call of an abandoned attempt never counts with the attempt that
+   * replaced it, and its step's review must show the call too.
    */
-  #attemptOf(from: unknown): string {
-    return checked(z.uuid().optional(), from) ?? this.#requireStep().id;
+  #attemptOf(from: unknown): StepAttempt {
+    const id = checked(z.uuid().optional(), from);
+    if (id === undefined) {
+      return this.#requireStep();
+    }
+    const attempt = this.#attempts.get(id);
+    if (attempt === undefined) {
+      throw workflowErrors.create("workflow.invalid");
+    }
+    return attempt;
+  }
+
+  /**
+   * Refuses a call of `binding` (`APP` for the App's own server) that the
+   * review of the run's version doesn't show: the step running now, and
+   * the step whose attempt's code makes it (`from`), must both be ones
+   * whose code, as the review reads it, calls that binding. What the
+   * review reads is only what the source says, and code can move a call
+   * as it runs: a binding kept when a module loads, or a stub made in one
+   * step and called in another. Each refusal is audited, and fails the
+   * step it was made in (`StepAttempt.refused`).
+   */
+  async #requireReviewed(
+    running: StepAttempt,
+    from: StepAttempt,
+    binding: string
+  ): Promise<void> {
+    // Once an attempt had a call refused, every later call of it fails
+    // at once, allowed or not, and none is audited again: a loop of
+    // refused calls can't flood the audit log.
+    const refused = running.refused ?? from.refused;
+    if (refused !== undefined) {
+      throw refused;
+    }
+    const unreviewed = [running, from].find(
+      ({ step }) => !callReviewed(this.#run.calls, step, binding)
+    );
+    if (unreviewed === undefined) {
+      return;
+    }
+    const error = workflowErrors.create("workflow.call_not_reviewed");
+    error.message = `Step "${unreviewed.step}" called ${binding}, which the review of this version doesn't show it calling: call each binding only in the step's own function, where the review shows it.`;
+    running.refused = error;
+    from.refused = error;
+    const { app, workflow, version, runId } = this.#run;
+    const db = drizzle(this.#env.DB);
+    try {
+      await auditedBatch(this.#env, db, [
+        outboxed(db, {
+          actor: this.#actor,
+          action: "workflow.call.refused",
+          target: { type: "workflow_run", id: runId },
+          detail: {
+            app,
+            workflow,
+            version,
+            step: unreviewed.step,
+            call: binding,
+            errorCode: "workflow.call_not_reviewed",
+          },
+        }),
+      ]);
+    } catch (auditError) {
+      // Refused all the same; the step fails with it, which is audited.
+      log.error("workflow.call.audit_failed", {
+        runId,
+        step: unreviewed.step,
+        call: binding,
+        ...errorFields(auditError),
+      });
+    }
+    throw error;
   }
 
   /** The step whose function runs now; refuses a call outside a step. */
@@ -1044,13 +1165,71 @@ export class RunHost extends RpcTarget {
   }
 
   /**
+   * Calls `method` of a collection the run may read (`binding`, e.g.
+   * `env.HANDBOOK.search(query)`) with `args`, only inside a step whose
+   * code its review shows calling it (`#requireReviewed`). The collection's
+   * stub checks and records the read as it does for any reader.
+   */
+  async callCollection(
+    binding: unknown,
+    method: unknown,
+    args: unknown,
+    from?: unknown
+  ): Promise<Settled<unknown>> {
+    return await settle(async () => {
+      const attempt = this.#requireStep();
+      const { collections } = this.#run;
+      const name = checked(z.string(), binding);
+      const stub = Object.hasOwn(collections, name)
+        ? collections[name]
+        : undefined;
+      if (stub === undefined) {
+        throw workflowErrors.create("workflow.invalid");
+      }
+      const read = checked(collectionMethodSchema, method);
+      const [first, second] = checked(z.array(z.unknown()).max(2), args);
+      await this.#requireReviewed(attempt, this.#attemptOf(from), name);
+      // The stub checks every argument, as it does one from an App.
+      switch (read) {
+        case "listDocuments": {
+          return await stub.listDocuments(first);
+        }
+        case "getDocument": {
+          return await stub.getDocument(first, second);
+        }
+        case "history": {
+          return await stub.history(first, second);
+        }
+        case "backlinks": {
+          return await stub.backlinks(first, second);
+        }
+        case "search": {
+          return await stub.search(first, second);
+        }
+        case "read": {
+          return await stub.read(first, second);
+        }
+        case "follow": {
+          return await stub.follow(first);
+        }
+        default: {
+          throw workflowErrors.create("workflow.invalid");
+        }
+      }
+    });
+  }
+
+  /**
    * Calls an action on one of the run's connections (`binding`), with
    * `call` as a connection stub takes it: `[action, input, options]`, only
-   * inside a step, and with that step's key or none.
+   * inside a step, and with that step's key or none, from a step whose
+   * code its review shows calling it (`#requireReviewed`), as the attempt
+   * `from` does (see `#attemptOf`).
    */
   async callConnection(
     binding: unknown,
-    call: unknown
+    call: unknown,
+    from?: unknown
   ): Promise<Settled<unknown>> {
     return await settle(async () => {
       const attempt = this.#requireStep();
@@ -1063,6 +1242,7 @@ export class RunHost extends RpcTarget {
       if (grant === undefined) {
         throw workflowErrors.create("workflow.invalid");
       }
+      await this.#requireReviewed(attempt, this.#attemptOf(from), name);
       return await heldNoted(
         attempt,
         async () =>
@@ -1081,7 +1261,8 @@ export class RunHost extends RpcTarget {
 
   /**
    * Calls a method of the run's own App (`env.APP.call(method, ...args)`)
-   * for the person the run acts for, in workflow mode, only inside a step.
+   * for the person the run acts for, in workflow mode, only inside a step
+   * whose code its review shows calling it (`#requireReviewed`, as `APP`).
    * The caller the method gets carries the step's key, the only one its
    * connection calls take (app-bindings.ts). Within one App no permission
    * is needed, but the person must still be there, and the run's version
@@ -1098,13 +1279,15 @@ export class RunHost extends RpcTarget {
   ): Promise<Settled<unknown>> {
     return await settle(async () => {
       const attempt = this.#requireStep();
+      const calling = this.#attemptOf(from);
+      await this.#requireReviewed(attempt, calling, "APP");
       attempt.calledApp = true;
       const idempotencyKey = this.#stepKey();
       const caller: AppCallerInput = {
         userId: this.#run.authority.onBehalfOf,
         mode: "workflow",
         idempotencyKey,
-        attempt: this.#attemptOf(from),
+        attempt: calling.id,
       };
       await this.#requirePerson();
       await requireApprovedVersion(this.#env, this.#run.app, this.#run.version);
@@ -1125,7 +1308,8 @@ export class RunHost extends RpcTarget {
   /**
    * Calls export `method` of another App, by the run's permission on its
    * exports (`binding`), with `input` (`env.CRM.call(method, input)`),
-   * only inside a step, for the person the run acts for (app-calls.ts).
+   * only inside a step whose code its review shows calling that binding
+   * (`#requireReviewed`), for the person the run acts for (app-calls.ts).
    * The called App's method gets the step's key on its caller, the only
    * one its connection calls take, so a side effect it holds holds the
    * step as the run's own would.
@@ -1145,8 +1329,9 @@ export class RunHost extends RpcTarget {
       if (grant === undefined) {
         throw workflowErrors.create("workflow.invalid");
       }
-      attempt.calledApp = true;
       const from = this.#attemptOf(calling);
+      await this.#requireReviewed(attempt, from, name);
+      attempt.calledApp = true;
       return await heldNoted(
         attempt,
         async () =>
@@ -1155,7 +1340,7 @@ export class RunHost extends RpcTarget {
             {
               authority,
               idempotencyKey,
-              attempt: from,
+              attempt: from.id,
               // A run's call ends by the called App's own limit.
               path: {
                 chain: [app],
