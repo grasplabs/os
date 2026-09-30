@@ -7,7 +7,7 @@ import {
   describeWorkflow,
 } from "../src/describe.ts";
 import { createTestEngine } from "../src/testing.ts";
-import { outlineOf } from "./outline.ts";
+import { asDefaultExport, outlineOf } from "./outline.ts";
 import { payoutWorkflow } from "./payout-workflow.ts";
 // oxlint-disable-next-line import/default -- Vite's `?raw` import; typed in raw.d.ts
 import payoutSource from "./payout-workflow.ts?raw";
@@ -35,7 +35,7 @@ const inStep = (code: string, name = "tidy-up"): string =>
 
 describe(describeWorkflow, () => {
   it("shows a step in a loop once, nested under the loop", () => {
-    expect(outlineOf(payoutSource)).toStrictEqual([
+    expect(outlineOf(asDefaultExport(payoutSource))).toStrictEqual([
       {
         type: "loop",
         header: "for (const payout of input.payouts)",
@@ -395,6 +395,28 @@ describe(describeWorkflow, () => {
       ],
       [`let leaked;\ndelete Object.hasOwn;`, "Don't change `Object`, a global"],
       [`let leaked;\nPromise = undefined;`, "Don't change `Promise`, a global"],
+      // The same through a destructuring assignment, however nested, and
+      // a loop that assigns each time round.
+      [
+        `let leaked;\n({ map: Array.prototype.map } = { map() { leaked = this; return []; } });`,
+        "Don't change `Array`, a global",
+      ],
+      [
+        `let leaked;\n[Object.fromEntries] = [(entries) => { leaked = entries; }];`,
+        "Don't change `Object`, a global",
+      ],
+      [
+        `let leaked;\n({ made: { with: [, Array.prototype.map = () => leaked] } } = { made: { with: [] } });`,
+        "Don't change `Array`, a global",
+      ],
+      [
+        `let leaked;\n({ leaked, ...Object.prototype } = { APP: 1 });`,
+        "Don't change `Object`, a global",
+      ],
+      [
+        `let leaked;\nfor (Array.prototype.map of [() => leaked]) {}`,
+        "Don't change `Array`, a global",
+      ],
       // A name declared somewhere else in the file is still the global here.
       [
         `let leaked;\nconst first = (Array) => Array[0];\nArray.prototype.map = function () { leaked = this; return []; };`,
@@ -489,9 +511,58 @@ describe(describeWorkflow, () => {
         "Export the workflow as the file's default"
       );
     }
+    // A workflow its file doesn't export as its default doesn't load, so
+    // it has no steps to show.
+    for (const unexported of [
+      `${decoy};`,
+      `export const tidy = ${decoy};`,
+      `const tidy = ${decoy};\nexport default tidy;`,
+    ]) {
+      expect(() => describeWorkflow(`${sdk}\n${unexported}`)).toThrow(
+        "Export the workflow as the file's default"
+      );
+    }
     expect(
       describeWorkflow(`${sdk}\nexport default ${decoy};`).steps
     ).toHaveLength(1);
+  });
+
+  it("leaves alone a variable named env that a scope inside the workflow's function declares for itself", () => {
+    const envOf = (body: string): unknown[] =>
+      describeWorkflow(workflowSource(body, "step, { input, env }")).steps.map(
+        (node) => (node.type === "step" ? node.env : node.type)
+      );
+
+    // A callback's own parameter, in a step and between steps.
+    expect(
+      envOf(
+        `const count = (env) => env.length;\n${inStep(`return input.totals.reduce((sum, env) => sum + env, count(input.totals));`)}`
+      )
+    ).toStrictEqual([undefined]);
+    // The step's own variable: its calls aren't the App's bindings'.
+    expect(
+      envOf(
+        inStep(
+          `const env = { LOCAL: { call: () => 1 } }; return env.LOCAL.call();`
+        )
+      )
+    ).toStrictEqual([undefined]);
+    // Next to it, the context's `env` still counts.
+    expect(
+      envOf(
+        inStep(
+          `const total = input.totals.reduce((sum, env) => sum + env, 0); await env.APP.call("book", total);`
+        )
+      )
+    ).toStrictEqual([["APP"]]);
+    // Handing the context's `env` to a variable of that name is a use of it.
+    expect(() =>
+      envOf(
+        inStep(
+          `const send = (env) => env.APP.call("sendAll"); await send(env);`
+        )
+      )
+    ).toThrow("don't keep `env`");
   });
 
   it("checks how the bindings are called apart from how the steps are laid out", () => {

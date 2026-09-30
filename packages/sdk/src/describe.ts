@@ -160,6 +160,12 @@ interface Bindings {
   env: string | undefined;
   /** The SDK's stubs the file imports, by the name it imports each as. */
   stubs: ReadonlyMap<string, Stub>;
+  /**
+   * Each identifier in the workflow function that is its `env`: every one
+   * of that name but those a scope inside the function declares anew (a
+   * callback's own `env` parameter, say).
+   */
+  envUses: ReadonlySet<Node>;
 }
 
 const contextKeys = new Set([
@@ -212,6 +218,7 @@ const bindingsOf = (
     state: undefined,
     env: undefined,
     stubs,
+    envUses: new Set(),
   };
   if (!contextParam) {
     return bindings;
@@ -385,11 +392,7 @@ const envCallsIn = (bindings: Bindings, nodes: Node[]): string[] => {
   const names: string[] = [];
   for (const node of nodes) {
     visit(node, (candidate, ancestors) => {
-      if (
-        candidate.type !== "Identifier" ||
-        candidate.name !== bindings.env ||
-        isNamePosition(ancestors)
-      ) {
+      if (!bindings.envUses.has(candidate)) {
         return;
       }
       const called = envCallOf(bindings, ancestors);
@@ -451,7 +454,19 @@ const checkBindingUses = (body: Node, bindings: Bindings): void => {
 // `env`, a binding or an SDK stub that is kept in a variable, passed on,
 // spread or read by a computed name, and a call in a function inside a
 // step's own could be kept there and made by another step.
-const checkEnvUses = (body: Node, bindings: Bindings): void => {
+//
+// Only the `env` the workflow function's parameter list binds counts: a
+// scope inside it that declares the name anew (`(sum, env) => sum + env`)
+// has a variable of its own, which is left alone. That hides nothing: such
+// a variable holds the bindings only if it is given them, and giving them
+// (`const env = outer`, `helper(env)`) is a use of the context's `env` that
+// is refused where it is written. Answers the uses that are the context's.
+const checkEnvUses = (
+  body: Node,
+  bindings: Bindings,
+  scopes: ReadonlyMap<Node, ReadonlySet<string>>
+): Set<Node> => {
+  const uses = new Set<Node>();
   visit(body, (node, ancestors) => {
     if (node.type === "ThisExpression") {
       throw fail(node, "Don't use `this` in the workflow's function");
@@ -471,16 +486,22 @@ const checkEnvUses = (body: Node, bindings: Bindings): void => {
         `Only call \`${node.name}\`; don't rename it or pass it on`
       );
     }
-    if (node.name !== bindings.env) {
+    const { name } = node;
+    const declaredAnew = ancestors.some(
+      ({ node: above }) => scopes.get(above)?.has(name) === true
+    );
+    if (name !== bindings.env || declaredAnew) {
       return;
     }
     if (envCallOf(bindings, ancestors) === undefined) {
-      throw fail(node, envHint(node.name));
+      throw fail(node, envHint(name));
     }
     if (!inStepFunction(bindings, ancestors)) {
       throw fail(node, stepHint);
     }
+    uses.add(node);
   });
+  return uses;
 };
 
 /** The names a declaration's pattern binds, without its defaults' code. */
@@ -586,13 +607,40 @@ const rootOf = (target: Node): string | undefined => {
     : undefined;
 };
 
+/**
+ * What an assignment's left side assigns to: itself, or each target of a
+ * destructuring pattern, however nested, with or without a default
+ * (`({ map: Array.prototype.map = fallback, ...rest } = replacement)`).
+ */
+const assignedIn = (target: Node): Node[] => {
+  if (target.type === "ObjectPattern") {
+    return target.properties.flatMap((property) =>
+      assignedIn(property.type === "ObjectProperty" ? property.value : property)
+    );
+  }
+  if (target.type === "ArrayPattern") {
+    return target.elements.flatMap((element) =>
+      element ? assignedIn(element) : []
+    );
+  }
+  if (target.type === "RestElement") {
+    return assignedIn(target.argument);
+  }
+  return target.type === "AssignmentPattern"
+    ? assignedIn(target.left)
+    : [target];
+};
+
 /** What a node assigns to, deletes or counts up: the targets it changes. */
 const changedBy = (node: Node): Node[] => {
   if (node.type === "AssignmentExpression") {
-    return node.left.type === "ObjectPattern" ||
-      node.left.type === "ArrayPattern"
+    return assignedIn(node.left);
+  }
+  // A loop over a target it doesn't declare assigns to it each time round.
+  if (node.type === "ForOfStatement" || node.type === "ForInStatement") {
+    return node.left.type === "VariableDeclaration"
       ? []
-      : [node.left];
+      : assignedIn(node.left);
   }
   if (node.type === "UpdateExpression") {
     return [node.argument];
@@ -720,19 +768,24 @@ const sdkImportsOf = (file: Node): Map<string, string | undefined> => {
   return imports;
 };
 
-/** Whether the file exports anything but `call` as its default. */
-const exportsAnotherDefault = (file: Node, call: CallExpression): boolean =>
-  some(file, (node) => {
-    if (node.type === "ExportDefaultDeclaration") {
-      return node.declaration !== call;
-    }
-    return (
-      node.type === "ExportNamedDeclaration" &&
-      node.specifiers.some(
-        (specifier) => nameOf(specifier.exported) === "default"
-      )
-    );
-  });
+/** Whether the file's default export is `call`, written as one, and nothing else. */
+const isDefaultExport = (file: Node, call: CallExpression): boolean => {
+  const exported = some(
+    file,
+    (node) =>
+      node.type === "ExportDefaultDeclaration" && node.declaration === call
+  );
+  const another = some(
+    file,
+    (node) =>
+      (node.type === "ExportDefaultDeclaration" && node.declaration !== call) ||
+      (node.type === "ExportNamedDeclaration" &&
+        node.specifiers.some(
+          (specifier) => nameOf(specifier.exported) === "default"
+        ))
+  );
+  return exported && !another;
+};
 
 /**
  * The workflow function: the third argument of the one `workflow` call,
@@ -766,9 +819,10 @@ const findWorkflowFunction = (
     );
   }
   // The file's default export is what runs: a workflow made some other way
-  // and exported in this one's place would run under this one's step list.
-  // A file without a default export runs as no workflow at all.
-  if (exportsAnotherDefault(file, call)) {
+  // and exported in this one's place would run under this one's step list,
+  // and a file without one doesn't load as a workflow at all, so it has
+  // no step list to show.
+  if (!isDefaultExport(file, call)) {
     throw fail(
       call,
       "Export the workflow as the file's default: `export default workflow(…)`"
@@ -1181,8 +1235,8 @@ const readContext = (
   checkModuleScope(file);
   const { run, stubs } = findWorkflowFunction(file);
   const bindings = bindingsOf(run.params, stubs);
-  checkEnvUses(run.body, bindings);
-  return { run, bindings };
+  const envUses = checkEnvUses(run.body, bindings, scopesOf(run.body));
+  return { run, bindings: { ...bindings, envUses } };
 };
 
 /**
@@ -1190,7 +1244,8 @@ const readContext = (
  * change, as it loads, what a run is built from: it names a global object
  * (`globalThis`, `self`) or a built-in the run's bindings are made with
  * (`Proxy`, `Reflect`, `Function`, `eval`), or assigns to anything it
- * doesn't declare itself: a global, a built-in, or what it imports.
+ * doesn't declare itself, by destructuring too: a global, a built-in, or
+ * what it imports.
  * `checkWorkflowBindings` asks the same of the workflow's own file.
  */
 export const checkWorkflowModule = (source: string): void => {
@@ -1210,7 +1265,8 @@ export const checkWorkflowModule = (source: string): void => {
  * steps and not in a function inside it, which another step could run.
  * `this`, `arguments`, and `env`, a binding or an SDK stub that is
  * renamed, kept in a variable, passed on, spread or read by a computed
- * name are errors, and so is what `checkWorkflowModule` refuses, each
+ * name are errors (a variable named `env` that a scope inside the
+ * function declares for itself is its own, and left alone), and so is what `checkWorkflowModule` refuses, each
  * saying how to write it instead.
  *
  * It is the part of `describeWorkflow` that isn't about how steps are laid

@@ -64,9 +64,8 @@ export default workflow(
     input: z.object({ invoice: z.string() }),
   },
   async (step, { input, params, env }) => {
-    const app = appServer<App>(env);
     await step.do("receive", { description: "Mark the invoice received", input: input.invoice }, async ({ input: invoice }) => {
-      await app.setStatus(invoice, "received");
+      await appServer<App>(env).setStatus(invoice, "received");
     });
     const review = await step.decision("review", {
       description: \`Approve \${input.invoice}\`,
@@ -79,7 +78,7 @@ export default workflow(
       "book",
       { description: "Book the invoice", sideEffect: true, input: { invoice: input.invoice, status } },
       async ({ input: booking }) => {
-        await app.setStatus(booking.invoice, booking.status);
+        await appServer<App>(env).setStatus(booking.invoice, booking.status);
       }
     );
     return { status };
