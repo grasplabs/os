@@ -113,17 +113,64 @@ const NativeConnect = ({
   );
 };
 
+/** One tool the admin allows, and whether they say it only reads. */
+interface AllowedTool {
+  name: string;
+  read: boolean;
+}
+
 /**
- * Connecting a Composio toolkit: the admin picks the tools to allow, reads
- * what they consent to, and consents by connecting. Each tool is allowed
- * by name, so every call of it counts as a side effect and waits for its
- * person to confirm it.
+ * One tool of the toolkit: whether to allow it and, once allowed, whether
+ * it only reads. That starts as Composio's hint says (`CatalogTool.readOnly`),
+ * so a tool without the hint changes things until the admin says otherwise.
+ */
+const ToolChoice = ({
+  tool,
+  choice,
+  onChange,
+}: {
+  tool: CatalogTool;
+  choice: AllowedTool | undefined;
+  onChange: (next: AllowedTool | undefined) => void;
+}) => (
+  <div className="flex items-center justify-between gap-4 text-sm">
+    <label className="flex items-center gap-2">
+      <Checkbox
+        checked={choice !== undefined}
+        onCheckedChange={(checked) => {
+          onChange(
+            checked ? { name: tool.name, read: tool.readOnly } : undefined
+          );
+        }}
+      />
+      {tool.name}
+    </label>
+    {choice === undefined ? null : (
+      <div className="text-muted-foreground flex items-center gap-2">
+        <Checkbox
+          checked={choice.read}
+          aria-label={`${tool.name} is read-only`}
+          onCheckedChange={(read) => {
+            onChange({ name: tool.name, read });
+          }}
+        />
+        <span aria-hidden="true">Read-only</span>
+      </div>
+    )}
+  </div>
+);
+
+/**
+ * Connecting a Composio toolkit: the admin picks the tools to allow, says
+ * which of them only read, reads what they consent to, and consents by
+ * connecting. A read-only tool runs without asking; a call of any other is
+ * a side effect and waits for its person to confirm it.
  */
 const ComposioConnect = ({ entry }: { entry: Entry }) => {
   const { busy, failure, run } = useCoreAction();
   const [open, setOpen] = useState(false);
   const [tools, setTools] = useState<CatalogTool[]>();
-  const [allowed, setAllowed] = useState<string[]>([]);
+  const [allowed, setAllowed] = useState<AllowedTool[]>([]);
   const loadTools = async (): Promise<void> => {
     const listed = await run(
       async (session) =>
@@ -139,7 +186,9 @@ const ComposioConnect = ({ entry }: { entry: Entry }) => {
         async (session) =>
           await session.connections.connectToolkit({
             toolkit: entry.id,
-            tools: allowed,
+            tools: allowed.map(({ name, read }) =>
+              read ? { name, read } : name
+            ),
             consent: composioConsentText,
             returnTo,
           })
@@ -173,23 +222,27 @@ const ComposioConnect = ({ entry }: { entry: Entry }) => {
         </DialogHeader>
         <fieldset className="flex max-h-80 flex-col gap-2 overflow-y-auto">
           <legend className="mb-2 text-sm font-medium">Tools to allow</legend>
+          <p className="text-muted-foreground text-sm">
+            A read-only tool runs without asking. Every other tool waits each
+            time for the person it acts for to confirm it. Mark a tool read-only
+            only if it changes nothing: marked wrongly, it changes things
+            without asking.
+          </p>
           {tools === undefined && busy ? (
             <p className="text-muted-foreground text-sm">Loading its tools…</p>
           ) : null}
           {tools?.map((tool) => (
-            <label key={tool.name} className="flex items-center gap-2 text-sm">
-              <Checkbox
-                checked={allowed.includes(tool.name)}
-                onCheckedChange={(checked) => {
-                  setAllowed((current) =>
-                    checked
-                      ? [...current, tool.name]
-                      : current.filter((name) => name !== tool.name)
-                  );
-                }}
-              />
-              {tool.name}
-            </label>
+            <ToolChoice
+              key={tool.name}
+              tool={tool}
+              choice={allowed.find(({ name }) => name === tool.name)}
+              onChange={(next) => {
+                setAllowed((current) => [
+                  ...current.filter(({ name }) => name !== tool.name),
+                  ...(next === undefined ? [] : [next]),
+                ]);
+              }}
+            />
           ))}
         </fieldset>
         <ErrorText>{failure}</ErrorText>

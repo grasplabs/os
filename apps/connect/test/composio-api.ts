@@ -20,6 +20,8 @@ export interface FakeComposioTool {
   description?: string;
   /** The properties its input takes. */
   inputs?: string[];
+  /** Its behaviour tags, such as `readOnlyHint`; by default none. */
+  tags?: string[];
 }
 
 export interface FakeToolkit {
@@ -485,19 +487,21 @@ export const fakeComposioApi = (
         ({ slug }) => slug === url.searchParams.get("toolkit_slug")
       );
       return page(
-        (toolkit?.tools ?? []).map(({ slug, description, inputs = [] }) => ({
-          slug,
-          name: slug,
-          description,
-          toolkit: { slug: toolkit?.slug, name: toolkit?.name },
-          input_parameters: {
-            type: "object",
-            properties: Object.fromEntries(
-              inputs.map((input) => [input, { type: "string" }])
-            ),
-          },
-          tags: [],
-        })),
+        (toolkit?.tools ?? []).map(
+          ({ slug, description, inputs = [], tags = [] }) => ({
+            slug,
+            name: slug,
+            description,
+            toolkit: { slug: toolkit?.slug, name: toolkit?.name },
+            input_parameters: {
+              type: "object",
+              properties: Object.fromEntries(
+                inputs.map((input) => [input, { type: "string" }])
+              ),
+            },
+            tags,
+          })
+        ),
         cursor
       );
     }

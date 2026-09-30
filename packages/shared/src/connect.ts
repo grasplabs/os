@@ -332,6 +332,14 @@ export interface CatalogTool {
    * input property that names a Composio tool's resource is one of these.
    */
   inputs: string[];
+  /**
+   * Whether its provider declares that it only reads. A native tool's
+   * manifest says so and connect goes by it. A Composio tool's is only a
+   * hint (its `readOnlyHint` tag), the default for the admin's own choice
+   * (`ComposioToolRule.read`): a tool without the hint counts as one that
+   * changes things.
+   */
+  readOnly: boolean;
 }
 
 /**

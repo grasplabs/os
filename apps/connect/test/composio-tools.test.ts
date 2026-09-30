@@ -212,6 +212,23 @@ describe("a Composio tool the admin didn't mark as a read", () => {
     expect(composio.state.mcp.ran).toStrictEqual([]);
   });
 
+  it("waits in chat for its person, audited as a side effect, and doesn't run", async () => {
+    const anna = someone();
+    const connectionId = await hubspot();
+    const inChat = agentFor(anna.userId, "agent-chat", "interactive");
+    const call = {
+      ...read(connectionId, "HUBSPOT_GET_CONTACT", { contact_id: "c-1" }),
+      idempotencyKey: crypto.randomUUID(),
+    };
+    const answer = await callAs(inChat, call, { origin: chatOrigin });
+    const [pending] = await exports.default.listPendingActions(anna);
+    expect(answer.pending?.id).toBe(pending?.id);
+    expect(pending?.action).toBe("HUBSPOT_GET_CONTACT");
+    const [held] = await events();
+    expect(held?.detail).toMatchObject({ sideEffect: true, outcome: "held" });
+    expect(composio.state.mcp.ran).toStrictEqual([]);
+  });
+
   it("isn't held to the resource property its server names, only to one the admin named", async () => {
     const connectionId = await hubspot();
     const call = {
