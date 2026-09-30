@@ -26,9 +26,16 @@ export type GatewayReply =
       truncated?: boolean;
       /**
        * Streams the text's first `at` characters, then waits for `until`
-       * before the rest (Anthropic only): an answer caught mid-stream.
+       * before the rest (Anthropic and chat completions): an answer caught
+       * mid-stream.
        */
       pause?: { at: number; until: Promise<unknown> };
+      /**
+       * Streams the text's first `cut` characters, then closes the stream
+       * with nothing after them, neither an end nor a count (Anthropic and
+       * chat completions): an answer that breaks off.
+       */
+      cut?: number;
     }
   | { status: number; errorType?: string }
   | { hang: true };
@@ -64,15 +71,27 @@ const sse = ({ event, data }: StreamEvent): Uint8Array =>
 
 /**
  * A server-sent event stream of `events`, stopping at each pause until it
- * settles.
+ * settles. Aborting the request (`signal`) breaks the stream off, as it
+ * does a real response's body.
  */
 const eventStream = (
   events: readonly (StreamEvent | StreamPause)[],
-  logId: string
+  logId: string,
+  signal: AbortSignal
 ): Response => {
   const { readable, writable } = new TransformStream<Uint8Array>();
+  const writer = writable.getWriter();
+  const stop = async (): Promise<void> => {
+    try {
+      await writer.abort(new Error("The request was aborted"));
+    } catch {
+      // Already closed: the answer was whole.
+    }
+  };
+  signal.addEventListener("abort", () => {
+    void stop();
+  });
   const write = async (): Promise<void> => {
-    const writer = writable.getWriter();
     try {
       for (const item of events) {
         // oxlint-disable-next-line no-await-in-loop -- in order, pausing where told
@@ -212,18 +231,28 @@ const chunk = (fields: object) => ({
   },
 });
 
-const chatCompletionEvents = (answer: Answer) => {
-  const { text, inputTokens, outputTokens } = answer;
-  return [
+const chatCompletionEvents = (
+  answer: Answer
+): (StreamEvent | StreamPause)[] => {
+  const { text, inputTokens, outputTokens, pause } = answer;
+  const content = (part: string): StreamEvent =>
     chunk({
       choices: [
         {
           index: 0,
-          delta: { role: "assistant", content: text },
+          delta: { role: "assistant", content: part },
           finish_reason: null,
         },
       ],
-    }),
+    });
+  return [
+    ...(pause === undefined
+      ? [content(text)]
+      : [
+          content(text.slice(0, pause.at)),
+          { until: pause.until },
+          content(text.slice(pause.at)),
+        ]),
     ...(answer.toolCalls ?? []).map((call, index) =>
       chunk({
         choices: [
@@ -357,15 +386,35 @@ const responsesEvents = ({
 };
 
 /** The provider's stream for `answer`, by the gateway route requested. */
-const providerStream = (url: URL, answer: Answer, logId: string): Response => {
-  if (url.pathname.endsWith("/v1/messages")) {
-    return eventStream(anthropicEvents(answer), logId);
+const providerStream = (
+  { url, signal }: Request,
+  answer: Answer,
+  logId: string
+): Response => {
+  const { pathname } = new URL(url);
+  const { cut } = answer;
+  // An answer that breaks off: only the events up to its first text.
+  const begun = { ...answer, text: answer.text.slice(0, cut), toolCalls: [] };
+  if (pathname.endsWith("/v1/messages")) {
+    return eventStream(
+      cut === undefined
+        ? anthropicEvents(answer)
+        : anthropicEvents(begun).slice(0, 3),
+      logId,
+      signal
+    );
   }
-  if (url.pathname.endsWith("/chat/completions")) {
-    return eventStream(chatCompletionEvents(answer), logId);
+  if (pathname.endsWith("/chat/completions")) {
+    return eventStream(
+      cut === undefined
+        ? chatCompletionEvents(answer)
+        : chatCompletionEvents(begun).slice(0, 1),
+      logId,
+      signal
+    );
   }
-  if (url.pathname.endsWith("/responses")) {
-    return eventStream(responsesEvents(answer), logId);
+  if (pathname.endsWith("/responses")) {
+    return eventStream(responsesEvents(answer), logId, signal);
   }
   return new Response("No such route", { status: 404 });
 };
@@ -415,11 +464,7 @@ export const fakeGateway = (...replies: GatewayReply[]) => {
         { status: reply.status }
       );
     }
-    return providerStream(
-      new URL(request.url),
-      reply,
-      `log-${requests.length}`
-    );
+    return providerStream(request, reply, `log-${requests.length}`);
   };
   return { binding: { aiGatewayLogId: null, fetch }, requests };
 };

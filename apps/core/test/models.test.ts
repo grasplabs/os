@@ -170,7 +170,7 @@ describe("model gateway", { timeout: 30_000 }, () => {
     }).toStrictEqual({ text: "Hello.", gateways: ["grasp-os"] });
   });
 
-  it("sends no provider key, so the gateway uses the keys it stores", async () => {
+  it("sends no provider key, so the gateway uses the keys it stores, and takes no answer from its cache", async () => {
     const { gateway, gatewayEnv } = withGateway([
       answer("One"),
       answer("Two"),
@@ -194,8 +194,13 @@ describe("model gateway", { timeout: 30_000 }, () => {
       expect(headers.get("cf-aig-authorization")).toBe(
         "Bearer cloudflare-gateway-binding"
       );
-      // The gateway logs metadata only, never the prompt or the answer.
-      expect(headers.get("cf-aig-collect-log-payload")).toBe("false");
+      expect({
+        // The gateway logs metadata only, never the prompt or the answer.
+        logsPayload: headers.get("cf-aig-collect-log-payload"),
+        // Nor answers from its cache, however the gateway is set: an
+        // answer it kept would be someone else's.
+        skipsCache: headers.get("cf-aig-skip-cache"),
+      }).toStrictEqual({ logsPayload: "false", skipsCache: "true" });
       expect(
         JSON.parse(headers.get("cf-aig-metadata") ?? "null")
       ).toStrictEqual({ purpose: "chat.turn", actor: "person" });
@@ -763,12 +768,15 @@ describe("model gateway for agents", () => {
         // The tool went along, to the deployment's gateway.
         gateway: new URL(request?.url ?? "").pathname.split("/")[3],
         offered: JSON.stringify(request?.body).includes("Runs code."),
+        // A loop's requests too: never an answer from the gateway's cache.
+        skipsCache: request?.headers.get("cf-aig-skip-cache"),
       }).toStrictEqual({
         streamed: true,
         stopReason: "toolUse",
         toolCalls: [["executeCode", { code: "1 + 1" }]],
         gateway: "grasp-os-test",
         offered: true,
+        skipsCache: "true",
       });
       const [event] = await auditedFor(trigger.userId, 1);
       expect(event).toMatchObject({
@@ -921,9 +929,15 @@ describe("model gateway for agents", () => {
       errorMessage: "The model call was cancelled.",
     });
     const [event] = await auditedFor(trigger.userId, 1);
-    expect(event?.detail).toMatchObject({
-      outcome: "cancelled",
-      errorType: "cancelled",
+    // The gateway never answered, so nothing was used that can be told:
+    // no estimate, and no cost.
+    expect(event).toMatchObject({
+      detail: {
+        outcome: "cancelled",
+        errorType: "cancelled",
+        estimated: false,
+      },
+      cost: { amount: 0 },
     });
   });
 });
