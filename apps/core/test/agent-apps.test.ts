@@ -14,7 +14,7 @@ import type { GatewayReply } from "./ai-gateway.ts";
 import { requestGranted } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
-import { readCollection } from "./knowledge.ts";
+import { readCollection, storedGrant } from "./knowledge.ts";
 import { finished } from "./runs.ts";
 import { signedInApi } from "./sign-in.ts";
 import { appWith, workflowFiles } from "./workflow-apps.ts";
@@ -401,15 +401,41 @@ describe("a chat's Apps and workflows", () => {
 
   it("read no further than the person may, with every permission granted", async () => {
     // Someone with no role in the App.
-    const { chat, grant } = await setUp(
-      (made) => [codeStep(everyCall(made)), says("Nothing of theirs.")],
+    const { builder, person, app, chat, grant } = await setUp(
+      (made) => [
+        codeStep(everyCall(made)),
+        says("Nothing of theirs."),
+        codeStep(
+          tryEach({
+            status: `await env.workflows.status(${JSON.stringify(made.run)})`,
+          })
+        ),
+        says("Still nothing."),
+      ],
       "user"
     );
     await grant();
 
     await chat.ask("What's there?");
+    // Then the App is shared with them, but has read what they can't read
+    // (a collection Knowledge doesn't know): its runs are no runs still.
+    await builder.api.apps.members.add(app, {
+      type: "person",
+      id: person.userId,
+      role: "user",
+    });
+    await storedGrant(
+      { type: "app", id: app },
+      { type: "collection", id: crypto.randomUUID() },
+      ["read"],
+      "ARCHIVE"
+    );
+    await chat.ask("And now?");
 
-    const [result] = await codeResults(chat.stub, chat.chat.id);
+    const [result, shared] = await codeResults(chat.stub, chat.chat.id);
+    expect(shared?.text).toBe(
+      `Returned:\n${JSON.stringify({ status: noSuchRun })}`
+    );
     const notFound = appErrors.create("app.not_found").message;
     expect(result?.text).toBe(
       `Returned:\n${JSON.stringify({

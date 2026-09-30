@@ -95,14 +95,19 @@ const notFound = () => workflowErrors.create("workflow.run_not_found");
 
 /**
  * A run the agent may not see, as one that doesn't exist: its App is one
- * the person can't open, or its workflow one the agent may not read. The
- * same refusal as an unknown run, so run IDs can't be probed.
+ * the person can't open, however it refuses them (none for them, or one
+ * shared with them that read what they can't read), or its workflow one
+ * the agent may not read. The same refusal as an unknown run, so run IDs
+ * can't be probed.
  */
-const hidden = (error: unknown): unknown =>
-  appErrors.codeOf(error) === "app.not_found" ||
-  roleErrors.codeOf(error) !== undefined
+const hidden = (error: unknown): unknown => {
+  const code = appErrors.codeOf(error);
+  return code === "app.not_found" ||
+    code === "app.unreadable" ||
+    roleErrors.codeOf(error) !== undefined
     ? notFound()
     : error;
+};
 
 /** Workflows, as a chat's code reads them. */
 export class WorkflowsApi extends WorkerEntrypoint<Env, AgentScope> {

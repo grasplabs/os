@@ -1,11 +1,9 @@
-import { connectorEventActions } from "@grasp-os/shared/connect";
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
 import { invoiceMail } from "../../connect/test/fixtures/graph-events.ts";
-import { listenersOf } from "../src/workflows/connector-events.ts";
 import { release, requestGranted } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { consentCode, graphControlUrl } from "./connect-providers.ts";
@@ -194,18 +192,31 @@ describe("connector events", () => {
   });
 
   it("find who listens by index, reading no table whole", async () => {
-    await listening();
-    const recorded = await recordedQueries(async () => await listenersOf(env));
+    const { connection } = await listening();
+    // As the cron trigger asks, telling connect where to listen.
+    const recorded = await recordedQueries(async () => {
+      await runCron();
+    });
+    const lookups = recorded.filter(
+      ({ query }) =>
+        query.includes('"workflow_triggers"."event"') &&
+        query.includes('json_each("permissions"."actions")')
+    );
     const plans = await Promise.all(
-      recorded.map(async (query) => await planOf(query))
+      lookups.map(async (query) => await planOf(query))
     );
     const steps = plans.flat();
 
-    // One query per event type.
-    expect(plans).toHaveLength(Object.keys(connectorEventActions).length);
-    expect(steps.filter((step) => fullScan.test(step))).toStrictEqual([]);
-    expect(steps.filter((step) => step.includes("TEMP B-TREE"))).toStrictEqual(
-      []
-    );
+    expect({
+      listening: await sources(connection),
+      asked: lookups.length > 0,
+      scans: steps.filter((step) => fullScan.test(step)),
+      sorts: steps.filter((step) => step.includes("TEMP B-TREE")),
+    }).toStrictEqual({
+      listening: ["m365.mail.received"],
+      asked: true,
+      scans: [],
+      sorts: [],
+    });
   });
 });

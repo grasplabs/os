@@ -57,9 +57,13 @@ export const runToFix = async (
   if (row === undefined) {
     throw notFound();
   }
+  // However the App refuses them (none for them, read what they can't
+  // read, too low a role): the same answer as an unknown run's.
   const app = await appFor(env, by, row.appId, "user").catch(
     (error: unknown) => {
-      throw appErrors.codeOf(error) === "app.not_found" ||
+      const code = appErrors.codeOf(error);
+      throw code === "app.not_found" ||
+        code === "app.unreadable" ||
         roleErrors.codeOf(error) !== undefined
         ? notFound()
         : error;

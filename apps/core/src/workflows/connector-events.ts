@@ -26,7 +26,7 @@ import {
   allowingPermissionSql,
   listeningPermissionSql,
 } from "../permissions.ts";
-import { atHourlyCap, startRun } from "./runs.ts";
+import { deliveryRoom, startRun } from "./runs.ts";
 
 // Events connections report, to workflows' event triggers
 // (trigger-registry.ts). Connect can't reach core, so core drives it, as
@@ -157,10 +157,10 @@ export const deliverConnectorEvent = async (
   // Each workflow's limit is its own: the event goes to those with room
   // now or its run already, and the others get it when it's delivered
   // again.
-  const capped = await Promise.all(
+  const rooms = await Promise.all(
     receivers.map(
       async (receiver) =>
-        await atHourlyCap(
+        await deliveryRoom(
           env,
           receiver.appId,
           receiver.workflowId,
@@ -169,7 +169,7 @@ export const deliverConnectorEvent = async (
         )
     )
   );
-  const withRoom = receivers.filter((_, index) => capped[index] !== true);
+  const withRoom = receivers.filter((_, index) => rooms[index] !== "capped");
   const started = await Promise.allSettled(
     withRoom.map(
       async (receiver) =>

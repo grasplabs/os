@@ -587,15 +587,22 @@ describe("email triggers", () => {
     );
   });
 
-  it("start one run for a message delivered again, by its Message-ID or else its bytes", async () => {
+  it("start one run for a message delivered again, by its Message-ID or else its bytes, and keep it once", async () => {
     const builder = await personApi("builder");
     const app = await appWith(builder, intake("twice"));
     const messageId = `${crypto.randomUUID()}@acme.test`;
     const to = "twice@grasp.test";
+    const before = await storedObjects();
 
     // Redelivered through another server: new Received header, same ID.
     await deliver(to, invoiceMail({ to, messageId, receivedBy: "mx1" }));
     await deliver(to, invoiceMail({ to, messageId, receivedBy: "mx2" }));
+    // Sent again under the same ID with other words each time: the same
+    // message still, and nothing more of it is kept.
+    for (const text of ["Pay today.", "Pay now.", "Pay at once."]) {
+      // oxlint-disable-next-line no-await-in-loop -- one delivery after another
+      await deliver(to, invoiceMail({ to, messageId, text }));
+    }
     // Without a Message-ID, the same bytes are the same message.
     await deliver(to, invoiceMail({ to, subject: "INV-8" }));
     await deliver(to, invoiceMail({ to, subject: "INV-8" }));
@@ -605,6 +612,17 @@ describe("email triggers", () => {
     await deliver(to, invoiceMail({ to, subject: "INV-11", messageId: "" }));
 
     await expect(runsOf(builder, app)).resolves.toHaveLength(5);
+    // One kept message a run, however often and however it came again.
+    const kept = await addedSince(before);
+    const stored = await readByRuns(builder, app);
+    expect(kept.toSorted()).toStrictEqual(
+      stored
+        .map(({ stored: name }) => {
+          const [day, id] = (name ?? "").split("/");
+          return `inbound-email/${day}/${app}/${id}`;
+        })
+        .toSorted()
+    );
     const events = await allEvents();
 
     expect(
@@ -911,6 +929,52 @@ describe("attachments of mail", () => {
         },
       },
     ]);
+  });
+
+  it("are read by a run whose start stopped, from the delivery that starts it again", async () => {
+    const builder = await personApi("builder");
+    const app = await appWith(builder, reader("restarted"));
+    const to = "restarted@grasp.test";
+    const messageId = `${crypto.randomUUID()}@acme.test`;
+    // A first delivery whose run can't be created (an ID Workflows
+    // refuses): it says the message's key, and gives it up.
+    const unstartable: ReturnType<typeof crypto.randomUUID> =
+      `run-${"x".repeat(100)}-${crypto.randomUUID()}`;
+    const uuid = vi
+      .spyOn(crypto, "randomUUID")
+      .mockReturnValueOnce(unstartable);
+    try {
+      await outcome(
+        deliver(to, invoiceMail({ to, messageId, receivedBy: "mx1" }))
+      );
+    } finally {
+      uuid.mockRestore();
+    }
+    const events = await allEvents();
+    const key = events.find(
+      ({ action, target }) =>
+        action === "workflow.run.started" && target?.id === unstartable
+    )?.detail.key;
+    // A start under that key that stopped once its row was written, two
+    // minutes ago: no engine instance, and its input nowhere.
+    const orphan = crypto.randomUUID();
+    await env.DB.prepare(
+      "INSERT INTO workflow_runs (id, app_id, workflow_id, version, started_by, status, created_at, trigger_key) VALUES (?, ?, 'reader', 1, NULL, 'starting', ?, ?)"
+    )
+      .bind(orphan, app, Date.now() - 2 * 60_000, key)
+      .run();
+
+    // Delivered again, through another server: it starts that run, which
+    // reads the message as it came this time.
+    await deliver(to, invoiceMail({ to, messageId, receivedBy: "mx2" }));
+    await finished(orphan);
+    const { status, output } = await builder.api.workflows.status(orphan);
+
+    expect({ key: typeof key, status, output }).toMatchObject({
+      key: "string",
+      status: "completed",
+      output: { content: "%PDF-" },
+    });
   });
 
   it("can't be read by another App's run, which is refused and audited", async () => {
