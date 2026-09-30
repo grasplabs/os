@@ -165,10 +165,12 @@ export const clientDeploys = sqliteTable(
       .notNull()
       .references(() => releases.id),
     /**
-     * What it deploys: a release, or only new secrets on the release the
-     * client runs (a secrets rollout). Core records it as what changed.
+     * What it deploys: a release, or on the release the client runs
+     * already only new secrets (a secrets rollout, or its own rotated
+     * ones) or only its settings (applied now, or by a rollout of that
+     * release). Core records it as what changed.
      */
-    kind: text({ enum: ["release", "secrets"] })
+    kind: text({ enum: ["release", "secrets", "settings"] })
       .notNull()
       .default("release"),
     /** `superseded`: a newer deploy of the client started, so this one no longer runs. */
@@ -266,7 +268,9 @@ export const rolloutTargets = sqliteTable(
     deployId: text("deploy_id"),
     /**
      * What the client ran before the rollout reached it, which a rollback
-     * restores: JSON (`PreviousRun`, src/rollout/targets.ts).
+     * restores: JSON (`PreviousRun`, src/rollout/targets.ts). After a
+     * rollout that never finished the client, what it ran before that one
+     * (`unfinishedPrevious`).
      */
     previous: text(),
     updatedAt: timestamp("updated_at").notNull(),

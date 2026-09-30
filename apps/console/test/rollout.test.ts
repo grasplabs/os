@@ -311,6 +311,12 @@ const deploymentsOf = (
     );
 };
 
+/** The release each of the client's Workers runs, as the console recorded it. */
+const releasesOf = async (clientId: string): Promise<(string | null)[]> => {
+  const workers = await workersOf(clientId);
+  return workers.map(({ releaseId }) => releaseId);
+};
+
 /** How many deployments each of the account's scripts has had. */
 const deploymentCounts = (account: AccountState): Record<string, number> =>
   Object.fromEntries(
@@ -353,10 +359,11 @@ const runnerOf = async (clientId: string) => {
   return row ?? null;
 };
 
-/** The `FEATURES` var of the core version the console made live on the client. */
-const liveFeaturesOf = async (
+/** The var `name` of the core version the console made live on the client. */
+const liveVarOf = async (
   clientId: string,
-  account: AccountState
+  account: AccountState,
+  name: string
 ): Promise<unknown> => {
   const workers = await workersOf(clientId);
   const core = workers.find(({ worker }) => worker === "core");
@@ -368,7 +375,40 @@ const liveFeaturesOf = async (
         ?.versions.find(({ id }) => id === core?.versionId)?.metadata
         .bindings ?? []
     )
-    .find(({ name }) => name === "FEATURES")?.json;
+    .find((binding) => binding.name === name)?.json;
+};
+
+/** The `FEATURES` var of the core version the console made live on the client. */
+const liveFeaturesOf = async (
+  clientId: string,
+  account: AccountState
+): Promise<unknown> => await liveVarOf(clientId, account, "FEATURES");
+
+/**
+ * What the client's latest deploy changed: as the console audited its
+ * start (`audited`), and as the core version it made live tells the
+ * client's own Activity (`told`, its `PLATFORM_CHANGE`).
+ */
+const latestChangeOf = async (clientId: string, account: AccountState) => {
+  const [started] = await db
+    .select({ detail: auditEvents.detail })
+    .from(auditEvents)
+    .where(
+      and(
+        eq(auditEvents.clientId, clientId),
+        eq(auditEvents.action, "deploy.start")
+      )
+    )
+    // Events of one millisecond in the order they were written.
+    .orderBy(desc(auditEvents.at), desc(sql`rowid`))
+    .limit(1);
+  const { kind } = z
+    .object({ kind: z.string() })
+    .parse(JSON.parse(started?.detail ?? "null"));
+  const { by, what } = platformChangeSchema.parse(
+    await liveVarOf(clientId, account, "PLATFORM_CHANGE")
+  );
+  return { audited: kind, told: { by, what } };
 };
 
 /**
@@ -554,9 +594,14 @@ describe("rolling a release out", () => {
     expect({
       gateway: vars.MODEL_GATEWAY,
       origin: z.object({ origin: z.string() }).parse(vars.SIGN_IN).origin,
+      change: await latestChangeOf(acme.clientId, acme.account),
     }).toMatchObject({
       gateway: { gateway: "grasp-os" },
       origin: `https://${acme.clientId}.grasp.test`,
+      change: {
+        audited: "release",
+        told: { by: staff.email, what: "release" },
+      },
     });
   });
 
@@ -749,12 +794,17 @@ describe("rolling a release out", () => {
     racing.mockRestore();
 
     const [connectNow] = await workersOf(internal.clientId);
+    const actions = await rolloutActions(rolloutId);
     expect({
       recorded: {
         release: connectNow?.releaseId,
         version: connectNow?.versionId,
       },
       targets: await targetsOf(rolloutId),
+      // Stopped by whoever took its client, not by a failure of its own:
+      // its audit trail says what its status does.
+      rollout: await rolloutRow(rolloutId),
+      stopped: actions.at(-1),
       runner: await runnerOf(internal.clientId),
     }).toStrictEqual({
       recorded: { release: before, version: connect?.versionId },
@@ -765,6 +815,8 @@ describe("rolling a release out", () => {
           error: "runner_replaced",
         },
       },
+      rollout: { status: "cancelled", ring: 0 },
+      stopped: "rollout.cancel",
       runner: { runId: "someone-else", kind: "rollout" },
     });
   });
@@ -827,6 +879,8 @@ describe("rolling a release out", () => {
       ),
       newVersion: workers[0]?.versionId !== before?.versionId,
       rotationLive: client?.rotationLiveAt instanceof Date,
+      // Its own secrets on the release it ran already: not a release.
+      change: await latestChangeOf(internal.clientId, internal.account),
     }).toStrictEqual({
       targets: {
         [internal.clientId]: { ring: 0, status: "done", error: null },
@@ -834,10 +888,14 @@ describe("rolling a release out", () => {
       connect: [[100]],
       newVersion: true,
       rotationLive: true,
+      change: {
+        audited: "secrets",
+        told: { by: staff.email, what: "secrets" },
+      },
     });
   });
 
-  it("deploys a client on the release already once staff changed a flag, every Worker at once, so its core gets the flag, and skips it again after", async () => {
+  it("deploys a client on the release already once staff changed a flag, every Worker at once, so its core gets the flag as a settings change, and skips it again after", async () => {
     const release = await importedRelease("feat(core): flagged on it");
     const internal = await activeClient(0, release);
     const [, before] = await workersOf(internal.clientId);
@@ -861,6 +919,8 @@ describe("rolling a release out", () => {
       features: await liveFeaturesOf(internal.clientId, internal.account),
       // Only its config changed, which may be a kill switch: no stages.
       shares: await liveSharesOf(internal.clientId, internal.account, skip),
+      // In the console's audit trail and the client's Activity alike.
+      change: await latestChangeOf(internal.clientId, internal.account),
       again: await targetsOf(again),
     }).toStrictEqual({
       deployed: {
@@ -869,6 +929,10 @@ describe("rolling a release out", () => {
       newVersion: true,
       features: { apps: true },
       shares: { connect: [[100]], core: [[100]] },
+      change: {
+        audited: "settings",
+        told: { by: staff.email, what: "settings" },
+      },
       again: {
         [internal.clientId]: {
           ring: 0,
@@ -2611,6 +2675,127 @@ describe("controlling a rollout", () => {
     });
   });
 
+  it("skips and releases a client the rollout claimed when its claim step runs again after a rollback cancelled the rollout", async () => {
+    const before = await importedRelease("feat(core): the release before");
+    const { first, second } = await twoClients(before);
+    const release = await importedRelease(
+      "feat(core): claimed, then cancelled"
+    );
+    const secondCounts = deploymentCounts(second.account);
+    await using rollbacks = await followRollbacks();
+    // The rollout has claimed the second client and reads what it runs:
+    // the first client's rollback lands then, and the next read times
+    // out, so the claim step runs again, with the rollout cancelled.
+    const readsWhatRuns = (call: { method: string; path: string }): boolean =>
+      call.method === "GET" &&
+      call.path.startsWith(`/accounts/${second.account.id}/`) &&
+      call.path.endsWith("/deployments");
+    cloudflare.beforeAnswering(readsWhatRuns, async () => {
+      await rollbacks.rollBack(await openRollout(), first.clientId);
+      cloudflare.failNext(readsWhatRuns, 408);
+    });
+    await using run = await followRollouts();
+
+    const rolloutId = await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+
+    const deploys = await db
+      .select({ id: clientDeploys.id })
+      .from(clientDeploys)
+      .where(
+        and(
+          eq(clientDeploys.clientId, second.clientId),
+          eq(clientDeploys.releaseId, release)
+        )
+      );
+    expect({
+      targets: await targetsOf(rolloutId),
+      rollout: await rolloutRow(rolloutId),
+      secondRunner: await runnerOf(second.clientId),
+      secondDeployments: deploymentCounts(second.account),
+      deploys: deploys.length,
+    }).toStrictEqual({
+      targets: {
+        [first.clientId]: { ring: 0, status: "rolled_back", error: null },
+        [second.clientId]: { ring: 0, status: "skipped", error: "cancelled" },
+      },
+      rollout: { status: "cancelled", ring: 0 },
+      secondRunner: null,
+      secondDeployments: secondCounts,
+      deploys: 0,
+    });
+  });
+
+  it("rolls a client back to what it last ran whole when the rollout that reached it follows one that stopped part way", async () => {
+    const before = await importedRelease("feat(core): the release before");
+    const internal = await activeClient(0, before);
+    const previous = await recordedVersionsOf(internal.clientId);
+    const [connect, core] = await workersOf(internal.clientId);
+    const connectScript = connect?.scriptName ?? "";
+    const release = await importedRelease("feat(core): fails part way");
+    // Connect goes live on the release; core's upload is refused, which no
+    // retry fixes: the client is left between the two releases.
+    cloudflare.failNext(
+      (call) =>
+        call.method === "POST" &&
+        call.path ===
+          `/accounts/${internal.account.id}/workers/scripts/${core?.scriptName ?? ""}/versions`,
+      400
+    );
+    await using run = await followRollouts();
+    await using rollbacks = await followRollbacks();
+    const failed = await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("errored");
+    const partWay = {
+      releases: await releasesOf(internal.clientId),
+      targets: await targetsOf(failed),
+    };
+    const skip = deploymentCounts(internal.account)[connectScript] ?? 0;
+
+    // Staff start the rollout again, and it finishes.
+    const again = await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+    const finished = {
+      releases: await releasesOf(internal.clientId),
+      // Connect's new version shared traffic with the one live when the
+      // rollout started again: none went back to the release before.
+      connectBefore: deploymentsOf(internal.account, connectScript, skip, [
+        previous.connect ?? "",
+      ]),
+      // The first rollout's deploy is no longer the client's latest.
+      first: await codeOf(
+        rollbackClient(env, staff, failed, internal.clientId)
+      ),
+    };
+
+    await rollbacks.rollBack(again, internal.clientId);
+
+    expect({
+      partWay,
+      finished,
+      live: await liveVersionsOf(internal.clientId, internal.account),
+      recorded: await recordedVersionsOf(internal.clientId),
+      releases: await releasesOf(internal.clientId),
+      targets: await targetsOf(again),
+    }).toMatchObject({
+      partWay: {
+        releases: [release, before],
+        targets: { [internal.clientId]: { ring: 0, status: "failed" } },
+      },
+      finished: {
+        releases: [release, release],
+        connectBefore: [[0], [0], [0]],
+        first: "superseded",
+      },
+      live: previous,
+      recorded: previous,
+      releases: [before, before],
+      targets: {
+        [internal.clientId]: { ring: 0, status: "rolled_back", error: null },
+      },
+    });
+  });
+
   it("stops a client whose rollout is cancelled while it's prepared, before any upload", async () => {
     const before = await importedRelease("feat(core): the release before");
     const { first, second } = await twoClients(before);
@@ -3357,7 +3542,7 @@ describe("applying a client's settings now", () => {
     };
   };
 
-  it("deploys the release a client runs again with its new flag, every Worker at once, audited, and releases the client", async () => {
+  it("deploys the release a client runs again with its new flag, every Worker at once, audited and told to its core as a settings change, and releases the client", async () => {
     const release = await importedRelease("feat(core): apply me");
     const client = await activeClient(1, release);
     const skip = deploymentCounts(client.account);
@@ -3390,6 +3575,8 @@ describe("applying a client's settings now", () => {
       pending: shown?.configPending,
       runner: await runnerOf(client.clientId),
       event,
+      // Not a release: the client's Activity says what staff changed.
+      change: await latestChangeOf(client.clientId, client.account),
     }).toStrictEqual({
       runId: true,
       features: { memory: true },
@@ -3398,6 +3585,10 @@ describe("applying a client's settings now", () => {
       pending: false,
       runner: null,
       event: { actor: staff.email, target: null },
+      change: {
+        audited: "settings",
+        told: { by: staff.email, what: "settings" },
+      },
     });
   });
 

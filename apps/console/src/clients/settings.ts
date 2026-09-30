@@ -10,6 +10,7 @@
  * They also mark the client (`configChangedAt`), so the next rollout
  * deploys it even when it's on the release already (src/rollout/targets.ts).
  */
+import { hkdfHmacKey } from "@grasp-os/shared/client-secrets";
 import { and, eq, isNull, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 
@@ -17,12 +18,13 @@ import type { Staff } from "../access.ts";
 import { actIfChanged, consoleDatabase } from "../db/act.ts";
 import type { ConsoleDatabase } from "../db/act.ts";
 import { clients, settings } from "../db/schema.ts";
-import { signInApps } from "../deploy/context.ts";
+import { signInApps, storeSecret } from "../deploy/context.ts";
 import {
   adminUnreachable,
   clientSignInSchema,
   missingSignInApp,
 } from "../deploy/core-config.ts";
+import { keyedHash } from "../deploy/upload.ts";
 import { featureNameSchema } from "./feature-name.ts";
 
 /** Why staff's change to a client's settings was refused, as the page words it. */
@@ -172,14 +174,39 @@ export const setFeature = async (
   );
 };
 
+/** What the key admins fingerprints are made with is derived for. */
+const adminsFingerprintPurpose = "grasp-os console admins fingerprint";
+
+/**
+ * A fingerprint of client `clientId`'s first admins, whatever their
+ * order: HMAC-SHA256 under a key HKDF derives from `key` (`CLIENT_KEY`)
+ * for this purpose alone, as `secretsFingerprint` is made. It tells the
+ * audit log that the admins changed, and whether to a list it had before,
+ * without naming anyone; with the client's id in it, the same people at
+ * two clients don't share one.
+ */
+const adminsFingerprint = async (
+  key: string,
+  clientId: string,
+  admins: readonly string[]
+): Promise<string> =>
+  await keyedHash(await hkdfHmacKey(key, adminsFingerprintPurpose, ["sign"]), {
+    clientId,
+    admins: admins.toSorted(),
+  });
+
 /**
  * Sets client `clientId`'s sign-in, as `staff`, audited (`client.sign_in`,
- * with its domains and IdPs, and only a count of its admins, whose emails
- * are personal data) when it changes. Its
+ * with its domains and IdPs, and of its admins, whose emails are personal
+ * data, only a count and a keyed fingerprint, `adminsFingerprint`) when
+ * it changes. Its
  * next deploy makes core's `SIGN_IN` from it. Refused as the record's own
  * rule refuses it: `admin_unreachable` without a first admin who can sign
  * in, `sign_in_app_missing` for an IdP the console has no app id for,
- * `sign_in_invalid` for anything else. Returns whether it changed.
+ * `sign_in_invalid` for anything else. Fails, changing nothing, while
+ * Secrets Store has no `CLIENT_KEY` to make the fingerprint with: a
+ * change that couldn't say which admins it set isn't made. Returns
+ * whether it changed.
  */
 export const setSignIn = async (
   env: Env,
@@ -207,6 +234,11 @@ export const setSignIn = async (
     );
   }
   await assertClient(db, clientId);
+  const admins = await adminsFingerprint(
+    await storeSecret(env, "CLIENT_KEY"),
+    clientId,
+    parsed.data.admins
+  );
   const value = JSON.stringify(parsed.data);
   const now = new Date();
   return await actIfChanged(
@@ -227,6 +259,7 @@ export const setSignIn = async (
       detail: {
         domains: parsed.data.domains.join(","),
         admins: parsed.data.admins.length,
+        adminsFingerprint: admins,
         ...(parsed.data.entraTenantId === undefined
           ? {}
           : { entraTenantId: parsed.data.entraTenantId }),

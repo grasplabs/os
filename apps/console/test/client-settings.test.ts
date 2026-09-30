@@ -12,6 +12,7 @@ import {
 } from "../src/clients/settings.ts";
 import { act, consoleDatabase } from "../src/db/act.ts";
 import { auditEvents, clients, settings } from "../src/db/schema.ts";
+import { emptyStoreSecret, useStoreSecrets } from "./secrets-store.ts";
 
 const db = consoleDatabase(env.DB);
 const staff = { email: "staff@grasp.test", sub: "sub-staff" };
@@ -84,7 +85,29 @@ const recordOf = async (clientId: string) => {
   return row;
 };
 
+/** A keyed fingerprint, as the audit log records one: an HMAC-SHA256, hex. */
+const fingerprintPattern = /^[0-9a-f]{64}$/u;
+
+/** A sign-in change's audit detail: what it says of the admins it set. */
+const signInDetailSchema = z.looseObject({
+  admins: z.number(),
+  adminsFingerprint: z.string(),
+});
+
+/** What each of client `clientId`'s sign-in changes recorded, oldest first. */
+const signInDetailsOf = async (clientId: string) => {
+  const events = await eventsOf(clientId, "client.sign_in");
+  return events.map(({ detail }) =>
+    signInDetailSchema.parse(JSON.parse(detail ?? "null"))
+  );
+};
+
 describe("a client's settings", () => {
+  useStoreSecrets({
+    deployer: "test-deployer-token-settings-2b9d41",
+    tenant: "test-tenant-admin-token-settings-7e0c63",
+  });
+
   it("move a client to another ring, audited once per change, and leave its config as it was", async () => {
     const clientId = await recordClient();
 
@@ -204,7 +227,7 @@ describe("a client's settings", () => {
     });
   });
 
-  it("change a client's sign-in, audited with its domains and IdP but never its admins' emails, and mark its config changed", async () => {
+  it("change a client's sign-in, audited with its domains, its IdP and a fingerprint of its admins but never their emails, and mark its config changed", async () => {
     const clientId = await recordClient();
     const changedTo = {
       domains: ["acme.test", "acme-group.test"],
@@ -219,13 +242,19 @@ describe("a client's settings", () => {
 
     const record = await recordOf(clientId);
     const events = await eventsOf(clientId, "client.sign_in");
+    const details = await signInDetailsOf(clientId);
     const shown = await clientSettings(db, clientId);
     expect({
       changed,
       signIn: z.unknown().parse(JSON.parse(record?.signIn ?? "null")),
       marked: record?.configChangedAt instanceof Date,
       shown: shown?.signIn,
-      events,
+      events: events.map(({ actor, target }) => ({ actor, target })),
+      // Every field it records: its admins as a count and a fingerprint.
+      details: details.map((detail) => ({
+        ...detail,
+        adminsFingerprint: fingerprintPattern.test(detail.adminsFingerprint),
+      })),
       emailsAudited: events.some(
         ({ detail }) => detail?.includes("@") === true
       ),
@@ -234,18 +263,78 @@ describe("a client's settings", () => {
       signIn: changedTo,
       marked: true,
       shown: changedTo,
-      events: [
+      events: [{ actor: staff.email, target: null }],
+      details: [
         {
-          actor: staff.email,
-          target: null,
-          detail: JSON.stringify({
-            domains: "acme.test,acme-group.test",
-            admins: 1,
-            entraTenantId: "8f3c9a52-1d4e-4b6f-9a2c-3e5d7f9b1c2a",
-          }),
+          domains: "acme.test,acme-group.test",
+          admins: 1,
+          adminsFingerprint: true,
+          entraTenantId: "8f3c9a52-1d4e-4b6f-9a2c-3e5d7f9b1c2a",
         },
       ],
       emailsAudited: false,
+    });
+  });
+
+  it("tell which admins each sign-in change set: another fingerprint for another admin, the same for the same people in any order, and another at another client", async () => {
+    const clientId = await recordClient();
+    const elsewhere = await recordClient();
+    const withAdmins = (...admins: string[]) => ({ ...signIn, admins });
+
+    await setSignIn(env, staff, {
+      clientId,
+      signIn: withAdmins("ada@acme.test", "bo@acme.test"),
+    });
+    await setSignIn(env, staff, {
+      clientId,
+      signIn: withAdmins("ada@acme.test", "cy@acme.test"),
+    });
+    await setSignIn(env, staff, {
+      clientId,
+      signIn: withAdmins("bo@acme.test", "ada@acme.test"),
+    });
+    await setSignIn(env, staff, {
+      clientId: elsewhere,
+      signIn: withAdmins("ada@acme.test", "bo@acme.test"),
+    });
+
+    const [first, swapped, back] = await signInDetailsOf(clientId);
+    const [atOther] = await signInDetailsOf(elsewhere);
+    expect({
+      // The count alone can't tell the three apart.
+      counts: [first?.admins, swapped?.admins, back?.admins],
+      swapped: swapped?.adminsFingerprint === first?.adminsFingerprint,
+      back: back?.adminsFingerprint === first?.adminsFingerprint,
+      elsewhere: atOther?.adminsFingerprint === first?.adminsFingerprint,
+    }).toStrictEqual({
+      counts: [2, 2, 2],
+      swapped: false,
+      back: true,
+      elsewhere: false,
+    });
+  });
+
+  it("change no sign-in while Secrets Store has no key to fingerprint its admins with", async () => {
+    const clientId = await recordClient();
+    await emptyStoreSecret(env.CLIENT_KEY, "CLIENT_KEY");
+
+    await expect(
+      setSignIn(env, staff, {
+        clientId,
+        signIn: { ...signIn, admins: ["bo@acme.test"] },
+      })
+    ).rejects.toThrow("CLIENT_KEY is missing from Secrets Store");
+
+    expect({
+      record: await recordOf(clientId),
+      events: await eventsOf(clientId, "client.sign_in"),
+    }).toStrictEqual({
+      record: {
+        ring: 1,
+        signIn: JSON.stringify(signIn),
+        configChangedAt: null,
+      },
+      events: [],
     });
   });
 

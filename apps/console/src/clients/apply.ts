@@ -141,8 +141,9 @@ export const applySettings = async (
 };
 
 /**
- * Applies a client's settings: deploys the release it runs again, as the
- * client's runner, every Worker live at once (`runDeploy`), then releases
+ * Applies a client's settings: deploys the release it runs again (a
+ * `settings` deploy, which its core records as such), as the client's
+ * runner, every Worker live at once (`runDeploy`), then releases
  * the client, whether the deploy worked or not. The release is read in the
  * run, which holds the client: no other runner changes it after.
  */
@@ -165,7 +166,13 @@ export class ApplyClient extends WorkflowEntrypoint<Env, ApplyParams> {
               `${clientId}'s Workers don't run one release`
             );
           }
-          return await startDeploy(db, startedBy, clientId, releaseId);
+          return await startDeploy(
+            db,
+            startedBy,
+            clientId,
+            releaseId,
+            "settings"
+          );
         })
       );
       await step.do(
