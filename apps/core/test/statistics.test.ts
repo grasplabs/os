@@ -3,6 +3,7 @@ import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
 import {
   statisticLimitsOf,
+  statisticMaxApps,
   statisticRowsPerDay,
 } from "@grasp-os/shared/statistics";
 import { env } from "cloudflare:workers";
@@ -661,6 +662,94 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
       ownWithApps: { error: "statistics.invalid" },
       oneAndApps: { error: "statistics.invalid" },
       oneGone: { error: "app.not_found" },
+    });
+  });
+
+  it("count the runs and signals of as many Apps as one read takes, by index", async () => {
+    const admin = await signedInApi(idp, "admin");
+    const reader = await statsApp(admin);
+    await grantPlatform(admin, reader);
+    holdClock();
+    // As many Apps as a read names, none of them built: only counted.
+    const apps = Array.from({ length: statisticMaxApps }, () =>
+      crypto.randomUUID()
+    ).toSorted();
+    await env.DB.batch(
+      apps.map((id) =>
+        env.DB.prepare(
+          "INSERT INTO apps (id, name, description, owner_id, created_at) VALUES (?, 'Counted', '', ?, ?)"
+        ).bind(id, admin.userId, Date.now())
+      )
+    );
+    const [first, last] = [apps.at(0) ?? "", apps.at(-1) ?? ""];
+    await seedRun(first, "pay");
+    await seedRun(last, "pay");
+    await seedRun(last, "pay");
+    await seedRun(last, "remind");
+    const computation = `computation-${unique()}`;
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO improvement_signal_computations (id, day, started_at, finished_at) VALUES (?, ?, ?, ?)"
+      ).bind(
+        computation,
+        new Date().toISOString().slice(0, 10),
+        Date.now() - 120_000,
+        Date.now() - 60_000
+      ),
+      ...[first, last].map((app) =>
+        env.DB.prepare(
+          "INSERT INTO improvement_signals (computation, app_id, workflow_id, kind, subject, value, evidence) VALUES (?, ?, 'pay', 'failing_step', 'match', 3, '{}')"
+        ).bind(computation, app)
+      ),
+    ]);
+    // Every filter a read takes, with every App it takes.
+    const query = { days: 7, apps, groupBy: ["app"] };
+    const counts = (answer: unknown) =>
+      answerSchema
+        .parse(answer)
+        .ok.groups.map(({ dimensions, count }) => ({ ...dimensions, count }));
+    let runs: unknown;
+    let signals: unknown;
+    const recorded = await recordedQueries(async () => {
+      runs = await platformRead(reader, admin.userId, {
+        ...query,
+        measure: "platform.workflow_runs",
+        where: { workflow: "pay" },
+      });
+      signals = await platformRead(reader, admin.userId, {
+        ...query,
+        measure: "platform.improvement_signals",
+        where: { workflow: "pay", kind: "failing_step" },
+      });
+    });
+    const plans = await Promise.all(
+      recorded
+        .filter(({ query: sql }) =>
+          /from "(?:apps|improvement_signals|workflow_runs)"/u.test(sql)
+        )
+        .map(planOf)
+    );
+    expect({
+      runs: counts(runs),
+      signals: counts(signals),
+      // But for the few computations, as every read of the signals reads.
+      scans: plans
+        .flat()
+        .filter(
+          (step) =>
+            fullScan.test(step) &&
+            step !== "SCAN improvement_signal_computations"
+        ),
+    }).toStrictEqual({
+      runs: [
+        { app: first, count: 1 },
+        { app: last, count: 2 },
+      ],
+      signals: [
+        { app: first, count: 1 },
+        { app: last, count: 1 },
+      ],
+      scans: [],
     });
   });
 
