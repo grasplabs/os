@@ -34,6 +34,22 @@ test("shows only its own words for a refused sign-in, never the link's", async (
   await expect(page.getByText(planted)).toHaveCount(0);
 });
 
+test("shows a refusal with the request ID core answered it under, for the person to quote", async ({
+  page,
+}) => {
+  // A guest link nobody made: core refuses to open it.
+  const answered = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === "/api/guest"
+  );
+  await page.goto(`/guest#${"A".repeat(43)}`);
+  const answer = await answered;
+  const requestId = answer.headers()["x-request-id"] ?? "";
+  expect(requestId).toMatch(/^[\da-f-]{36}$/u);
+  await expect(page.getByRole("alert")).toHaveText(
+    `This link doesn't work. Ask whoever sent it for a new one. Reference: ${requestId}`
+  );
+});
+
 test("names each member's actions for them, and asks before making someone an admin", async ({
   context,
   page,

@@ -1,5 +1,7 @@
+import { requestIdOf, withReference } from "@grasp-os/shared/errors";
 import { guestApiPath } from "@grasp-os/shared/guests";
 import type { GuestRequest, GuestView } from "@grasp-os/shared/guests";
+import { requestIdHeader } from "@grasp-os/shared/http";
 
 // A guest's page talks to core over one endpoint, with the secret from its
 // link in each request's body: it has no session, and never opens `/rpc`.
@@ -35,7 +37,12 @@ export const guestCall = async (
     const payload: unknown = await response.json();
     if (!response.ok) {
       return {
-        error: messageIn(payload) ?? "That didn't work. Try again in a moment.",
+        error: withReference(
+          messageIn(payload) ?? "That didn't work. Try again in a moment.",
+          requestIdOf(payload) ??
+            response.headers.get(requestIdHeader) ??
+            undefined
+        ),
       };
     }
     // SAFETY: core's guest endpoint answers a `GuestView` when it succeeds.

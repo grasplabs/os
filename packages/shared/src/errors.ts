@@ -98,6 +98,34 @@ export const defineErrorFamily = <Code extends string>(
 export const messageOf = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
+/**
+ * The request ID core put in an error's details (an HTTP error body, an
+ * error over RPC): what a person quotes so the logs of it can be found.
+ */
+export const requestIdOf = (error: unknown): string | undefined => {
+  if (typeof error !== "object" || error === null || !("details" in error)) {
+    return undefined;
+  }
+  const { details } = error;
+  return typeof details === "object" &&
+    details !== null &&
+    "requestId" in details &&
+    typeof details.requestId === "string"
+    ? details.requestId
+    : undefined;
+};
+
+/** `message`, and the reference to quote for it when there is one. */
+export const withReference = (message: string, requestId?: string): string =>
+  requestId === undefined ? message : `${message} Reference: ${requestId}`;
+
+/**
+ * What a person reads of a failure: its message, and the request ID core
+ * gave it, if any, to quote.
+ */
+export const failureText = (error: unknown): string =>
+  withReference(messageOf(error), requestIdOf(error));
+
 /** Why core refused a request before it reached any feature. */
 export const requestErrors = defineErrorFamily({
   "request.forbidden": "Forbidden.",

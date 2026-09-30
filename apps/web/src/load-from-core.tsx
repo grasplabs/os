@@ -1,4 +1,4 @@
-import { messageOf } from "@grasp-os/shared/errors";
+import { failureText } from "@grasp-os/shared/errors";
 
 import { readWithin } from "./core-connection.ts";
 import type { CoreConnection } from "./core-connection.ts";
@@ -34,7 +34,7 @@ export const loadFromCore = async <T,>(
     if (error instanceof CoreTimeoutError) {
       return { state: "offline" };
     }
-    return { state: "refused", message: messageOf(error) };
+    return { state: "refused", message: failureText(error) };
   }
 };
 

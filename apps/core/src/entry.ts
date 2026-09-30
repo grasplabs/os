@@ -1,5 +1,6 @@
 import { auditExportPath } from "@grasp-os/shared/audit-log";
 import { connectionCallbackPath } from "@grasp-os/shared/connect";
+import { errorReportPath } from "@grasp-os/shared/error-reports";
 import { internalErrors, requestErrors } from "@grasp-os/shared/errors";
 import { guestApiPath } from "@grasp-os/shared/guests";
 import { requestIdHeader } from "@grasp-os/shared/http";
@@ -13,6 +14,7 @@ import { authBasePath } from "./auth/auth.ts";
 import { handleAuthRequest } from "./auth/routes.ts";
 import { installBuiltinsOnce } from "./builtins.ts";
 import { handleConnectionCallback } from "./connections.ts";
+import { errorReportResponse } from "./error-reports.ts";
 import { errorResponse } from "./errors.ts";
 import { guestResponse } from "./guests.ts";
 import { originalResponse } from "./knowledge/uploads.ts";
@@ -66,6 +68,9 @@ const route = async (
   // is all it has (src/guests.ts).
   if (pathname === guestApiPath) {
     return await guestResponse(request, env, requestId);
+  }
+  if (pathname === errorReportPath) {
+    return await errorReportResponse(request, env, requestId);
   }
   if (pathname === platformUpdatePath) {
     return await platformUpdateResponse(request, env, requestId);

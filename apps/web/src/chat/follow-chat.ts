@@ -5,7 +5,7 @@ import type {
   ChatProvenance,
   ChatUpdate,
 } from "@grasp-os/shared/chat";
-import { messageOf } from "@grasp-os/shared/errors";
+import { failureText } from "@grasp-os/shared/errors";
 import { RpcStub } from "capnweb";
 
 import type { CoreConnection } from "../core-connection.ts";
@@ -137,7 +137,7 @@ export const followChat = (
       }
     } catch (error) {
       if (!closed) {
-        onFailed(messageOf(error));
+        onFailed(failureText(error));
       }
     }
   };

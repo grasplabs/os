@@ -22,6 +22,7 @@ import {
   featureErrors,
   internalErrors,
   isExpectedError,
+  withReference,
 } from "@grasp-os/shared/errors";
 import {
   appIdSchema,
@@ -201,14 +202,19 @@ export const maxChatsPerPerson = 500;
 
 /**
  * Why a turn under way stopped short of an answer, as its person reads
- * it: an unplanned error is logged, and shown as one.
+ * it: an unplanned error is logged, and shown as one, with the log line's
+ * request ID for them to quote.
  */
 const stopReason = (chatId: ChatId, error: unknown): string => {
   if (isExpectedError(error)) {
     return error.message;
   }
-  log.error("agent.turn_failed", { chatId, ...errorFields(error) });
-  return internalErrors.create("internal.unexpected").message;
+  const requestId = crypto.randomUUID();
+  log.error("agent.turn_failed", { requestId, chatId, ...errorFields(error) });
+  return withReference(
+    internalErrors.create("internal.unexpected").message,
+    requestId
+  );
 };
 
 /**

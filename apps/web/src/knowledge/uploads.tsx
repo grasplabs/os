@@ -1,4 +1,4 @@
-import { messageOf } from "@grasp-os/shared/errors";
+import { failureText } from "@grasp-os/shared/errors";
 import { pageMaxLimit } from "@grasp-os/shared/knowledge";
 import {
   uploadErrors,
@@ -78,7 +78,7 @@ const follow = async (
       onChange(current);
     } catch (error) {
       if (!isTransient(error)) {
-        return { upload: current, problem: messageOf(error) };
+        return { upload: current, problem: failureText(error) };
       }
     }
   }
