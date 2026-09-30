@@ -129,7 +129,7 @@ export const workflowFiles = (
 ): Record<string, string> => ({
   [`workflows/${id}.ts`]: `import { workflow, z } from "@grasp-os/sdk/workflow";
 
-export default workflow("${id}", { params: {}, input: z.unknown() }, async (step, { env, state, input }) => {
+export default workflow("${id}", { params: {}, input: z.unknown() }, async (step, { env, input }) => {
 ${body}
 });
 `,

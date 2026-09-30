@@ -109,14 +109,6 @@ const errorNameOf = (error: unknown): string => {
 const restrictedKey = "restricted";
 
 /**
- * Where the App keeps its workflows' state, by workflow and key, and the
- * idempotency keys of the writes it applied. Workflow IDs and state keys
- * have no `:`, so no two of them share a storage key.
- */
-const workflowStatePrefix = "workflow-state:";
-const workflowWritePrefix = "workflow-write:";
-
-/**
  * What an App method answers: plain data, as structured clone carries it.
  * Never a stub, a function or an RpcTarget: an answer goes on to screens
  * and workflows, and must not hand them a way into the App.
@@ -581,59 +573,6 @@ export class App extends DurableObject<Env> {
       this.#runWatchers.delete(workflow);
     }
     watcher?.[Symbol.dispose]();
-  }
-
-  /**
-   * A value of the App's workflow `workflow`'s state, shared by all its
-   * runs (`state.get` in workflow code, through workflows/host.ts): JSON
-   * text, as the host checked it when it was written, or undefined.
-   */
-  async workflowState(
-    workflow: string,
-    key: string
-  ): Promise<string | undefined> {
-    return await this.ctx.storage.get<string>(
-      `${workflowStatePrefix}${workflow}:${key}`
-    );
-  }
-
-  /**
-   * Writes a value of workflow `workflow`'s state, once per idempotency
-   * key: a write a run repeats after a crash is ignored, so it can't
-   * overwrite a newer value. The check and the write happen together,
-   * as nothing else runs in this object between them.
-   */
-  async setWorkflowState(
-    workflow: string,
-    run: string,
-    key: string,
-    json: string,
-    idempotencyKey: string
-  ): Promise<void> {
-    const write = `${workflowWritePrefix}${workflow}:${run}:${idempotencyKey}`;
-    if ((await this.ctx.storage.get(write)) !== undefined) {
-      return;
-    }
-    await this.ctx.storage.put({
-      [write]: true,
-      [`${workflowStatePrefix}${workflow}:${key}`]: json,
-    });
-  }
-
-  /**
-   * Forgets the writes run `run` applied, once it has ended: an ended run
-   * is never replayed, so its writes can't come again.
-   */
-  async forgetWorkflowWrites(workflow: string, run: string): Promise<void> {
-    const writes = await this.ctx.storage.list({
-      prefix: `${workflowWritePrefix}${workflow}:${run}:`,
-    });
-    const keys = [...writes.keys()];
-    // Storage deletes at most 128 keys at a time.
-    for (let start = 0; start < keys.length; start += 128) {
-      // oxlint-disable-next-line no-await-in-loop -- one batch at a time
-      await this.ctx.storage.delete(keys.slice(start, start + 128));
-    }
   }
 
   /**

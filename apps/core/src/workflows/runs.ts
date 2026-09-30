@@ -46,7 +46,6 @@ import {
 import type { Member } from "../auth/identity.ts";
 import { builtinOwner } from "../builtin-app-id.ts";
 import { apps, workflowRuns } from "../db/core/schema.ts";
-import { appHost } from "../durable-objects.ts";
 import { featureEnabled, requireFeature } from "../features.ts";
 import type { Feature } from "../features.ts";
 import { failureNoticed } from "../notifications.ts";
@@ -761,18 +760,6 @@ export const listRuns = async (
 };
 
 /**
- * Drops the state writes an ended run applied (app.ts), and the
- * statistics points its steps' attempts recorded (statistic-steps.ts).
- */
-const forgetWrites = async (env: Env, row: RunRow): Promise<void> => {
-  await appHost(env, appIdSchema.parse(row.appId)).forgetWorkflowWrites(
-    row.workflowId,
-    row.id
-  );
-  await forgetStepStatistics(env, row.id);
-};
-
-/**
  * Stops a run for good, and records who did; a run that ended otherwise
  * stays as it is. The row is marked first, so a run that ends meanwhile
  * can't mark itself otherwise and the dispatcher runs it no more; a cancel
@@ -787,7 +774,7 @@ export const cancelRun = async (
   await appFor(env, by, row.appId, "builder");
   if (row.status === "cancelled") {
     await runEngine(env).terminate(row.id);
-    await forgetWrites(env, row);
+    await forgetStepStatistics(env, row.id);
     return toRun(env, row);
   }
   if (!unended.includes(row.status)) {
@@ -812,7 +799,7 @@ export const cancelRun = async (
   const now = cancelled ?? (await foundRun(env, row.id));
   if (now.status === "cancelled") {
     await runEngine(env).terminate(row.id);
-    await forgetWrites(env, now);
+    await forgetStepStatistics(env, row.id);
   }
   return toRun(env, now);
 };
@@ -867,7 +854,7 @@ export const endRun = async (
   if (ended) {
     await tellScreens(env, row);
   }
-  await forgetWrites(env, row);
+  await forgetStepStatistics(env, row.id);
 };
 
 /**

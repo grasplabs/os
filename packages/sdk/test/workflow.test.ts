@@ -2,7 +2,7 @@
 import { workflowErrors } from "@grasp-os/shared/workflows";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { createTestState, testRun } from "../src/testing.ts";
+import { testRun } from "../src/testing.ts";
 import {
   appExports,
   appServer,
@@ -772,105 +772,23 @@ describe("step.decision", () => {
   });
 });
 
-describe("state", () => {
-  const counter = workflow(
-    "counter",
-    { params: noParams },
-    async (_step, { state }) => {
-      const seen = await state.get("count");
-      const count = typeof seen === "number" ? seen + 1 : 1;
-      await state.set("count", count);
-      return count;
-    }
-  );
-
-  it("keeps values between runs of the workflow", async () => {
-    const state = createTestState();
-    const first = createFakeEngine({ runId: "run-1", state });
-    const second = createFakeEngine({ runId: "run-2", state });
-
-    await expect(counter.run(first.engine)).resolves.toBe(1);
-    await expect(counter.run(second.engine)).resolves.toBe(2);
-  });
-
-  it("replays what a run read, even when another run changed it since", async () => {
-    const state = createTestState();
-    const first = createFakeEngine({ runId: "run-1", state });
-    const other = createFakeEngine({ runId: "run-2", state });
-
-    await counter.run(first.engine);
-    await counter.run(other.engine);
-
-    await expect(counter.run(first.engine)).resolves.toBe(1);
-  });
-
-  it("doesn't write again when a run resumes after a crash mid-write", async () => {
-    const state = createTestState();
-    const { engine } = createFakeEngine({ runId: "run-1", state });
-    let crashed = false;
-    // The first write lands, then the engine dies before it records the
-    // step, as a crash between the two would.
-    const crashing = {
-      ...engine,
-      setState: async (...write: Parameters<typeof engine.setState>) => {
-        await engine.setState(...write);
-        if (!crashed) {
-          crashed = true;
-          throw new Error("Engine died before recording the step");
-        }
-      },
-    };
-    const other = createFakeEngine({ runId: "run-2", state });
-
-    await expect(counter.run(crashing)).rejects.toThrow("Engine died");
-    await counter.run(other.engine);
-    await counter.run(crashing);
-
-    expect(state.values.get("count")).toBe(2);
-  });
-
-  it("rejects a key that isn't a name, and a value that isn't JSON", async () => {
-    const keyWorkflow = workflow(
-      "bad-key",
-      { params: noParams },
-      async (_step, { state }) => await state.get("a:b")
-    );
-    const valueWorkflow = workflow(
-      "bad-value",
-      { params: noParams },
-      async (_step, { state }) => {
-        // @ts-expect-error -- state holds JSON only
-        await state.set("when", new Date(0));
-      }
-    );
-
-    await expect(
-      keyWorkflow.run(createFakeEngine().engine)
-    ).rejects.toMatchObject({ code: "workflow.invalid_step_call" });
-    await expect(
-      valueWorkflow.run(createFakeEngine().engine)
-    ).rejects.toMatchObject({ code: "workflow.invalid_step_call" });
-  });
-});
-
 describe("one step at a time", () => {
-  it("refuses state and steps inside a step's function, again on replay, without retrying", async () => {
+  it("refuses a step inside a step's function, again on replay, without retrying", async () => {
     let attempts = 0;
-    const nested = workflow(
-      "nested",
-      { params: noParams },
-      async (step, { state }) => {
-        await step.do(
-          "outer",
-          { description: "Outer", retries: { limit: 3 } },
-          async () => {
-            attempts += 1;
-            await state.set("seen", true);
-          }
-        );
-      }
-    );
-    const { engine, state } = createFakeEngine();
+    let seen = false;
+    const nested = withStep(async (step) => {
+      await step.do(
+        "outer",
+        { description: "Outer", retries: { limit: 3 } },
+        async () => {
+          attempts += 1;
+          await step.do("inner", { description: "Inner" }, async () => {
+            seen = true;
+          });
+        }
+      );
+    });
+    const { engine } = createFakeEngine();
 
     await expect(nested.run(engine)).rejects.toMatchObject({
       code: "workflow.invalid_step_call",
@@ -879,10 +797,10 @@ describe("one step at a time", () => {
       code: "workflow.invalid_step_call",
     });
     expect(attempts).toBe(2);
-    expect(state.values.has("seen")).toBeFalsy();
+    expect(seen).toBeFalsy();
   });
 
-  it("refuses a step or state call started while another runs", async () => {
+  it("refuses a step started while another runs", async () => {
     const ran: string[] = [];
     const inside = withStep(async (step) => {
       await step.do("outer", { description: "Outer" }, async () => {
@@ -898,19 +816,8 @@ describe("one step at a time", () => {
           step.do("second", { description: "Second" }, async () => 2),
         ])
     );
-    const alongsideState = workflow(
-      "alongside-state",
-      { params: noParams },
-      async (step, { state }) =>
-        await Promise.all([
-          state.get("seen"),
-          step.do("first", { description: "First" }, async () => {
-            ran.push("first");
-          }),
-        ])
-    );
 
-    for (const definition of [inside, alongside, alongsideState]) {
+    for (const definition of [inside, alongside]) {
       // oxlint-disable-next-line no-await-in-loop -- each run is one case
       await expect(
         definition.run(createFakeEngine().engine)

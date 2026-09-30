@@ -15,7 +15,7 @@ import payoutSource from "./payout-workflow.ts?raw";
 /** A workflow source around `body`, the workflow function's statements. */
 const workflowSource = (
   body: string,
-  signature = "step, { params, input, state }"
+  signature = "step, { params, input }"
 ) => `
 import { appExports, appServer, workflow } from "@grasp-os/sdk/workflow";
 
@@ -220,10 +220,6 @@ describe(describeWorkflow, () => {
       [
         `await step.decision("go", { description: "Go", from: params.reviewer, ask });`,
         "needs timeout",
-      ],
-      [
-        `await step.do("go", { description: "Go" }, async () => await state.get("seen"));`,
-        "between steps",
       ],
       [`await step.do("go", {}, async () => 1);`, "needs description"],
       [
