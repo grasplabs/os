@@ -17,6 +17,7 @@ import {
   featuresSchema,
   modelGatewayConfigSchema,
   modelRulesConfigSchema,
+  runRetentionSchema,
   signInConfigSchema,
   unreachableAdmins,
 } from "@grasp-os/shared/deployment-config";
@@ -247,6 +248,7 @@ const configSchemas: Readonly<Record<string, readonly z.ZodType[]>> = {
   MEMORY_LIMITS: [memoryLimitsSchema],
   AUDIT_RETENTION_DAYS: [auditRetentionSchema],
   AUDIT_ARCHIVE_RETENTION_DAYS: [auditArchiveRetentionSchema],
+  RUN_RETENTION_DAYS: [runRetentionSchema],
 };
 
 /**
