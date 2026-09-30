@@ -29,6 +29,7 @@ import {
   apps,
   members,
   teamMembers,
+  teams,
   users,
   workflowDecisions,
   workflowRuns,
@@ -278,8 +279,11 @@ const decidersCondition = (deciders: string): SQL => {
       return eq(members.role, id);
     }
     case "team": {
+      // Only a team that exists: rows of who was in one must never
+      // outlive it, and if one did it would still reach nobody.
       return sql`EXISTS (
         SELECT 1 FROM ${teamMembers}
+        INNER JOIN ${teams} ON ${teams.id} = ${teamMembers.teamId}
         WHERE ${teamMembers.userId} = ${members.userId}
           AND ${teamMembers.teamId} = ${id}
       )`;

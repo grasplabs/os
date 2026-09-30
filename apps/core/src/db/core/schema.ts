@@ -155,6 +155,11 @@ export const memberRemovals = sqliteTable("member_removals", {
 export const teams = sqliteTable("teams", {
   id: text().primaryKey(),
   name: text().notNull(),
+  /**
+   * The name without case or compatibility forms (`src/members.ts`), and
+   * unique: no two teams read the same where something is shared.
+   */
+  nameKey: text("name_key").notNull().unique(),
   createdAt: timestamp("created_at").notNull(),
 });
 

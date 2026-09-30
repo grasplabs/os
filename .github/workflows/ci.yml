@@ -201,9 +201,12 @@ jobs:
       # deploy.
       - name: Create the audit archive bucket in the EU
         run: vp exec wrangler r2 bucket info grasp-os-audit-archive --jurisdiction eu || vp exec wrangler r2 bucket create grasp-os-audit-archive --jurisdiction eu
-      # D1 migrations are additive, so the running code keeps working on the
-      # new schema until the deploy after them replaces it. connect first:
-      # core's service binding points at it.
+      # While nothing is released, a migration may drop what the running
+      # code reads: staging then fails from the migration until the deploy
+      # after it, and a deploy that fails there leaves it down until a fix
+      # is merged. Once a release is out, migrations are additive again
+      # (expand, then contract). connect first: core's service binding
+      # points at it.
       - run: vp run --filter @grasp-os/connect db:migrate
       - run: vp run --filter @grasp-os/connect deploy
       - run: vp run --filter @grasp-os/core db:migrate

@@ -4,6 +4,9 @@
 -- references `organizations` is rebuilt before it is dropped, and
 -- `team_members` is copied (onto the new `teams`) before the old `teams`
 -- goes. Renaming `__new_teams` also renames it in the new `team_members`.
+--
+-- Not additive: the code before this migration reads what it drops, so that
+-- code fails from here until the deploy that follows. Nothing is released.
 CREATE TABLE `__new_member_removals` (
 	`user_id` text PRIMARY KEY NOT NULL,
 	`removed_at` integer NOT NULL,
@@ -29,10 +32,13 @@ CREATE UNIQUE INDEX `members_user_id_unique` ON `members` (`user_id`);--> statem
 CREATE TABLE `__new_teams` (
 	`id` text PRIMARY KEY NOT NULL,
 	`name` text NOT NULL,
+	`name_key` text NOT NULL,
 	`created_at` integer NOT NULL
 );
 --> statement-breakpoint
-INSERT INTO `__new_teams`("id", "name", "created_at") SELECT "id", "name", "created_at" FROM `teams`;--> statement-breakpoint
+-- Names weren't unique before: of the teams that share one, the first keeps
+-- its key and the others' keys carry their ID, so each can be renamed.
+INSERT INTO `__new_teams`("id", "name", "name_key", "created_at") SELECT "id", "name", CASE WHEN "id" = (SELECT min(same."id") FROM `teams` AS same WHERE lower(same."name") = lower(`teams`."name")) THEN lower("name") ELSE lower("name") || ' ' || "id" END, "created_at" FROM `teams`;--> statement-breakpoint
 CREATE TABLE `__new_team_members` (
 	`team_id` text NOT NULL,
 	`user_id` text NOT NULL,
@@ -47,6 +53,7 @@ DROP TABLE `team_members`;--> statement-breakpoint
 DROP TABLE `teams`;--> statement-breakpoint
 ALTER TABLE `__new_teams` RENAME TO `teams`;--> statement-breakpoint
 ALTER TABLE `__new_team_members` RENAME TO `team_members`;--> statement-breakpoint
+CREATE UNIQUE INDEX `teams_name_key_unique` ON `teams` (`name_key`);--> statement-breakpoint
 CREATE INDEX `team_members_user_id_idx` ON `team_members` (`user_id`);--> statement-breakpoint
 DROP TABLE `invitations`;--> statement-breakpoint
 DROP TABLE `organizations`;--> statement-breakpoint

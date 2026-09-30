@@ -17,16 +17,20 @@ import {
   signedInApi,
   signedInWithRole,
   staffPerson,
+  unique,
   whoami,
 } from "./sign-in.ts";
 
 // Roles and teams, from what can go wrong: someone raising their own role
 // or putting themselves in a team; a team change nobody can trace; someone
-// removed still reaching things through a team; an admin who was demoted a
-// moment ago still changing teams; and Better Auth serving a route that
-// changes any of it.
+// removed still reaching things through a team; an admin who was demoted
+// or removed a moment ago still changing teams; two teams nobody can tell
+// apart; and Better Auth serving a route that changes any of it.
 
 const idp = mockIdp();
+
+/** A team name no other test's team has: names are unique. */
+const finance = () => `Finance ${unique()}`;
 
 const signedInAs = async (role: Role) => await signedInWithRole(idp, role);
 
@@ -68,16 +72,20 @@ describe("roles and teams", () => {
     });
 
     await admin.api.members.setRole(person.userId, "builder");
-    const team = await admin.api.members.createTeam("  Finance ");
+    const name = finance();
+    // Kept trimmed, and with single spaces.
+    const team = await admin.api.members.createTeam(
+      `  ${name.replace(" ", " \u00A0 ")} `
+    );
     await admin.api.members.addTeamMember(team.id, person.userId);
     await expect(session.whoami()).resolves.toMatchObject({
       role: "builder",
-      teams: [{ id: team.id, name: "Finance" }],
+      teams: [{ id: team.id, name }],
     });
 
-    await admin.api.members.renameTeam(team.id, "Finance and legal");
+    await admin.api.members.renameTeam(team.id, `${name} and legal`);
     await expect(session.whoami()).resolves.toMatchObject({
-      teams: [{ id: team.id, name: "Finance and legal" }],
+      teams: [{ id: team.id, name: `${name} and legal` }],
     });
 
     await admin.api.members.removeTeamMember(team.id, person.userId);
@@ -86,7 +94,8 @@ describe("roles and teams", () => {
 
   it("can't be changed by anyone but an admin, not even their own, and a refused change isn't audited", async () => {
     const admin = await signedInApi(idp, "admin");
-    const team = await admin.api.members.createTeam("Admins' own");
+    const name = finance();
+    const team = await admin.api.members.createTeam(name);
     const staff = await signedIn(idp, "grasp-staff", staffPerson());
     const { userId: staffId } = await whoami(staff);
     const people = [
@@ -103,8 +112,8 @@ describe("roles and teams", () => {
         // oxlint-disable-next-line no-await-in-loop -- one person at a time
         const refused = await Promise.all([
           outcome(members.setRole(person.userId, "admin")),
-          outcome(members.createTeam("Their own team")),
-          outcome(members.renameTeam(team.id, "Theirs now")),
+          outcome(members.createTeam(finance())),
+          outcome(members.renameTeam(team.id, finance())),
           outcome(members.addTeamMember(team.id, person.userId)),
           outcome(members.removeTeamMember(team.id, admin.userId)),
           outcome(members.deleteTeam(team.id)),
@@ -115,7 +124,7 @@ describe("roles and teams", () => {
       }
     });
     expect(audited).toStrictEqual([]);
-    await expect(teamName(team.id)).resolves.toBe("Admins' own");
+    await expect(teamName(team.id)).resolves.toBe(name);
     const [user, builder] = people;
     await expect(whoami(user?.session)).resolves.toMatchObject({
       role: "user",
@@ -164,14 +173,14 @@ describe("a removed member", () => {
     expect(authErrors.codeOf(refusal)).toBe("auth.unauthenticated");
     // Nor on the connection they had open.
     await expect(
-      outcome(admin.api.members.createTeam("Still here"))
+      outcome(admin.api.members.createTeam(finance()))
     ).resolves.toBe("auth.unauthenticated");
   });
 
   it("leaves every team, and can't be put in one again", async () => {
     const admin = await signedInApi(idp, "admin");
     const person = await signedInAs("user");
-    const team = await admin.api.members.createTeam("Finance");
+    const team = await admin.api.members.createTeam(finance());
     await admin.api.members.addTeamMember(team.id, person.userId);
     await expect(teamsOf(person.userId)).resolves.toStrictEqual([team.id]);
 
@@ -191,14 +200,19 @@ describe("team changes", () => {
     const { members } = admin.api;
     let teamId = "";
     const audited = await auditedDuring(async () => {
-      ({ id: teamId } = await members.createTeam("Finance"));
+      ({ id: teamId } = await members.createTeam(finance()));
       await members.addTeamMember(teamId, person.userId);
       // Already in it: nothing changes, so nothing is recorded.
       await members.addTeamMember(teamId, person.userId);
       await members.removeTeamMember(teamId, person.userId);
       // No longer in it: the same.
       await members.removeTeamMember(teamId, person.userId);
-      await members.renameTeam(teamId, "Finance and legal");
+      const renamed = finance();
+      await members.renameTeam(teamId, renamed);
+      // The name it has: nothing changes, so nothing is recorded.
+      await members.renameTeam(teamId, ` ${renamed} `);
+      // Its own name in another case is a change, and no other team's name.
+      await members.renameTeam(teamId, renamed.toUpperCase());
       await members.deleteTeam(teamId);
     });
 
@@ -225,15 +239,16 @@ describe("team changes", () => {
         detail: { userId: person.userId },
       },
       { actor, action: "team.updated", target: team, detail: {} },
+      { actor, action: "team.updated", target: team, detail: {} },
       { actor, action: "team.deleted", target: team, detail: {} },
     ]);
-    expect(JSON.stringify(audited)).not.toContain("Finance");
+    expect(JSON.stringify(audited).toLowerCase()).not.toContain("finance");
   });
 
   it("keep their audit event when the audit log is down, and append it later", async () => {
     const admin = await signedInApi(idp, "admin");
     const teamId = await whileLogDown(async () => {
-      const { id } = await admin.api.members.createTeam("Finance");
+      const { id } = await admin.api.members.createTeam(finance());
       // It waits in the outbox while the log is down.
       await expect(waitingInOutbox(env.DB, "team.created", id)).resolves.toBe(
         1
@@ -255,7 +270,10 @@ describe("team changes", () => {
     const admin = await signedInApi(idp, "admin");
     const { members } = admin.api;
     const team = await members.createTeam("x".repeat(teamNameMaxLength));
-    await expect(teamName(team.id)).resolves.toHaveLength(teamNameMaxLength);
+    const taken = finance();
+    const other = await members.createTeam(taken);
+    const gone = await signedInAs("user");
+    await members.remove(gone.userId);
 
     let refused: string[] = [];
     const audited = await auditedDuring(async () => {
@@ -264,11 +282,22 @@ describe("team changes", () => {
         outcome(members.createTeam("   ")),
         outcome(members.createTeam("x".repeat(teamNameMaxLength + 1))),
         outcome(members.renameTeam(team.id, " ")),
-        outcome(members.renameTeam("no-such-team", "Finance")),
+        // A line break, a text-direction override, a zero-width space.
+        outcome(members.createTeam("Fin\nance")),
+        outcome(members.createTeam(`\u202E${finance()}`)),
+        outcome(members.renameTeam(team.id, `Fin\u200Bance ${unique()}`)),
+        // A name another team has, whatever its case or spacing.
+        outcome(members.createTeam(` ${taken.toUpperCase()} `)),
+        outcome(members.renameTeam(team.id, taken.toLowerCase())),
+        outcome(members.renameTeam("no-such-team", finance())),
         outcome(members.deleteTeam("no-such-team")),
         outcome(members.addTeamMember("no-such-team", admin.userId)),
         outcome(members.addTeamMember(team.id, "no-such-person")),
         outcome(members.removeTeamMember("no-such-team", admin.userId)),
+        // Nobody who isn't a member, to take out as to put in.
+        outcome(members.removeTeamMember(team.id, "no-such-person")),
+        outcome(members.removeTeamMember(team.id, gone.userId)),
+        outcome(members.addTeamMember(team.id, gone.userId)),
       ]);
     });
     expect(refused).toStrictEqual([
@@ -276,39 +305,74 @@ describe("team changes", () => {
       "member.team_name_invalid",
       "member.team_name_invalid",
       "member.team_name_invalid",
+      "member.team_name_invalid",
+      "member.team_name_invalid",
+      "member.team_name_invalid",
+      "member.team_name_taken",
+      "member.team_name_taken",
       "member.team_not_found",
       "member.team_not_found",
       "member.team_not_found",
       "member.not_found",
       "member.team_not_found",
+      "member.not_found",
+      "member.not_found",
+      "member.not_found",
     ]);
     expect(audited).toStrictEqual([]);
+    await expect(teamName(other.id)).resolves.toBe(taken);
+    await expect(teamName(team.id)).resolves.toHaveLength(teamNameMaxLength);
     await expect(teamsOf("no-such-person")).resolves.toStrictEqual([]);
   });
 
-  it("take everyone out of a team that is deleted", async () => {
+  it("take everyone out of a team that is deleted, as one audited change", async () => {
     const admin = await signedInApi(idp, "admin");
     const person = await signedInAs("user");
-    const team = await admin.api.members.createTeam("Finance");
+    const name = finance();
+    const team = await admin.api.members.createTeam(name);
     await admin.api.members.addTeamMember(team.id, person.userId);
+    await admin.api.members.addTeamMember(team.id, admin.userId);
 
-    await admin.api.members.deleteTeam(team.id);
+    const audited = await auditedDuring(async () => {
+      await admin.api.members.deleteTeam(team.id);
+    });
+    expect(
+      audited.map(({ action, target }) => [action, target?.id])
+    ).toStrictEqual([["team.deleted", team.id]]);
     await expect(whoami(person.session)).resolves.toMatchObject({ teams: [] });
     await expect(teamsOf(person.userId)).resolves.toStrictEqual([]);
+    // Its name is free again.
+    await expect(outcome(admin.api.members.createTeam(name))).resolves.toBe(
+      "ok"
+    );
   });
 
-  it("change nothing once the admin making them is one no longer, even mid-change", async () => {
+  it("make one team when two admins give a team the same name at once", async () => {
+    const [first, second] = await Promise.all([
+      signedInApi(idp, "admin"),
+      signedInApi(idp, "admin"),
+    ]);
+    const name = finance();
+    const made = await Promise.all([
+      outcome(first.api.members.createTeam(name)),
+      outcome(second.api.members.createTeam(name.toLowerCase())),
+    ]);
+    expect(made.toSorted()).toStrictEqual(["member.team_name_taken", "ok"]);
+  });
+
+  it("change nothing once the admin making them is demoted or removed, even mid-change", async () => {
     const owner = await signedInApi(idp, "admin");
     const person = await signedInAs("user");
     const inTeam = await signedInAs("user");
-    const team = await owner.api.members.createTeam("Finance");
+    const name = finance();
+    const team = await owner.api.members.createTeam(name);
     await owner.api.members.addTeamMember(team.id, inTeam.userId);
 
     type Members = typeof owner.api.members;
     const changes: ((members: Members) => Promise<unknown>)[] = [
-      async (members) => await members.createTeam("Demoted's own"),
+      async (members) => await members.createTeam(finance()),
       async (members) => {
-        await members.renameTeam(team.id, "Theirs now");
+        await members.renameTeam(team.id, finance());
       },
       async (members) => {
         await members.addTeamMember(team.id, person.userId);
@@ -320,17 +384,22 @@ describe("team changes", () => {
         await members.deleteTeam(team.id);
       },
     ];
+    // What another admin does to them after their session and role were
+    // checked, just before the change's batch lands: demotes them, or
+    // removes them (the removal's marker is what counts).
+    const stops = [
+      "UPDATE members SET role = 'user' WHERE user_id = ?",
+      "INSERT OR IGNORE INTO member_removals (user_id, removed_at) VALUES (?, 1)",
+    ];
     const before = await teamCount();
-    for (const change of changes) {
+    const cases = stops.flatMap((stop) =>
+      changes.map((change) => ({ stop, change }))
+    );
+    for (const { stop, change } of cases) {
       // oxlint-disable-next-line no-await-in-loop -- one admin at a time
       const admin = await signedInAs("admin");
-      // Another admin demotes them after their session and role were
-      // checked, just before the change's batch lands.
       const DB = racingDb(async (db) => {
-        await db
-          .prepare("UPDATE members SET role = 'user' WHERE user_id = ?")
-          .bind(admin.userId)
-          .run();
+        await db.prepare(stop).bind(admin.userId).run();
       });
       // oxlint-disable-next-line no-await-in-loop -- one admin at a time
       const { core } = await openRpc(admin.session, {
@@ -345,7 +414,7 @@ describe("team changes", () => {
       expect(audited).toStrictEqual([]);
     }
     await expect(teamCount()).resolves.toBe(before);
-    await expect(teamName(team.id)).resolves.toBe("Finance");
+    await expect(teamName(team.id)).resolves.toBe(name);
     await expect(teamsOf(person.userId)).resolves.toStrictEqual([]);
     await expect(teamsOf(inTeam.userId)).resolves.toStrictEqual([team.id]);
   });
@@ -355,7 +424,8 @@ describe("Better Auth routes", () => {
   it("only serves the ones core chose, and none that changes a member, a role or a team", async () => {
     const admin = await signedInApi(idp, "admin");
     const person = await signedInAs("user");
-    const team = await admin.api.members.createTeam("Finance");
+    const name = finance();
+    const team = await admin.api.members.createTeam(name);
     const routes: [path: string, body?: unknown][] = [
       ["/sign-up/email", { email: "x@acme.test", password: "p", name: "x" }],
       ["/sign-in/email", { email: "x@acme.test", password: "p" }],
@@ -416,6 +486,6 @@ describe("Better Auth routes", () => {
       role: "user",
       teams: [],
     });
-    await expect(teamName(team.id)).resolves.toBe("Finance");
+    await expect(teamName(team.id)).resolves.toBe(name);
   });
 });

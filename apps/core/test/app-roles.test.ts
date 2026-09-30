@@ -378,6 +378,67 @@ describe("App roles", { timeout: 60_000 }, () => {
     );
   });
 
+  it("reach nobody through a team that is deleted, nor does a collection", async () => {
+    const admin = await personApi("admin");
+    const owner = await personApi("builder");
+    const anna = await personApi("user");
+    const team = await newTeam(admin, [anna]);
+    const app = await newApp(owner);
+    await owner.api.apps.members.add(app, {
+      type: "team",
+      id: team,
+      role: "user",
+    });
+    const collection = await admin.api.knowledge.createCollection({
+      name: `Shared ${unique()}`,
+      access: "teams",
+      teams: [team],
+    });
+    const reaches = async () =>
+      await Promise.all([
+        outcome(anna.api.apps.get(app)),
+        outcome(anna.api.knowledge.listDocuments(collection.id)),
+      ]);
+    await expect(reaches()).resolves.toStrictEqual(["ok", "ok"]);
+
+    const audited = await auditedDuring(async () => {
+      await admin.api.members.deleteTeam(team);
+    });
+    // One event for the team, its people and what was shared with it.
+    expect(
+      audited.map(({ action, target }) => ({ action, target }))
+    ).toStrictEqual([
+      { action: "team.deleted", target: { type: "team", id: team } },
+    ]);
+    await expect(reaches()).resolves.toStrictEqual([
+      "app.not_found",
+      "knowledge.not_found",
+    ]);
+    // Nothing is left naming it, in either database.
+    const [shares, inTeam, collections] = await Promise.all([
+      env.DB.prepare(
+        "SELECT count(*) AS rows FROM app_members WHERE member_type = 'team' AND member_id = ?"
+      )
+        .bind(team)
+        .first<{ rows: number }>(),
+      env.DB.prepare(
+        "SELECT count(*) AS rows FROM team_members WHERE team_id = ?"
+      )
+        .bind(team)
+        .first<{ rows: number }>(),
+      env.KNOWLEDGE.prepare(
+        "SELECT count(*) AS rows FROM collection_teams WHERE team_id = ?"
+      )
+        .bind(team)
+        .first<{ rows: number }>(),
+    ]);
+    expect([shares?.rows, inTeam?.rows, collections?.rows]).toStrictEqual([
+      0, 0, 0,
+    ]);
+    const listed = await owner.api.apps.members.list(app);
+    expect(listed.map(({ id }) => id)).not.toContain(team);
+  });
+
   it("never let someone build whose role in the organization doesn't", async () => {
     const admin = await personApi("admin");
     const owner = await personApi("builder");

@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "6b926589-0320-4826-bdbc-dfaf98f9c829",
+  "id": "406abc81-11f2-401a-85a9-3fdacf60035f",
   "prevId": "599969f1-f107-488b-967b-afce724a9ab7",
   "tables": {
     "accounts": {
@@ -2041,6 +2041,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "name_key": {
+          "name": "name_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "integer",
@@ -2049,7 +2056,15 @@
           "autoincrement": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "teams_name_key_unique": {
+          "name": "teams_name_key_unique",
+          "columns": [
+            "name_key"
+          ],
+          "isUnique": true
+        }
+      },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},

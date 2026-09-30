@@ -515,6 +515,24 @@ describe("decisions", { timeout: 60_000 }, () => {
     });
   });
 
+  it("reach nobody once the team they are from is deleted", async () => {
+    const admin = await personApi("admin");
+    const anna = await personApi("user");
+    const team = await newTeam(admin, [anna]);
+    const asked = await asking(admin, { from: `team:${team}`, timeout: week });
+
+    await admin.api.members.deleteTeam(team);
+    await expect(
+      outcome(anna.api.decisions.answer(asked.decision, { approved: true }))
+    ).resolves.toBe("decision.forbidden");
+    // Nor a team made later: a team's ID is never used again.
+    const later = await newTeam(admin, [anna]);
+    expect(later).not.toBe(team);
+    await expect(
+      outcome(anna.api.decisions.answer(asked.decision, { approved: true }))
+    ).resolves.toBe("decision.forbidden");
+  });
+
   it("check who may answer as they are when they answer, not when they were asked", async () => {
     const admin = await personApi("admin");
     const leaves = await personApi("user");

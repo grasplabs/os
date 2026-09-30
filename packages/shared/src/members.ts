@@ -38,19 +38,22 @@ export interface MembersApi {
   setRole: (userId: string, role: Role) => Promise<void>;
   /**
    * Makes a team called `name` (trimmed; at most {@link teamNameMaxLength}
-   * characters), with nobody in it yet.
+   * characters, none of them control or text-direction characters), with
+   * nobody in it yet. Refused when another team has the name, whatever its
+   * case.
    */
   createTeam: (name: string) => Promise<{ id: string }>;
-  /** Gives the team `teamId` another name. */
+  /** Gives the team `teamId` another name, under the same rules. */
   renameTeam: (teamId: string, name: string) => Promise<void>;
   /**
-   * Deletes the team `teamId`. What was shared with it (Knowledge, Apps,
-   * decisions) reaches nobody through it any more.
+   * Deletes the team `teamId`, and with it who was in it and what was
+   * shared with it: Apps and collections. A decision waiting on the team
+   * reaches nobody, and times out.
    */
   deleteTeam: (teamId: string) => Promise<void>;
   /** Puts the member `userId` in the team `teamId`; no change if they are in it. */
   addTeamMember: (teamId: string, userId: string) => Promise<void>;
-  /** Takes `userId` out of the team `teamId`; no change if they aren't in it. */
+  /** Takes the member `userId` out of the team `teamId`; no change if they aren't in it. */
   removeTeamMember: (teamId: string, userId: string) => Promise<void>;
 }
 
@@ -58,7 +61,8 @@ export interface MembersApi {
 export const memberErrors = defineErrorFamily({
   "member.not_found": "There's no such member.",
   "member.team_not_found": "There's no such team.",
-  "member.team_name_invalid": `A team needs a name of at most ${teamNameMaxLength} characters.`,
+  "member.team_name_invalid": `A team needs a name of at most ${teamNameMaxLength} characters, in plain text.`,
+  "member.team_name_taken": "Another team has that name already.",
   "member.self":
     "You can't remove yourself or end your own sessions here. Ask another admin, or sign out.",
   "member.connections_pending":
