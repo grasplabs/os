@@ -1,12 +1,15 @@
 import "./zod-jitless.ts";
 import "./styles.css";
 import { CSPProvider } from "@base-ui/react/csp-provider";
+import { i18n } from "@lingui/core";
+import { I18nProvider } from "@lingui/react";
 import { createRouter, RouterProvider } from "@tanstack/react-router";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { CoreConnection } from "./core-connection.ts";
 import { reportError, reportUncaughtErrors } from "./error-reports.ts";
+import { startI18n } from "./i18n.ts";
 import { RouteError } from "./route-error.tsx";
 import { routeTree } from "./routeTree.gen.ts";
 
@@ -41,6 +44,9 @@ if (!root) {
   throw new Error("Missing #root element");
 }
 
+// The language first: every message on the page is looked up in it.
+await startI18n();
+
 // What no route's boundary caught, such as a fault in the router itself.
 createRoot(root, {
   onUncaughtError: (error) => {
@@ -48,10 +54,12 @@ createRoot(root, {
   },
 }).render(
   <StrictMode>
-    {/* The CSP allows no inline <style>, so Base UI renders none of its
-        own; styles.css carries the rule they held. */}
-    <CSPProvider disableStyleElements>
-      <RouterProvider router={router} />
-    </CSPProvider>
+    <I18nProvider i18n={i18n}>
+      {/* The CSP allows no inline <style>, so Base UI renders none of its
+          own; styles.css carries the rule they held. */}
+      <CSPProvider disableStyleElements>
+        <RouterProvider router={router} />
+      </CSPProvider>
+    </I18nProvider>
   </StrictMode>
 );

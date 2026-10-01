@@ -1,5 +1,6 @@
 import type { App, AppContents } from "@grasp-os/shared/apps";
 import { Button } from "@grasp-os/ui/components/button";
+import { Trans } from "@lingui/react/macro";
 import { Link } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 
@@ -32,19 +33,19 @@ const OpenedApp = ({
     <div className="flex flex-1 flex-col gap-2">
       <div className="flex items-center gap-2">
         <Button onClick={onClose} size="sm" variant="ghost">
-          All Apps
+          <Trans>All Apps</Trans>
         </Button>
         <Link
           className="text-sm underline"
           params={{ app: app.id }}
           to="/apps/$app"
         >
-          Workflows and more
+          <Trans>Workflows and more</Trans>
         </Link>
       </div>
       {screen === undefined || contents.version === null ? (
         <p className="text-muted-foreground text-sm">
-          {app.name} has no screen to show.
+          <Trans>{app.name} has no screen to show.</Trans>
         </p>
       ) : (
         <ScreenFrame app={app.id} embedded screen={screen} />
@@ -118,10 +119,14 @@ export const SidePanel = ({
     <div className="flex flex-col gap-4">
       <ChatBuilds chatId={chatId} drafts={drafts} running={running} />
       <div className="flex flex-col gap-2">
-        <h2 className="text-sm font-medium">Apps</h2>
+        <h2 className="text-sm font-medium">
+          <Trans>Apps</Trans>
+        </h2>
         {opened === undefined ? null : <NotLoaded page={opened} />}
         {apps.data.length === 0 ? (
-          <p className="text-muted-foreground text-sm">No Apps yet.</p>
+          <p className="text-muted-foreground text-sm">
+            <Trans>No Apps yet.</Trans>
+          </p>
         ) : (
           <ul className="flex flex-col gap-1">
             {apps.data.map((app) => (

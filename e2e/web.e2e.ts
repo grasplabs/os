@@ -138,13 +138,13 @@ test("names each member's actions for them, and asks before making someone an ad
     name: `Role of Person (${one.email})`,
   });
   await role.click();
-  await page.getByRole("option", { name: "admin" }).click();
+  await page.getByRole("option", { name: "Admin" }).click();
   await expect(
     page.getByRole("dialog", { name: "Make Person an admin?" })
   ).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await expect(role).toContainText("user");
+  await expect(role).toContainText("User");
 });
 
 test("shows the members page only to someone signed in, and never signs them out for core failing", async ({
@@ -222,11 +222,11 @@ test("an admin changes a member's role, and the controls wait for the list to sh
   await page.goto("/members");
   const who = `Person (${one.email})`;
   const role = page.getByRole("combobox", { name: `Role of ${who}` });
-  await expect(role).toContainText("user");
+  await expect(role).toContainText("User");
 
   gate.hold();
   await role.click();
-  await page.getByRole("option", { name: "builder" }).click();
+  await page.getByRole("option", { name: "Builder" }).click();
   // The change went through; the list that shows it hasn't come back yet.
   // The controls went off before the change was sent, so they're read
   // right away, then the list is let through, well before the page would
@@ -241,7 +241,7 @@ test("an admin changes a member's role, and the controls wait for the list to sh
   gate.release();
   expect(whileRefreshing).toStrictEqual({ role: true, remove: true });
   await expect(role).toBeEnabled();
-  await expect(role).toContainText("builder");
+  await expect(role).toContainText("Builder");
 });
 
 test("says core can't be reached when the members list never comes", async ({

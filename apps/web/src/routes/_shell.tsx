@@ -1,6 +1,9 @@
 import { isAdmin } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { Button, buttonVariants } from "@grasp-os/ui/components/button";
+import type { MessageDescriptor } from "@lingui/core";
+import { msg } from "@lingui/core/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
 import {
   createFileRoute,
   Link,
@@ -13,6 +16,8 @@ import type { ErrorComponentProps } from "@tanstack/react-router";
 
 import { loadCoreStatus, signOut } from "../core-connection.ts";
 import { ErrorText } from "../error-text.tsx";
+import { roleLabel } from "../labels.ts";
+import { LanguagePicker } from "../language-picker.tsx";
 import { NotificationsLink } from "../notifications/nav-link.tsx";
 import { RouteError } from "../route-error.tsx";
 import { signInErrorSearch } from "../sign-in-errors.ts";
@@ -32,7 +37,7 @@ interface Section {
     | "/activity"
     | "/models"
     | "/members";
-  label: string;
+  label: MessageDescriptor;
   /** Whether the section is in `person`'s nav. */
   shows: (person: Identity) => boolean;
 }
@@ -41,27 +46,29 @@ const everyone = (): boolean => true;
 const admins = ({ role }: Identity): boolean => isAdmin(role);
 
 const sections: readonly Section[] = [
-  { to: "/", label: "Chat", shows: everyone },
-  { to: "/knowledge", label: "Knowledge", shows: everyone },
-  { to: "/apps", label: "Apps", shows: everyone },
-  { to: "/workflows", label: "Workflows", shows: everyone },
-  { to: "/connections", label: "Connections", shows: everyone },
-  { to: "/activity", label: "Activity", shows: admins },
-  { to: "/models", label: "Models", shows: admins },
+  { to: "/", label: msg`Chat`, shows: everyone },
+  { to: "/knowledge", label: msg`Knowledge`, shows: everyone },
+  { to: "/apps", label: msg`Apps`, shows: everyone },
+  { to: "/workflows", label: msg`Workflows`, shows: everyone },
+  { to: "/connections", label: msg`Connections`, shows: everyone },
+  { to: "/activity", label: msg`Activity`, shows: admins },
+  { to: "/models", label: msg`Models`, shows: admins },
   // Members are for the organization's own admins, never Grasp staff.
   {
     to: "/members",
-    label: "Members",
+    label: msg`Members`,
     shows: (person) => admins(person) && !person.staff,
   },
 ];
 
 const Shell = () => {
   const { core, identity } = Route.useRouteContext();
+  const { t, i18n } = useLingui();
+  const role = roleLabel(identity.role);
   return (
     <div className="flex h-svh">
       <nav
-        aria-label="Main"
+        aria-label={t`Main`}
         className="flex w-56 shrink-0 flex-col gap-4 border-r p-3"
       >
         <ul className="flex flex-col gap-1">
@@ -78,18 +85,20 @@ const Shell = () => {
                     className: "w-full justify-start",
                   })}
                 >
-                  {label}
+                  {i18n._(label)}
                 </Link>
               </li>
             ))}
           <NotificationsLink />
         </ul>
         <div className="mt-auto flex flex-col gap-2">
+          <LanguagePicker />
           <p className="text-sm">
             {identity.name}
             <span className="text-muted-foreground block text-xs">
-              {identity.role}
-              {identity.staff ? ", Grasp staff" : ""}
+              {identity.staff
+                ? t`${role}, Grasp staff`
+                : roleLabel(identity.role)}
             </span>
           </p>
           <Button
@@ -98,7 +107,7 @@ const Shell = () => {
               void signOut(core);
             }}
           >
-            Sign out
+            <Trans>Sign out</Trans>
           </Button>
         </div>
       </nav>
@@ -112,6 +121,7 @@ const Shell = () => {
 /** Core failed or stayed out of reach while the shell asked who is in. */
 class CoreUnreachableError extends Error {
   constructor() {
+    // Not shown: ShellError says it in the page's language.
     super("Grasp can't be reached right now.");
     this.name = "CoreUnreachableError";
   }
@@ -124,6 +134,7 @@ class CoreUnreachableError extends Error {
 const ShellError = ({ error, reset, info }: ErrorComponentProps) => {
   const router = useRouter();
   const trying = useRouterState({ select: (state) => state.isLoading });
+  const { t } = useLingui();
   if (!(error instanceof CoreUnreachableError)) {
     return <RouteError error={error} reset={reset} info={info} />;
   }
@@ -133,7 +144,7 @@ const ShellError = ({ error, reset, info }: ErrorComponentProps) => {
       {/* Gone while trying, so the alert is announced again if it fails. */}
       {trying ? null : (
         <ErrorText>
-          Grasp can&apos;t be reached right now. Try again in a moment.
+          {t`Grasp can't be reached right now. Try again in a moment.`}
         </ErrorText>
       )}
       <Button
@@ -143,7 +154,7 @@ const ShellError = ({ error, reset, info }: ErrorComponentProps) => {
           void router.invalidate();
         }}
       >
-        {trying ? "Trying again…" : "Try again"}
+        {trying ? t`Trying again…` : t`Try again`}
       </Button>
     </main>
   );

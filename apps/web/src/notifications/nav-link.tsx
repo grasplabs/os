@@ -1,5 +1,6 @@
 import { Badge } from "@grasp-os/ui/components/badge";
 import { buttonVariants } from "@grasp-os/ui/components/button";
+import { Trans } from "@lingui/react/macro";
 import { Link, useRouter } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 
@@ -69,11 +70,14 @@ export const NotificationsLink = () => {
         })}
         to="/notifications"
       >
-        Notifications
+        <Trans>Notifications</Trans>
         {unread !== undefined && unread > 0 ? (
           <Badge className="ml-auto">
             {unread}
-            <span className="sr-only"> unread</span>
+            <span className="sr-only">
+              {" "}
+              <Trans>unread</Trans>
+            </span>
           </Badge>
         ) : null}
       </Link>

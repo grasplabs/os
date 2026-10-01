@@ -12,11 +12,15 @@ import {
   CardHeader,
   CardTitle,
 } from "@grasp-os/ui/components/card";
+import { i18n } from "@lingui/core";
+import { msg } from "@lingui/core/macro";
+import { Plural, Trans, useLingui } from "@lingui/react/macro";
 import { useEffect, useRef, useState } from "react";
 
 import type { CoreConnection } from "../core-connection.ts";
 import type { Session } from "../core.ts";
 import { ErrorText } from "../error-text.tsx";
+import { formatList } from "../format.ts";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import type { Loaded } from "../load-from-core.tsx";
 import { PreviewFrame } from "../screens/screen-frame.tsx";
@@ -96,22 +100,59 @@ const readReview = async (
 
 /** How something changed, as a reviewer reads it. */
 const changeWords = {
-  added: "Added",
-  modified: "Changed",
-  removed: "Removed",
+  added: msg`Added`,
+  modified: msg`Changed`,
+  removed: msg`Removed`,
 } as const;
+
+/** How the server code changed, as a whole sentence for its warning. */
+const serverChangeWarnings = {
+  added: msg`Added: it acts for whoever uses the App, with everything the App holds`,
+  modified: msg`Changed: it acts for whoever uses the App, with everything the App holds`,
+  removed: msg`Removed: it acts for whoever uses the App, with everything the App holds`,
+} as const;
+
+/** How a workflow changed, before its ID. */
+const workflowChangeWords = {
+  added: msg`Added workflow`,
+  modified: msg`Changed workflow`,
+  removed: msg`Removed workflow`,
+} as const;
+
+type Change = keyof typeof changeWords;
+
+/** How a step changed, with its name. */
+const stepChangeText = (change: Change, name: string): string => {
+  if (change === "added") {
+    return i18n._(msg`Added step ${name}`);
+  }
+  return change === "modified"
+    ? i18n._(msg`Changed step ${name}`)
+    : i18n._(msg`Removed step ${name}`);
+};
+
+/** How a parameter changed, with its name. */
+const paramChangeText = (change: Change, name: string): string => {
+  if (change === "added") {
+    return i18n._(msg`Added parameter ${name}`);
+  }
+  return change === "modified"
+    ? i18n._(msg`Changed parameter ${name}`)
+    : i18n._(msg`Removed parameter ${name}`);
+};
 
 /** Who proposed a version, as its reviewer reads it. */
 const proposerText = ({ proposedBy }: VersionReview): string => {
   if (proposedBy === null) {
-    return "Committed by a person.";
+    return i18n._(msg`Committed by a person.`);
   }
   if (!proposedBy.ownChat) {
-    return "Proposed by the agent, in another person's chat.";
+    return i18n._(msg`Proposed by the agent, in another person's chat.`);
   }
-  return proposedBy.chatTitle === null
-    ? "Proposed by the agent, in a chat of yours that was deleted."
-    : `Proposed by the agent in chat "${proposedBy.chatTitle}".`;
+  const { chatTitle } = proposedBy;
+  return chatTitle === null
+    ? i18n._(msg`Proposed by the agent, in a chat of yours that was deleted.`)
+    : i18n._(msg`Proposed by the agent in chat "${chatTitle}".`);
 };
 
 /**
@@ -156,7 +197,7 @@ const ServerCode = ({
   if (code === undefined) {
     return (
       <output className="text-muted-foreground">
-        Loading the server code…
+        <Trans>Loading the server code…</Trans>
       </output>
     );
   }
@@ -165,7 +206,7 @@ const ServerCode = ({
       <div className="flex items-center gap-2">
         <NotLoaded page={code} />
         <Button onClick={onRetry} size="sm" variant="outline">
-          Load the server code again
+          <Trans>Load the server code again</Trans>
         </Button>
       </div>
     );
@@ -209,193 +250,243 @@ const ReviewDetails = ({
   review: VersionReview;
   serverCode: Loaded<ServerFile[]> | undefined;
   onRetryServerCode: () => void;
-}) => (
-  <div className="flex flex-col gap-3 text-sm">
-    <p>{proposerText(review)}</p>
-    <blockquote className="border-l-2 pl-3">
-      <span className="text-muted-foreground block text-xs">
-        In the proposer&apos;s words
-      </span>
-      {review.version.message}
-    </blockquote>
-    <p className="text-muted-foreground">
-      {review.current === null
-        ? "Nothing runs yet: this would be the App's first current version."
-        : `Compared with version ${review.current}, which runs now.`}
-    </p>
-    <section aria-label="Files" className="flex flex-col gap-1">
-      <h4 className="font-medium">Files</h4>
-      {review.files.length === 0 ? (
-        <p className="text-muted-foreground">No file changes.</p>
-      ) : (
-        <ul className="flex flex-col gap-1">
-          {review.files.map(({ path, change }) => (
-            <li key={path}>
-              {changeWords[change]} <code className="font-mono">{path}</code>
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
-    {review.server === null ? null : (
-      <section aria-label="Server code" className="flex flex-col gap-1">
-        <h4 className="font-medium">Server code</h4>
-        <Badge variant="destructive">
-          {changeWords[review.server]}: it acts for whoever uses the App, with
-          everything the App holds
-        </Badge>
-        <ServerCode code={serverCode} onRetry={onRetryServerCode} />
-      </section>
-    )}
-    {review.workflows.length === 0 ? null : (
-      <section aria-label="Workflows" className="flex flex-col gap-1">
-        <h4 className="font-medium">Workflows</h4>
-        <ul className="flex flex-col gap-2">
-          {review.workflows.map((workflow) => (
-            <li className="flex flex-col gap-1" key={workflow.id}>
-              <span className="flex items-center gap-2">
-                {changeWords[workflow.change]} workflow{" "}
-                <code className="font-mono">{workflow.id}</code>
-                {workflow.sideEffect && workflow.change !== "removed" ? (
-                  <Badge variant="destructive">
-                    May change something outside Grasp
-                  </Badge>
-                ) : null}
-              </span>
-              {workflow.change === "removed" ? (
-                <span className="text-muted-foreground">
-                  It no longer runs
-                  {workflow.sideEffect ? " (it could change things)" : ""}.
-                </span>
-              ) : null}
-              {workflow.triggers === null ? (
-                <span className="text-muted-foreground">
-                  What makes it run on its own can&apos;t be read from its code.
-                </span>
-              ) : (
-                workflow.triggers.map((change) => (
-                  <span
-                    key={`${change.change}:${JSON.stringify(change.trigger)}`}
-                  >
-                    {triggerChangeText(change)}
-                  </span>
-                ))
-              )}
-              {workflow.shared.length === 0 ? null : (
-                <span className="text-muted-foreground">
-                  Code it may use changed: {workflow.shared.join(", ")}
-                </span>
-              )}
-              {workflow.steps === null ? (
-                <span className="text-muted-foreground">
-                  Its steps can&apos;t be read from its code, so it may do
-                  anything its code does.
-                </span>
-              ) : (
-                workflow.steps.map((step) => (
-                  <span className="flex items-center gap-2" key={step.name}>
-                    {changeWords[step.change]} step {step.name}
-                    {step.sideEffect ? (
-                      <Badge variant="destructive">
-                        May change something outside Grasp
-                      </Badge>
-                    ) : null}
-                    {step.calls.length === 0 ? null : (
-                      <Badge variant="outline">
-                        Calls {step.calls.join(", ")}: may change things
-                      </Badge>
-                    )}
-                    {step.sharedCode ? (
-                      <Badge variant="outline">Shared code changed</Badge>
-                    ) : null}
-                  </span>
-                ))
-              )}
-              {workflow.params === null ? (
-                <span className="text-muted-foreground">
-                  Its parameters can&apos;t be read from its code.
-                </span>
-              ) : (
-                workflow.params.map((param) => (
-                  <span key={param.name}>
-                    {changeWords[param.change]} parameter {param.name}
-                  </span>
-                ))
-              )}
-            </li>
-          ))}
-        </ul>
-      </section>
-    )}
-    {review.exports.length === 0 ? null : (
-      <section aria-label="Exports" className="flex flex-col gap-1">
-        <h4 className="font-medium">What other Apps may call</h4>
-        <ul className="flex flex-col gap-1">
-          {review.exports.map((change) => {
-            const { text, widens } = exportChangeText(change);
-            return (
-              <li className="flex items-center gap-2" key={change.name}>
-                {text}
-                {widens ? (
-                  <Badge variant="destructive">
-                    Changes the App&apos;s data
-                  </Badge>
-                ) : null}
-              </li>
-            );
-          })}
-        </ul>
-      </section>
-    )}
-    <section aria-label="What the App holds" className="flex flex-col gap-1">
-      <h4 className="font-medium">What the App holds</h4>
-      {review.grants.length === 0 ? (
-        <p className="text-muted-foreground">No permissions.</p>
-      ) : (
-        <ul className="flex flex-col gap-1">
-          {review.grants.map(({ permission, askedAgain }) => (
-            <li key={permission.id}>
-              {permission.binding}: {permission.actions.join(", ")} on{" "}
-              {permission.object.type}
-              {askedAgain
-                ? ", asked for again of an admin if you make this current"
-                : ""}
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
-    <section aria-label="Permissions asked for" className="flex flex-col gap-1">
-      <h4 className="font-medium">Permissions asked for</h4>
-      {review.permissions.length === 0 ? (
-        <p className="text-muted-foreground">None waiting for an admin.</p>
-      ) : (
-        <ul className="flex flex-col gap-1">
-          {review.permissions.map((permission) => (
-            <li key={permission.id}>
-              {permission.binding}: {permission.actions.join(", ")} on{" "}
-              {permission.object.type}, waiting for an admin
-              {permission.requestedVia === null ? "" : " (asked by the agent)"}
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
-    <section aria-label="Tests" className="flex flex-col gap-1">
-      <h4 className="font-medium">Tests</h4>
-      <p>
-        {review.tests.status === "passed" ? "All workflow tests pass." : null}
-        {review.tests.status === "none" ? "No workflows to test." : null}
-        {review.tests.status === "failed" ? "Workflow tests fail:" : null}
+}) => {
+  const { t } = useLingui();
+  const { current } = review;
+  return (
+    <div className="flex flex-col gap-3 text-sm">
+      <p>{proposerText(review)}</p>
+      <blockquote className="border-l-2 pl-3">
+        <span className="text-muted-foreground block text-xs">
+          <Trans>In the proposer&apos;s words</Trans>
+        </span>
+        {review.version.message}
+      </blockquote>
+      <p className="text-muted-foreground">
+        {current === null
+          ? t`Nothing runs yet: this would be the App's first current version.`
+          : t`Compared with version ${current}, which runs now.`}
       </p>
-      {review.tests.failures.map((failure) => (
-        <p className="text-destructive" key={failure}>
-          {failure}
+      <section aria-label={t`Files`} className="flex flex-col gap-1">
+        <h4 className="font-medium">
+          <Trans>Files</Trans>
+        </h4>
+        {review.files.length === 0 ? (
+          <p className="text-muted-foreground">
+            <Trans>No file changes.</Trans>
+          </p>
+        ) : (
+          <ul className="flex flex-col gap-1">
+            {review.files.map(({ path, change }) => (
+              <li key={path}>
+                {i18n._(changeWords[change])}{" "}
+                <code className="font-mono">{path}</code>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+      {review.server === null ? null : (
+        <section aria-label={t`Server code`} className="flex flex-col gap-1">
+          <h4 className="font-medium">
+            <Trans>Server code</Trans>
+          </h4>
+          <Badge variant="destructive">
+            {i18n._(serverChangeWarnings[review.server])}
+          </Badge>
+          <ServerCode code={serverCode} onRetry={onRetryServerCode} />
+        </section>
+      )}
+      {review.workflows.length === 0 ? null : (
+        <section aria-label={t`Workflows`} className="flex flex-col gap-1">
+          <h4 className="font-medium">
+            <Trans>Workflows</Trans>
+          </h4>
+          <ul className="flex flex-col gap-2">
+            {review.workflows.map((workflow) => (
+              <li className="flex flex-col gap-1" key={workflow.id}>
+                <span className="flex items-center gap-2">
+                  {i18n._(workflowChangeWords[workflow.change])}{" "}
+                  <code className="font-mono">{workflow.id}</code>
+                  {workflow.sideEffect && workflow.change !== "removed" ? (
+                    <Badge variant="destructive">
+                      <Trans>May change something outside Grasp</Trans>
+                    </Badge>
+                  ) : null}
+                </span>
+                {workflow.change === "removed" ? (
+                  <span className="text-muted-foreground">
+                    {workflow.sideEffect
+                      ? t`It no longer runs (it could change things).`
+                      : t`It no longer runs.`}
+                  </span>
+                ) : null}
+                {workflow.triggers === null ? (
+                  <span className="text-muted-foreground">
+                    <Trans>
+                      What makes it run on its own can&apos;t be read from its
+                      code.
+                    </Trans>
+                  </span>
+                ) : (
+                  workflow.triggers.map((change) => (
+                    <span
+                      key={`${change.change}:${JSON.stringify(change.trigger)}`}
+                    >
+                      {triggerChangeText(change)}
+                    </span>
+                  ))
+                )}
+                {workflow.shared.length === 0 ? null : (
+                  <span className="text-muted-foreground">
+                    {t`Code it may use changed: ${formatList(workflow.shared)}`}
+                  </span>
+                )}
+                {workflow.steps === null ? (
+                  <span className="text-muted-foreground">
+                    <Trans>
+                      Its steps can&apos;t be read from its code, so it may do
+                      anything its code does.
+                    </Trans>
+                  </span>
+                ) : (
+                  workflow.steps.map((step) => (
+                    <span className="flex items-center gap-2" key={step.name}>
+                      {stepChangeText(step.change, step.name)}
+                      {step.sideEffect ? (
+                        <Badge variant="destructive">
+                          <Trans>May change something outside Grasp</Trans>
+                        </Badge>
+                      ) : null}
+                      {step.calls.length === 0 ? null : (
+                        <Badge variant="outline">
+                          {t`Calls ${formatList(step.calls)}: may change things`}
+                        </Badge>
+                      )}
+                      {step.sharedCode ? (
+                        <Badge variant="outline">
+                          <Trans>Shared code changed</Trans>
+                        </Badge>
+                      ) : null}
+                    </span>
+                  ))
+                )}
+                {workflow.params === null ? (
+                  <span className="text-muted-foreground">
+                    <Trans>
+                      Its parameters can&apos;t be read from its code.
+                    </Trans>
+                  </span>
+                ) : (
+                  workflow.params.map((param) => (
+                    <span key={param.name}>
+                      {paramChangeText(param.change, param.name)}
+                    </span>
+                  ))
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+      {review.exports.length === 0 ? null : (
+        <section aria-label={t`Exports`} className="flex flex-col gap-1">
+          <h4 className="font-medium">
+            <Trans>What other Apps may call</Trans>
+          </h4>
+          <ul className="flex flex-col gap-1">
+            {review.exports.map((change) => {
+              const { text, widens } = exportChangeText(change);
+              return (
+                <li className="flex items-center gap-2" key={change.name}>
+                  {text}
+                  {widens ? (
+                    <Badge variant="destructive">
+                      <Trans>Changes the App&apos;s data</Trans>
+                    </Badge>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      )}
+      <section
+        aria-label={t`What the App holds`}
+        className="flex flex-col gap-1"
+      >
+        <h4 className="font-medium">
+          <Trans>What the App holds</Trans>
+        </h4>
+        {review.grants.length === 0 ? (
+          <p className="text-muted-foreground">
+            <Trans>No permissions.</Trans>
+          </p>
+        ) : (
+          <ul className="flex flex-col gap-1">
+            {review.grants.map(({ permission, askedAgain }) => {
+              const { binding } = permission;
+              const actions = permission.actions.join(", ");
+              const object = permission.object.type;
+              return (
+                <li key={permission.id}>
+                  {askedAgain
+                    ? t`${binding}: ${actions} on ${object}, asked for again of an admin if you make this current`
+                    : t`${binding}: ${actions} on ${object}`}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+      <section
+        aria-label={t`Permissions asked for`}
+        className="flex flex-col gap-1"
+      >
+        <h4 className="font-medium">
+          <Trans>Permissions asked for</Trans>
+        </h4>
+        {review.permissions.length === 0 ? (
+          <p className="text-muted-foreground">
+            <Trans>None waiting for an admin.</Trans>
+          </p>
+        ) : (
+          <ul className="flex flex-col gap-1">
+            {review.permissions.map((permission) => {
+              const { binding } = permission;
+              const actions = permission.actions.join(", ");
+              const object = permission.object.type;
+              return (
+                <li key={permission.id}>
+                  {permission.requestedVia === null
+                    ? t`${binding}: ${actions} on ${object}, waiting for an admin`
+                    : t`${binding}: ${actions} on ${object}, waiting for an admin (asked by the agent)`}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+      <section aria-label={t`Tests`} className="flex flex-col gap-1">
+        <h4 className="font-medium">
+          <Trans>Tests</Trans>
+        </h4>
+        <p>
+          {review.tests.status === "passed"
+            ? t`All workflow tests pass.`
+            : null}
+          {review.tests.status === "none" ? t`No workflows to test.` : null}
+          {review.tests.status === "failed" ? t`Workflow tests fail:` : null}
         </p>
-      ))}
-    </section>
-  </div>
-);
+        {review.tests.failures.map((failure) => (
+          <p className="text-destructive" key={failure}>
+            {failure}
+          </p>
+        ))}
+      </section>
+    </div>
+  );
+};
 
 /**
  * An App's version up for review: what it changes, and making it current;
@@ -419,6 +510,8 @@ const PendingVersion = ({
   const [codeReads, setCodeReads] = useState(0);
   const core = useCore();
   const { busy, failure, run } = useCoreAction();
+  const { t } = useLingui();
+  const { name } = app;
   useEffect(() => {
     let current = true;
     const read = async (): Promise<void> => {
@@ -484,7 +577,7 @@ const PendingVersion = ({
     <Card size="sm">
       <CardHeader>
         <CardTitle>
-          {app.name}: version {version} waiting for review
+          {t`${name}: version ${version} waiting for review`}
         </CardTitle>
       </CardHeader>
       <CardContent>
@@ -498,7 +591,7 @@ const PendingVersion = ({
               size="sm"
               variant="outline"
             >
-              Load the review again
+              <Trans>Load the review again</Trans>
             </Button>
           </div>
         ) : (
@@ -520,7 +613,7 @@ const PendingVersion = ({
               void makeCurrent();
             }}
           >
-            Make version {version} current
+            <Trans>Make version {version} current</Trans>
           </Button>
         </CardFooter>
       )}
@@ -542,11 +635,12 @@ const DraftPreview = ({
   name: string;
 }) => {
   const [picked, setPicked] = useState<string>();
+  const { t } = useLingui();
   const screens = changedScreens(draft);
   const screen = previewedScreen(screens, picked);
   return (
     <section
-      aria-label={`Preview of ${name}`}
+      aria-label={t`Preview of ${name}`}
       className="flex h-96 flex-col gap-2"
     >
       {screens.length > 1 ? (
@@ -608,6 +702,7 @@ export const ChatBuilds = ({
   // not, so a preview follows each write.
   const handledDrafts = useRef(-1);
   const core = useCore();
+  const { t } = useLingui();
   useEffect(() => {
     if (
       running &&
@@ -648,31 +743,38 @@ export const ChatBuilds = ({
     builds.data.drafts.find(({ app }) => app === previewing) ??
     builds.data.drafts[0];
   return (
-    <section aria-label="Being built" className="flex flex-col gap-2">
-      <h3 className="text-sm font-medium">Being built</h3>
-      {builds.data.drafts.map((draft) => (
-        <div
-          className="flex items-center justify-between gap-2"
-          key={draft.app}
-        >
-          <p className="text-sm">
-            {names.get(draft.app) ?? draft.app}: {draft.changed.length}{" "}
-            {draft.changed.length === 1 ? "file" : "files"} changed in this
-            chat, not proposed yet
-          </p>
-          {draft === previewed ? null : (
-            <Button
-              onClick={() => {
-                setPreviewing(draft.app);
-              }}
-              size="sm"
-              variant="outline"
-            >
-              Preview
-            </Button>
-          )}
-        </div>
-      ))}
+    <section aria-label={t`Being built`} className="flex flex-col gap-2">
+      <h3 className="text-sm font-medium">
+        <Trans>Being built</Trans>
+      </h3>
+      {builds.data.drafts.map((draft) => {
+        const app = names.get(draft.app) ?? draft.app;
+        return (
+          <div
+            className="flex items-center justify-between gap-2"
+            key={draft.app}
+          >
+            <p className="text-sm">
+              <Plural
+                value={draft.changed.length}
+                one={`${app}: # file changed in this chat, not proposed yet`}
+                other={`${app}: # files changed in this chat, not proposed yet`}
+              />
+            </p>
+            {draft === previewed ? null : (
+              <Button
+                onClick={() => {
+                  setPreviewing(draft.app);
+                }}
+                size="sm"
+                variant="outline"
+              >
+                <Trans>Preview</Trans>
+              </Button>
+            )}
+          </div>
+        );
+      })}
       {previewed === undefined ? null : (
         <DraftPreview
           chatId={chatId}

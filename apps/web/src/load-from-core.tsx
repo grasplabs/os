@@ -1,4 +1,5 @@
 import { failureText } from "@grasp-os/shared/errors";
+import { useLingui } from "@lingui/react/macro";
 
 import { readWithin } from "./core-connection.ts";
 import type { CoreConnection } from "./core-connection.ts";
@@ -40,10 +41,11 @@ export const loadFromCore = async <T,>(
 
 /** Why a page has no data to show; nothing once it has. */
 export const NotLoaded = ({ page }: { page: Loaded<unknown> }) => {
+  const { t } = useLingui();
   if (page.state === "offline") {
     return (
       <ErrorText>
-        Grasp can&apos;t be reached right now. Try again in a moment.
+        {t`Grasp can't be reached right now. Try again in a moment.`}
       </ErrorText>
     );
   }

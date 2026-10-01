@@ -75,6 +75,16 @@ catalog:
   "@babel/types": 7.29.8
   "@base-ui/react": 1.8.0
   "@fontsource-variable/geist": 5.2.8
+  # Translations of the frontend: macros compiled at build time, catalogs
+  # in apps/web/src/locales.
+  "@lingui/babel-plugin-lingui-macro": 6.8.0
+  "@lingui/cli": 6.8.0
+  "@lingui/conf": 6.8.0
+  "@lingui/core": 6.8.0
+  "@lingui/format-po": 6.8.0
+  "@lingui/react": 6.8.0
+  "@lingui/vite-plugin": 6.8.0
+  "@messageformat/parser": 5.1.1
   "@rolldown/plugin-babel": 0.2.4
   "@tailwindcss/vite": 4.3.3
   "@tanstack/react-router": 1.170.38

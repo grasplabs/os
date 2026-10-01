@@ -1,5 +1,6 @@
 import { failureText, withReference } from "@grasp-os/shared/errors";
 import { Button } from "@grasp-os/ui/components/button";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { useRouter } from "@tanstack/react-router";
 import type { ErrorComponentProps } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
@@ -16,6 +17,7 @@ import { ErrorText } from "./error-text.tsx";
  */
 export const RouteError = ({ error }: ErrorComponentProps) => {
   const router = useRouter();
+  const { t } = useLingui();
   const [reference, setReference] = useState<{
     error: unknown;
     requestId?: string;
@@ -35,7 +37,7 @@ export const RouteError = ({ error }: ErrorComponentProps) => {
   }, [error]);
   const reason = isPageFault(error)
     ? withReference(
-        "Something went wrong.",
+        t`Something went wrong.`,
         reference !== undefined && reference.error === error
           ? reference.requestId
           : undefined
@@ -43,7 +45,9 @@ export const RouteError = ({ error }: ErrorComponentProps) => {
     : failureText(error);
   return (
     <main className="flex flex-col items-start gap-4 p-6">
-      <h1 className="text-2xl font-medium">This page didn&apos;t load</h1>
+      <h1 className="text-2xl font-medium">
+        <Trans>This page didn&apos;t load</Trans>
+      </h1>
       <ErrorText>{reason}</ErrorText>
       <Button
         variant="outline"
@@ -51,7 +55,7 @@ export const RouteError = ({ error }: ErrorComponentProps) => {
           void router.invalidate();
         }}
       >
-        Try again
+        <Trans>Try again</Trans>
       </Button>
     </main>
   );

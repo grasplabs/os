@@ -14,6 +14,9 @@ import {
   TableRow,
 } from "@grasp-os/ui/components/table";
 import { Textarea } from "@grasp-os/ui/components/textarea";
+import { i18n } from "@lingui/core";
+import { msg } from "@lingui/core/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { Link, useRouter } from "@tanstack/react-router";
 import { useState } from "react";
 
@@ -37,7 +40,7 @@ const dateTime = new Intl.DateTimeFormat(undefined, {
 
 /** Who saved a version: the person themselves, or their user ID. */
 const savedBy = (author: string, me: string): string =>
-  author === me ? "You" : author;
+  author === me ? i18n._(msg`You`) : author;
 
 /** The documents that link to this one, each opening where it is. */
 const UsedBy = ({ backlinks }: { backlinks: Backlink[] }) =>
@@ -68,17 +71,29 @@ const Details = ({
   backlinks: Backlink[];
 }) => (
   <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm sm:grid-cols-4">
-    <dt className="text-muted-foreground">Path</dt>
+    <dt className="text-muted-foreground">
+      <Trans>Path</Trans>
+    </dt>
     <dd>{doc.path}</dd>
-    <dt className="text-muted-foreground">Type</dt>
+    <dt className="text-muted-foreground">
+      <Trans>Type</Trans>
+    </dt>
     <dd>{doc.type}</dd>
-    <dt className="text-muted-foreground">Version</dt>
+    <dt className="text-muted-foreground">
+      <Trans>Version</Trans>
+    </dt>
     <dd>{doc.currentVersion}</dd>
-    <dt className="text-muted-foreground">Review by</dt>
+    <dt className="text-muted-foreground">
+      <Trans>Review by</Trans>
+    </dt>
     <dd>{doc.reviewDate ?? "–"}</dd>
-    <dt className="text-muted-foreground">When to use</dt>
+    <dt className="text-muted-foreground">
+      <Trans>When to use</Trans>
+    </dt>
     <dd className="col-span-1 sm:col-span-3">{doc.description || "–"}</dd>
-    <dt className="text-muted-foreground">Used by</dt>
+    <dt className="text-muted-foreground">
+      <Trans>Used by</Trans>
+    </dt>
     <dd className="col-span-1 sm:col-span-3">
       <UsedBy backlinks={backlinks} />
     </dd>
@@ -104,6 +119,8 @@ const Editor = ({
   // save would replace it: only the explicit "Replace" does, or the person
   // starts again from it.
   const [newer, setNewer] = useState<DocumentRead>();
+  const { t } = useLingui();
+  const newerVersion = newer?.currentVersion;
   /** Saves the text as the version after `from`. */
   const save = async (from: number): Promise<void> => {
     const outcome = await run(async (session) => {
@@ -150,7 +167,7 @@ const Editor = ({
             id="newer-version"
             role="alert"
           >
-            {`This document changed since you opened it. Version ${newer.currentVersion} is below; your text is kept. Start again from it, or replace it with your text.`}
+            {t`This document changed since you opened it. Version ${newerVersion} is below; your text is kept. Start again from it, or replace it with your text.`}
           </p>
           <DocumentMarkdown resolve={resolve} text={newer.version.text} />
           <Button
@@ -163,12 +180,12 @@ const Editor = ({
             type="button"
             variant="outline"
           >
-            {`Start again from version ${newer.currentVersion}`}
+            {t`Start again from version ${newerVersion}`}
           </Button>
         </section>
       )}
       <Textarea
-        aria-label="Text"
+        aria-label={t`Text`}
         className="min-h-96"
         onChange={(event) => {
           setText(event.target.value);
@@ -176,18 +193,18 @@ const Editor = ({
         value={text}
       />
       <Input
-        aria-label="What changed"
+        aria-label={t`What changed`}
         maxLength={500}
         onChange={(event) => {
           setMessage(event.target.value);
         }}
-        placeholder="What changed"
+        placeholder={t`What changed`}
         value={message}
       />
       <div className="flex gap-2">
         {newer === undefined ? (
           <Button disabled={busy} type="submit">
-            Save
+            <Trans>Save</Trans>
           </Button>
         ) : (
           <Button
@@ -198,7 +215,7 @@ const Editor = ({
             type="button"
             variant="destructive"
           >
-            {`Replace version ${newer.currentVersion} with mine`}
+            {t`Replace version ${newerVersion} with mine`}
           </Button>
         )}
         <Button
@@ -207,7 +224,7 @@ const Editor = ({
           type="button"
           variant="outline"
         >
-          Cancel
+          <Trans>Cancel</Trans>
         </Button>
       </div>
       <ErrorText>{failure}</ErrorText>
@@ -228,6 +245,7 @@ const History = ({
 }) => {
   const router = useRouter();
   const { busy, failure, run } = useCoreAction();
+  const { t } = useLingui();
   const restore = async (version: number): Promise<void> => {
     await run(async (session) => {
       // Read again whatever the outcome: a restore refused as a conflict
@@ -248,51 +266,62 @@ const History = ({
   return (
     <section aria-labelledby="history" className="flex flex-col gap-2">
       <h3 className="font-medium" id="history">
-        History
+        <Trans>History</Trans>
       </h3>
       <ErrorText>{failure}</ErrorText>
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>Version</TableHead>
-            <TableHead>Saved by</TableHead>
-            <TableHead>When</TableHead>
-            <TableHead>What changed</TableHead>
+            <TableHead>
+              <Trans>Version</Trans>
+            </TableHead>
+            <TableHead>
+              <Trans>Saved by</Trans>
+            </TableHead>
+            <TableHead>
+              <Trans>When</Trans>
+            </TableHead>
+            <TableHead>
+              <Trans>What changed</Trans>
+            </TableHead>
             {writable ? <TableHead /> : null}
           </TableRow>
         </TableHeader>
         <TableBody>
-          {versions.map((version) => (
-            <TableRow key={version.number}>
-              <TableCell>{version.number}</TableCell>
-              <TableCell>{savedBy(version.author, me)}</TableCell>
-              <TableCell>
-                {dateTime.format(new Date(version.createdAt))}
-              </TableCell>
-              <TableCell>
-                {version.restoredFrom === null
-                  ? (version.message ?? "")
-                  : `Restored version ${version.restoredFrom}`}
-              </TableCell>
-              {writable ? (
+          {versions.map((version) => {
+            const { number, restoredFrom } = version;
+            return (
+              <TableRow key={version.number}>
+                <TableCell>{version.number}</TableCell>
+                <TableCell>{savedBy(version.author, me)}</TableCell>
                 <TableCell>
-                  {version.number === doc.currentVersion ? null : (
-                    <Button
-                      aria-label={`Restore version ${version.number}`}
-                      disabled={busy}
-                      onClick={() => {
-                        void restore(version.number);
-                      }}
-                      size="sm"
-                      variant="outline"
-                    >
-                      Restore
-                    </Button>
-                  )}
+                  {dateTime.format(new Date(version.createdAt))}
                 </TableCell>
-              ) : null}
-            </TableRow>
-          ))}
+                <TableCell>
+                  {restoredFrom === null
+                    ? (version.message ?? "")
+                    : t`Restored version ${restoredFrom}`}
+                </TableCell>
+                {writable ? (
+                  <TableCell>
+                    {version.number === doc.currentVersion ? null : (
+                      <Button
+                        aria-label={t`Restore version ${number}`}
+                        disabled={busy}
+                        onClick={() => {
+                          void restore(version.number);
+                        }}
+                        size="sm"
+                        variant="outline"
+                      >
+                        <Trans>Restore</Trans>
+                      </Button>
+                    )}
+                  </TableCell>
+                ) : null}
+              </TableRow>
+            );
+          })}
         </TableBody>
       </Table>
     </section>
@@ -331,7 +360,7 @@ export const DocumentView = ({
             }}
             variant="outline"
           >
-            Edit
+            <Trans>Edit</Trans>
           </Button>
         ) : null}
       </div>

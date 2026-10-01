@@ -1,3 +1,4 @@
+import { Trans, useLingui } from "@lingui/react/macro";
 import { createFileRoute, redirect } from "@tanstack/react-router";
 
 import { loadCoreStatus } from "../core-connection.ts";
@@ -36,12 +37,15 @@ const returnPathOf = (value: unknown): string =>
 const SignIn = () => {
   const { connected, signInOptions } = Route.useLoaderData();
   const { error, returnTo } = Route.useSearch();
+  const { t } = useLingui();
   return (
     <main className="flex min-h-svh flex-col items-center justify-center gap-4 p-6">
       <h1 className="text-2xl font-medium">Grasp</h1>
       {connected ? (
         <>
-          <p className="text-muted-foreground text-sm">Sign in to go on.</p>
+          <p className="text-muted-foreground text-sm">
+            <Trans>Sign in to go on.</Trans>
+          </p>
           <SignInOptions
             options={signInOptions}
             error={error}
@@ -50,7 +54,7 @@ const SignIn = () => {
         </>
       ) : (
         <ErrorText>
-          Grasp can&apos;t be reached right now. Try again in a moment.
+          {t`Grasp can't be reached right now. Try again in a moment.`}
         </ErrorText>
       )}
     </main>

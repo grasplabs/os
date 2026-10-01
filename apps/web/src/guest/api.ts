@@ -2,6 +2,7 @@ import { requestIdOf, withReference } from "@grasp-os/shared/errors";
 import { guestApiPath } from "@grasp-os/shared/guests";
 import type { GuestRequest, GuestView } from "@grasp-os/shared/guests";
 import { requestIdHeader } from "@grasp-os/shared/http";
+import { t } from "@lingui/core/macro";
 
 // A guest's page talks to core over one endpoint, with the secret from its
 // link in each request's body: it has no session, and never opens `/rpc`.
@@ -38,7 +39,7 @@ export const guestCall = async (
     if (!response.ok) {
       return {
         error: withReference(
-          messageIn(payload) ?? "That didn't work. Try again in a moment.",
+          messageIn(payload) ?? t`That didn't work. Try again in a moment.`,
           requestIdOf(payload) ??
             response.headers.get(requestIdHeader) ??
             undefined
@@ -50,7 +51,7 @@ export const guestCall = async (
     return { ok: payload as GuestView };
   } catch {
     return {
-      error: "Grasp can't be reached right now. Try again in a moment.",
+      error: t`Grasp can't be reached right now. Try again in a moment.`,
     };
   }
 };

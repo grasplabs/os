@@ -5,6 +5,7 @@
 import "./zod-jitless.ts";
 import { internalErrors } from "@grasp-os/shared/errors";
 import type { CoreApi } from "@grasp-os/shared/rpc";
+import { t } from "@lingui/core/macro";
 import { newWebSocketRpcSession } from "capnweb";
 import type { RpcStub } from "capnweb";
 
@@ -22,8 +23,9 @@ export const connectCore = (): RpcStub<CoreApi> => {
 /** How long a read from core may take before core counts as unreachable. */
 export const timeoutMs = 5000;
 
-/** What the page says when core can't be reached. */
-const unreachable = "Grasp can't be reached right now. Try again in a moment.";
+/** What the page says when core can't be reached, in the page's language. */
+const unreachable = (): string =>
+  t`Grasp can't be reached right now. Try again in a moment.`;
 
 /**
  * Core didn't answer in time, or no connection to it came in time: out of
@@ -33,7 +35,7 @@ export class CoreTimeoutError extends Error {
   readonly ms: number;
 
   constructor(ms: number) {
-    super(unreachable);
+    super(unreachable());
     this.ms = ms;
     this.name = "CoreTimeoutError";
   }

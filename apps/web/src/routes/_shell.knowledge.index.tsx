@@ -14,6 +14,7 @@ import {
   CardTitle,
 } from "@grasp-os/ui/components/card";
 import { Input } from "@grasp-os/ui/components/input";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 
@@ -101,6 +102,7 @@ const DocumentLink = ({
 const SearchBox = ({ query }: { query: string }) => {
   const navigate = useNavigate();
   const [typed, setTyped] = useState(query);
+  const { t } = useLingui();
   return (
     <form
       className="flex gap-2"
@@ -114,16 +116,18 @@ const SearchBox = ({ query }: { query: string }) => {
       }}
     >
       <Input
-        aria-label="Search Knowledge"
+        aria-label={t`Search Knowledge`}
         maxLength={searchQueryMaxLength}
         onChange={(event) => {
           setTyped(event.target.value);
         }}
-        placeholder="Search Knowledge"
+        placeholder={t`Search Knowledge`}
         type="search"
         value={typed}
       />
-      <Button type="submit">Search</Button>
+      <Button type="submit">
+        <Trans>Search</Trans>
+      </Button>
     </form>
   );
 };
@@ -136,7 +140,11 @@ const SearchResults = ({
   collections: ReadonlyMap<string, string>;
 }) => {
   if (hits.length === 0) {
-    return <p className="text-muted-foreground text-sm">Nothing matched.</p>;
+    return (
+      <p className="text-muted-foreground text-sm">
+        <Trans>Nothing matched.</Trans>
+      </p>
+    );
   }
   return (
     <ol className="flex flex-col gap-3">
@@ -163,39 +171,47 @@ const SearchResults = ({
   );
 };
 
-const MemoryCard = ({ memory }: { memory: MemoryFiles }) => (
-  <>
-    {memory.files.length === 0 ? (
-      <p className="text-muted-foreground text-sm">
-        No memory files are written yet.
-      </p>
-    ) : (
-      <ul className="flex flex-col gap-1">
-        {memory.files.map((file) => (
-          <li className="text-sm" key={file.id}>
-            <DocumentLink collectionId={file.collectionId} documentId={file.id}>
-              {file.path}
-            </DocumentLink>{" "}
-            <span className="text-muted-foreground">
-              {file.collectionId === memory.personal ? "(yours)" : "(company)"}
-            </span>
-          </li>
-        ))}
-      </ul>
-    )}
-    {memory.memory === null ? (
-      <p className="text-muted-foreground text-sm">
-        An admin hasn&apos;t set up company memory yet.
-      </p>
-    ) : null}
-  </>
-);
+const MemoryCard = ({ memory }: { memory: MemoryFiles }) => {
+  const { t } = useLingui();
+  return (
+    <>
+      {memory.files.length === 0 ? (
+        <p className="text-muted-foreground text-sm">
+          <Trans>No memory files are written yet.</Trans>
+        </p>
+      ) : (
+        <ul className="flex flex-col gap-1">
+          {memory.files.map((file) => (
+            <li className="text-sm" key={file.id}>
+              <DocumentLink
+                collectionId={file.collectionId}
+                documentId={file.id}
+              >
+                {file.path}
+              </DocumentLink>{" "}
+              <span className="text-muted-foreground">
+                {file.collectionId === memory.personal
+                  ? t`(yours)`
+                  : t`(company)`}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {memory.memory === null ? (
+        <p className="text-muted-foreground text-sm">
+          <Trans>An admin hasn&apos;t set up company memory yet.</Trans>
+        </p>
+      ) : null}
+    </>
+  );
+};
 
 const CollectionList = ({ collections }: { collections: Collection[] }) => {
   if (collections.length === 0) {
     return (
       <p className="text-muted-foreground text-sm">
-        There are no collections you can read yet.
+        <Trans>There are no collections you can read yet.</Trans>
       </p>
     );
   }
@@ -234,13 +250,15 @@ const Knowledge = () => {
   );
   return (
     <main className="flex max-w-4xl flex-col gap-8 p-6">
-      <h1 className="text-2xl font-medium">Knowledge</h1>
+      <h1 className="text-2xl font-medium">
+        <Trans>Knowledge</Trans>
+      </h1>
       {/* A new query starts from what the address says. */}
       <SearchBox key={q} query={q ?? ""} />
       {results === undefined ? null : (
         <section aria-labelledby="results" className="flex flex-col gap-3">
           <h2 className="text-lg font-medium" id="results">
-            Results
+            <Trans>Results</Trans>
           </h2>
           <NotLoaded page={results} />
           {results.state === "ready" ? (
@@ -252,10 +270,12 @@ const Knowledge = () => {
         <Card>
           <CardHeader>
             <CardTitle>
-              <h2 id="memory">Memory</h2>
+              <h2 id="memory">
+                <Trans>Memory</Trans>
+              </h2>
             </CardTitle>
             <CardDescription>
-              What every agent has in its context, all the time.
+              <Trans>What every agent has in its context, all the time.</Trans>
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -270,7 +290,7 @@ const Knowledge = () => {
       </section>
       <section aria-labelledby="collections" className="flex flex-col gap-3">
         <h2 className="text-lg font-medium" id="collections">
-          Collections
+          <Trans>Collections</Trans>
         </h2>
         <NotLoaded page={collections} />
         {collections.state === "ready" ? (

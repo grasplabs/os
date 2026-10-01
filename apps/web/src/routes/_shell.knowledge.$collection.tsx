@@ -6,6 +6,7 @@ import type {
   DocumentSummary,
   VersionSummary,
 } from "@grasp-os/shared/knowledge";
+import { Trans } from "@lingui/react/macro";
 import { createFileRoute, Link } from "@tanstack/react-router";
 
 import type { Session } from "../core.ts";
@@ -79,7 +80,7 @@ const FileList = ({
   if (documents.length === 0) {
     return (
       <p className="text-muted-foreground text-sm">
-        This collection has no files yet.
+        <Trans>This collection has no files yet.</Trans>
       </p>
     );
   }
@@ -103,7 +104,7 @@ const FileList = ({
       </ul>
       {documents.length === pageMaxLimit ? (
         <p className="text-muted-foreground text-sm">
-          {`Showing the first ${pageMaxLimit} files.`}
+          <Trans>Showing the first {pageMaxLimit} files.</Trans>
         </p>
       ) : null}
     </>
@@ -128,7 +129,7 @@ const CollectionView = () => {
   return (
     <main className="flex max-w-6xl flex-col gap-6 p-6">
       <Link className="text-sm underline" to="/knowledge">
-        Knowledge
+        <Trans>Knowledge</Trans>
       </Link>
       <NotLoaded page={collection} />
       {collection.state === "ready" ? (
@@ -148,7 +149,7 @@ const CollectionView = () => {
             <div className="flex flex-col gap-6 md:w-64 md:shrink-0">
               <section aria-labelledby="files" className="flex flex-col gap-2">
                 <h2 className="text-lg font-medium" id="files">
-                  Files
+                  <Trans>Files</Trans>
                 </h2>
                 <FileList documents={collection.data.documents} open={doc} />
               </section>

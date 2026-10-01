@@ -14,6 +14,10 @@ import {
   TableHeader,
   TableRow,
 } from "@grasp-os/ui/components/table";
+import { i18n } from "@lingui/core";
+import type { MessageDescriptor } from "@lingui/core";
+import { msg } from "@lingui/core/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { createFileRoute } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 
@@ -35,7 +39,7 @@ const dollars = new Intl.NumberFormat("en-US", {
 
 /** A list of IDs for a sentence, or `none`. */
 const listed = (ids: readonly string[]): string =>
-  ids.length === 0 ? "none" : ids.join(", ");
+  ids.length === 0 ? i18n._(msg`none`) : ids.join(", ");
 
 const Section = ({
   id,
@@ -64,9 +68,13 @@ const AllowedModels = ({
   <Table>
     <TableHeader>
       <TableRow>
-        <TableHead>Model</TableHead>
         <TableHead>
-          <span className="sr-only">Rules</span>
+          <Trans>Model</Trans>
+        </TableHead>
+        <TableHead>
+          <span className="sr-only">
+            <Trans>Rules</Trans>
+          </span>
         </TableHead>
       </TableRow>
     </TableHeader>
@@ -77,10 +85,14 @@ const AllowedModels = ({
           <TableCell>
             <span className="flex gap-2">
               {rules?.eu?.models.includes(model) === true ? (
-                <Badge variant="secondary">Hosted in the EU</Badge>
+                <Badge variant="secondary">
+                  <Trans>Hosted in the EU</Trans>
+                </Badge>
               ) : null}
               {rules?.sensitive?.models.includes(model) === true ? (
-                <Badge variant="secondary">Takes sensitive data</Badge>
+                <Badge variant="secondary">
+                  <Trans>Takes sensitive data</Trans>
+                </Badge>
               ) : null}
             </span>
           </TableCell>
@@ -91,24 +103,31 @@ const AllowedModels = ({
 );
 
 const EuRouting = ({ eu }: { eu: ModelRulesSettings["eu"] }) => {
+  const { t } = useLingui();
   if (eu === null) {
     return (
       <p className="text-muted-foreground text-sm">
-        No call has to stay in the EU.
+        <Trans>No call has to stay in the EU.</Trans>
       </p>
     );
   }
+  const workflows = listed(
+    eu.workflows.map(({ app, workflow }) => `${workflow} (${app})`)
+  );
+  const connections = listed(eu.connections);
   return (
     <ul className="flex flex-col gap-1 text-sm">
-      <li>Every call stays in the EU: {eu.deployment ? "yes" : "no"}.</li>
       <li>
-        Workflows whose AI steps stay in the EU:{" "}
-        {listed(
-          eu.workflows.map(({ app, workflow }) => `${workflow} (${app})`)
-        )}
-        .
+        {eu.deployment
+          ? t`Every call stays in the EU: yes.`
+          : t`Every call stays in the EU: no.`}
       </li>
-      <li>Connections whose data stays in the EU: {listed(eu.connections)}.</li>
+      <li>
+        <Trans>Workflows whose AI steps stay in the EU: {workflows}.</Trans>
+      </li>
+      <li>
+        <Trans>Connections whose data stays in the EU: {connections}.</Trans>
+      </li>
     </ul>
   );
 };
@@ -121,61 +140,84 @@ const DataRules = ({
   if (sensitive === null) {
     return (
       <p className="text-muted-foreground text-sm">
-        There is no data rule: any allowed model may take sensitive data.
+        <Trans>
+          There is no data rule: any allowed model may take sensitive data.
+        </Trans>
       </p>
     );
   }
+  const connections = listed(sensitive.connections);
   return (
     <ul className="flex flex-col gap-1 text-sm">
       <li>
-        Only the models marked as taking sensitive data may be sent data from a
-        sensitive collection (marked in Knowledge) or a sensitive connection, or
-        from a chat, App or run that read one.
+        <Trans>
+          Only the models marked as taking sensitive data may be sent data from
+          a sensitive collection (marked in Knowledge) or a sensitive
+          connection, or from a chat, App or run that read one.
+        </Trans>
       </li>
-      <li>Sensitive connections: {listed(sensitive.connections)}.</li>
+      <li>
+        <Trans>Sensitive connections: {connections}.</Trans>
+      </li>
     </ul>
   );
 };
 
-const scopeTitles: Record<ModelBudgetScope, string> = {
-  deployment: "All calls together",
-  workflow: "Each workflow",
-  user: "Each person",
+const scopeTitles: Record<ModelBudgetScope, MessageDescriptor> = {
+  deployment: msg`All calls together`,
+  workflow: msg`Each workflow`,
+  user: msg`Each person`,
 };
 
 const spenderName = (of: ModelSpender): string => {
   if (of.type === "deployment") {
-    return "All calls";
+    return i18n._(msg`All calls`);
   }
   if (of.type === "workflow") {
-    return `${of.workflowId} in ${of.appName ?? of.appId}`;
+    const { workflowId } = of;
+    const app = of.appName ?? of.appId;
+    return i18n._(msg`${workflowId} in ${app}`);
   }
   return of.name ?? of.userId;
 };
 
 const BudgetTable = ({ budget }: { budget: ModelBudget }) => {
-  const title = scopeTitles[budget.scope];
+  const { t } = useLingui();
+  const title = i18n._(scopeTitles[budget.scope]);
+  const limit = dollars.format(budget.limit);
+  const { alertAt } = budget;
+  const top = budget.spent.length;
   return (
     <div className="flex flex-col gap-2">
       <h3 className="font-medium">{title}</h3>
       <p className="text-muted-foreground text-sm">
-        {dollars.format(budget.limit)} a month, admins alerted at{" "}
-        {budget.alertAt}%. Calls stop once it&apos;s used up.
+        <Trans>
+          {limit} a month, admins alerted at {alertAt}%. Calls stop once
+          it&apos;s used up.
+        </Trans>
       </p>
       {budget.more ? (
         <p className="text-sm">
-          The {budget.spent.length} who spent most; more spent less.
+          <Trans>The {top} who spent most; more spent less.</Trans>
         </p>
       ) : null}
       {budget.spent.length === 0 ? (
-        <p className="text-muted-foreground text-sm">Nothing spent yet.</p>
+        <p className="text-muted-foreground text-sm">
+          <Trans>Nothing spent yet.</Trans>
+        </p>
       ) : (
-        <Table aria-label={`Spend: ${title}`}>
+        <Table aria-label={t`Spend: ${title}`}>
           <TableHeader>
             <TableRow>
-              <TableHead>Spent by</TableHead>
-              <TableHead>Spent</TableHead>
-              <TableHead>Of the limit</TableHead>
+              <TableHead>
+                <Trans>Spent by</Trans>
+              </TableHead>
+              <TableHead>
+                <Trans>Spent</Trans>
+              </TableHead>
+              <TableHead>
+                <Trans>Of the limit</Trans>
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -205,13 +247,17 @@ const Budgets = ({
   if (budgets.length === 0) {
     return (
       <p className="text-muted-foreground text-sm">
-        No budget is set: model calls aren&apos;t limited by cost.
+        <Trans>
+          No budget is set: model calls aren&apos;t limited by cost.
+        </Trans>
       </p>
     );
   }
   return (
     <div className="flex flex-col gap-4">
-      <p className="text-sm">Spend this month ({month}, UTC).</p>
+      <p className="text-sm">
+        <Trans>Spend this month ({month}, UTC).</Trans>
+      </p>
       {budgets.map((budget) => (
         <BudgetTable budget={budget} key={budget.scope} />
       ))}
@@ -220,11 +266,14 @@ const Budgets = ({
 };
 
 const Settings = ({ settings }: { settings: ModelSettings }) => {
+  const { t } = useLingui();
   if (settings.models.length === 0) {
     return (
       <p className="text-muted-foreground text-sm">
-        Models aren&apos;t set up for this deployment yet, so no model call can
-        be made. Grasp sets them up.
+        <Trans>
+          Models aren&apos;t set up for this deployment yet, so no model call
+          can be made. Grasp sets them up.
+        </Trans>
       </p>
     );
   }
@@ -234,22 +283,21 @@ const Settings = ({ settings }: { settings: ModelSettings }) => {
     <>
       {rules.state === "invalid" ? (
         <ErrorText>
-          The rules in this deployment&apos;s configuration can&apos;t be read,
-          so every model call is refused. Contact Grasp.
+          {t`The rules in this deployment's configuration can't be read, so every model call is refused. Contact Grasp.`}
         </ErrorText>
       ) : null}
-      <Section id="allowed" title="Allowed models">
+      <Section id="allowed" title={t`Allowed models`}>
         <AllowedModels models={settings.models} rules={on} />
       </Section>
       {on === undefined ? null : (
         <>
-          <Section id="eu" title="EU routing">
+          <Section id="eu" title={t`EU routing`}>
             <EuRouting eu={on.eu} />
           </Section>
-          <Section id="data" title="Data rules">
+          <Section id="data" title={t`Data rules`}>
             <DataRules sensitive={on.sensitive} />
           </Section>
-          <Section id="budgets" title="Budgets">
+          <Section id="budgets" title={t`Budgets`}>
             <Budgets budgets={on.budgets} month={settings.month} />
           </Section>
         </>
@@ -263,10 +311,14 @@ const Models = () => {
   return (
     <main className="flex max-w-4xl flex-col gap-8 p-6">
       <div className="flex flex-col gap-2">
-        <h1 className="text-2xl font-medium">Models</h1>
+        <h1 className="text-2xl font-medium">
+          <Trans>Models</Trans>
+        </h1>
         <p className="text-muted-foreground text-sm">
-          Grasp sets these for your organization, as agreed with you. To change
-          them, contact Grasp.
+          <Trans>
+            Grasp sets these for your organization, as agreed with you. To
+            change them, contact Grasp.
+          </Trans>
         </p>
       </div>
       <NotLoaded page={page} />

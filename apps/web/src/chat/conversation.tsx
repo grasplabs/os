@@ -1,5 +1,6 @@
 import type { ChatCode, ChatMessage, ChatPartial } from "@grasp-os/shared/chat";
 import { Badge } from "@grasp-os/ui/components/badge";
+import { Trans, useLingui } from "@lingui/react/macro";
 
 import { ErrorText } from "../error-text.tsx";
 import { PlainMarkdown } from "../knowledge/markdown.tsx";
@@ -23,17 +24,18 @@ const CodeStep = ({
   /** Whether the agent is working on the chat now. */
   running: boolean;
 }) => {
+  const { t } = useLingui();
   // Without a result once the agent stopped, it never finished.
-  let status = running ? "Running" : "Stopped";
+  let status = running ? t`Running` : t`Stopped`;
   if (writing) {
-    status = "Writing";
+    status = t`Writing`;
   } else if (result !== undefined) {
-    status = result.failed ? "Failed" : "Done";
+    status = result.failed ? t`Failed` : t`Done`;
   }
   return (
     <details className="rounded-md border">
       <summary className="flex cursor-pointer items-center gap-2 p-2 text-sm">
-        Code step
+        <Trans>Code step</Trans>
         <Badge variant={result?.failed === true ? "destructive" : "secondary"}>
           {status}
         </Badge>
@@ -63,31 +65,36 @@ const Reply = ({
   results: ReadonlyMap<string, Result>;
   writing: boolean;
   running: boolean;
-}) => (
-  <div className="flex flex-col gap-2">
-    {reply.text === "" ? null : <PlainMarkdown text={reply.text} />}
-    {reply.code.map((code) => (
-      <CodeStep
-        code={code}
-        key={code.callId}
-        result={results.get(code.callId)}
-        running={running}
-        writing={writing}
-      />
-    ))}
-    {reply.end === "cancelled" ? (
-      <p className="text-muted-foreground text-sm">Stopped.</p>
-    ) : null}
-    {reply.end === "cut_off" ? (
-      <p className="text-muted-foreground text-sm">
-        The answer was cut off at the model&apos;s limit.
-      </p>
-    ) : null}
-    {reply.end === "failed" ? (
-      <ErrorText>{reply.error ?? "The model call failed."}</ErrorText>
-    ) : null}
-  </div>
-);
+}) => {
+  const { t } = useLingui();
+  return (
+    <div className="flex flex-col gap-2">
+      {reply.text === "" ? null : <PlainMarkdown text={reply.text} />}
+      {reply.code.map((code) => (
+        <CodeStep
+          code={code}
+          key={code.callId}
+          result={results.get(code.callId)}
+          running={running}
+          writing={writing}
+        />
+      ))}
+      {reply.end === "cancelled" ? (
+        <p className="text-muted-foreground text-sm">
+          <Trans>Stopped.</Trans>
+        </p>
+      ) : null}
+      {reply.end === "cut_off" ? (
+        <p className="text-muted-foreground text-sm">
+          <Trans>The answer was cut off at the model&apos;s limit.</Trans>
+        </p>
+      ) : null}
+      {reply.end === "failed" ? (
+        <ErrorText>{reply.error ?? t`The model call failed.`}</ErrorText>
+      ) : null}
+    </div>
+  );
+};
 
 /** The chat's messages, and the response being written, oldest first. */
 export const Conversation = ({
@@ -100,6 +107,7 @@ export const Conversation = ({
   /** Whether the agent is working on the chat now. */
   running: boolean;
 }) => {
+  const { t } = useLingui();
   const results = new Map<string, Result>();
   for (const message of messages) {
     if (message.role === "result") {
@@ -107,7 +115,7 @@ export const Conversation = ({
     }
   }
   return (
-    <ol aria-label="Messages" className="flex flex-col gap-4">
+    <ol aria-label={t`Messages`} className="flex flex-col gap-4">
       {messages.map((message) => {
         if (message.role === "user") {
           return (

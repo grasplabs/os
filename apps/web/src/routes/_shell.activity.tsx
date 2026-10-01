@@ -6,6 +6,7 @@ import {
   TabsList,
   TabsTrigger,
 } from "@grasp-os/ui/components/tabs";
+import { Trans } from "@lingui/react/macro";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 
 import {
@@ -42,7 +43,9 @@ const Activity = () => {
   const { tab: _tab, ...filters } = search;
   return (
     <main className="flex flex-col gap-6 p-6">
-      <h1 className="text-2xl font-medium">Activity</h1>
+      <h1 className="text-2xl font-medium">
+        <Trans>Activity</Trans>
+      </h1>
       <Tabs
         value={search.tab ?? "log"}
         onValueChange={(tab: string) => {
@@ -53,8 +56,12 @@ const Activity = () => {
         }}
       >
         <TabsList>
-          <TabsTrigger value="log">Audit log</TabsTrigger>
-          <TabsTrigger value="pending">Pending approvals</TabsTrigger>
+          <TabsTrigger value="log">
+            <Trans>Audit log</Trans>
+          </TabsTrigger>
+          <TabsTrigger value="pending">
+            <Trans>Pending approvals</Trans>
+          </TabsTrigger>
         </TabsList>
         <TabsContent value="log">
           {data.tab === "log" ? (

@@ -60,8 +60,9 @@ jobs:
       # its build is a Worker wrangler would deploy. No credentials needed.
       - run: vp exec wrangler deploy --dry-run
         working-directory: apps/console
-      # Generated files (Worker types, route trees, migrations) must be committed.
-      - run: vp run -r typegen && vp run -r db:generate
+      # Generated files (Worker types, route trees, migrations, the
+      # frontend's translation catalogs) must be committed.
+      - run: vp run -r typegen && vp run -r db:generate && vp run -r i18n:extract
       - run: git diff --exit-code && test -z "$(git status --porcelain)"
 
   e2e:

@@ -8,21 +8,28 @@ import {
   TableHeader,
   TableRow,
 } from "@grasp-os/ui/components/table";
+import { i18n } from "@lingui/core";
+import type { MessageDescriptor } from "@lingui/core";
+import { msg } from "@lingui/core/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { Link } from "@tanstack/react-router";
 
 // Runs as the Workflows page and a workflow's history list them: each
 // with where it is, and a run waiting for a decision with a link to where
 // it is answered.
 
-/** A run's status, in words. */
-export const statusLabels: Readonly<Record<RunStatus, string>> = {
-  running: "Running",
-  waiting: "Waiting for a decision",
-  paused: "Paused",
-  completed: "Completed",
-  failed: "Failed",
-  cancelled: "Cancelled",
+const statusLabels: Readonly<Record<RunStatus, MessageDescriptor>> = {
+  running: msg`Running`,
+  waiting: msg`Waiting for a decision`,
+  paused: msg`Paused`,
+  completed: msg`Completed`,
+  failed: msg`Failed`,
+  cancelled: msg`Cancelled`,
 };
+
+/** A run's status, in words, in the page's language. */
+export const runStatusLabel = (status: RunStatus): string =>
+  i18n._(statusLabels[status]);
 
 export const dateTime = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
@@ -32,9 +39,9 @@ export const dateTime = new Intl.DateTimeFormat(undefined, {
 /** Who started a run, in words, for the person `me`. */
 const startedByOf = ({ startedBy }: ListedRun, me: string): string => {
   if (startedBy.type === "trigger") {
-    return "Automatically";
+    return i18n._(msg`Automatically`);
   }
-  return startedBy.userId === me ? "You" : "Someone else";
+  return startedBy.userId === me ? i18n._(msg`You`) : i18n._(msg`Someone else`);
 };
 
 /**
@@ -44,30 +51,35 @@ const startedByOf = ({ startedBy }: ListedRun, me: string): string => {
  * own text, shown as text. A run whose details were removed, its
  * retention over, says so in place of the reason, which went with them.
  */
-const RunStatusCell = ({ run }: { run: ListedRun }) => (
-  <div className="flex flex-col gap-1">
-    <span>{statusLabels[run.status]}</span>
-    {run.decision === undefined ? null : (
-      <Link
-        className="text-sm underline"
-        params={{ decision: run.decision }}
-        to="/decisions/$decision"
-      >
-        Decide
-      </Link>
-    )}
-    {run.failure === undefined || run.detailsRemoved ? null : (
-      <span className="text-muted-foreground text-xs">
-        {run.failure.step === null
-          ? run.failure.error.message
-          : `At ${run.failure.step}: ${run.failure.error.message}`}
-      </span>
-    )}
-    {run.detailsRemoved ? (
-      <span className="text-muted-foreground text-xs">Details removed</span>
-    ) : null}
-  </div>
-);
+const RunStatusCell = ({ run }: { run: ListedRun }) => {
+  const { t } = useLingui();
+  return (
+    <div className="flex flex-col gap-1">
+      <span>{runStatusLabel(run.status)}</span>
+      {run.decision === undefined ? null : (
+        <Link
+          className="text-sm underline"
+          params={{ decision: run.decision }}
+          to="/decisions/$decision"
+        >
+          <Trans>Decide</Trans>
+        </Link>
+      )}
+      {run.failure === undefined || run.detailsRemoved ? null : (
+        <span className="text-muted-foreground text-xs">
+          {run.failure.step === null
+            ? run.failure.error.message
+            : t`At ${run.failure.step}: ${run.failure.error.message}`}
+        </span>
+      )}
+      {run.detailsRemoved ? (
+        <span className="text-muted-foreground text-xs">
+          <Trans>Details removed</Trans>
+        </span>
+      ) : null}
+    </div>
+  );
+};
 
 /**
  * Runs, in the order core lists them; with each one's workflow and App
@@ -86,7 +98,11 @@ export const RunsTable = ({
   withWorkflow?: boolean;
 }) => {
   if (runs.length === 0) {
-    return <p className="text-muted-foreground text-sm">No runs.</p>;
+    return (
+      <p className="text-muted-foreground text-sm">
+        <Trans>No runs.</Trans>
+      </p>
+    );
   }
   return (
     <>
@@ -95,15 +111,29 @@ export const RunsTable = ({
           <TableRow>
             {withWorkflow ? (
               <>
-                <TableHead>Workflow</TableHead>
-                <TableHead>App</TableHead>
+                <TableHead>
+                  <Trans>Workflow</Trans>
+                </TableHead>
+                <TableHead>
+                  <Trans>App</Trans>
+                </TableHead>
               </>
             ) : null}
-            <TableHead>Status</TableHead>
-            <TableHead>Version</TableHead>
-            <TableHead>Started by</TableHead>
-            <TableHead>Started</TableHead>
-            <TableHead>Ended</TableHead>
+            <TableHead>
+              <Trans>Status</Trans>
+            </TableHead>
+            <TableHead>
+              <Trans>Version</Trans>
+            </TableHead>
+            <TableHead>
+              <Trans>Started by</Trans>
+            </TableHead>
+            <TableHead>
+              <Trans>Started</Trans>
+            </TableHead>
+            <TableHead>
+              <Trans>Ended</Trans>
+            </TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -140,7 +170,7 @@ export const RunsTable = ({
       </Table>
       {more ? (
         <p className="text-muted-foreground text-sm">
-          {`Showing the first ${runsPageSize} runs of more.`}
+          <Trans>Showing the first {runsPageSize} runs of more.</Trans>
         </p>
       ) : null}
     </>

@@ -1,6 +1,8 @@
 import { connectErrors, connectionErrors } from "@grasp-os/shared/connect";
 import { authErrors } from "@grasp-os/shared/errors";
 import { roleErrors } from "@grasp-os/shared/roles";
+import { i18n } from "@lingui/core";
+import { msg } from "@lingui/core/macro";
 
 /** One family of coded errors, as `defineErrorFamily` makes it. */
 interface Family<Code extends string> {
@@ -17,7 +19,8 @@ const messageIn = <Code extends string>(
   return known === undefined ? undefined : family.create(known).message;
 };
 
-const fallback = "Connecting didn't work. Try again, or ask an admin.";
+// The known codes' messages are core's, in English; the fallback is the page's.
+const fallback = msg`Connecting didn't work. Try again, or ask an admin.`;
 
 /**
  * What a flow that didn't finish says, by the code core's callback sends
@@ -29,4 +32,4 @@ export const connectionErrorMessage = (code: string): string =>
   messageIn(connectErrors, code) ??
   messageIn(roleErrors, code) ??
   messageIn(authErrors, code) ??
-  fallback;
+  i18n._(fallback);

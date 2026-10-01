@@ -1,17 +1,19 @@
 import { Badge } from "@grasp-os/ui/components/badge";
 import { Button } from "@grasp-os/ui/components/button";
+import type { MessageDescriptor } from "@lingui/core";
+import { msg } from "@lingui/core/macro";
+import { useLingui } from "@lingui/react/macro";
 import { useEffect, useState } from "react";
 
 import { runPreview, runScreen } from "./screen-host.ts";
 import type { FailureReason, ScreenState } from "./screen-host.ts";
 
-const failureMessages: Readonly<Record<FailureReason, string>> = {
-  forbidden:
-    "You can't open this App's screens: your role doesn't allow it, or the App has read data you can't read.",
-  "not-found": "This App has no such screen.",
-  "not-running": "This App has no version to run yet.",
-  broken: "This screen doesn't build. Ask a builder to fix it.",
-  unknown: "The screen couldn't be loaded.",
+const failureMessages: Readonly<Record<FailureReason, MessageDescriptor>> = {
+  forbidden: msg`You can't open this App's screens: your role doesn't allow it, or the App has read data you can't read.`,
+  "not-found": msg`This App has no such screen.`,
+  "not-running": msg`This App has no version to run yet.`,
+  broken: msg`This screen doesn't build. Ask a builder to fix it.`,
+  unknown: msg`The screen couldn't be loaded.`,
 };
 
 interface StatusProps {
@@ -21,23 +23,24 @@ interface StatusProps {
 
 /** What the page says about the screen, and how to load it again. */
 const ScreenStatus = ({ state, onReload }: StatusProps) => {
+  const { t, i18n } = useLingui();
   if (state.status === "loading" || state.status === "running") {
     return null;
   }
-  let message = failureMessages.unknown;
+  let message = i18n._(failureMessages.unknown);
   if (state.status === "updated") {
-    message = "A new version of this App is available.";
+    message = t`A new version of this App is available.`;
   } else if (state.status === "signed-out") {
-    message = "Your session has ended. Sign in again to go on.";
+    message = t`Your session has ended. Sign in again to go on.`;
   } else if (state.status === "failed") {
-    message = failureMessages[state.reason];
+    message = i18n._(failureMessages[state.reason]);
   }
   return (
     <div className="flex items-center justify-between gap-4 border-b p-3 print:hidden">
       <output className="text-sm">{message}</output>
       {state.status === "signed-out" ? null : (
         <Button onClick={onReload} size="sm" variant="outline">
-          {state.status === "updated" ? "Reload" : "Try again"}
+          {state.status === "updated" ? t`Reload` : t`Try again`}
         </Button>
       )}
     </div>
@@ -186,15 +189,18 @@ export const ScreenFrame = ({
   screen,
   embedded = false,
   onReload,
-}: ScreenFrameProps) => (
-  <FramedScreen
-    embedded={embedded}
-    label="App screen"
-    source={{ app, screen }}
-    title={`${screen} screen`}
-    {...(onReload === undefined ? {} : { onReload })}
-  />
-);
+}: ScreenFrameProps) => {
+  const { t } = useLingui();
+  return (
+    <FramedScreen
+      embedded={embedded}
+      label={t`App screen`}
+      source={{ app, screen }}
+      title={t`${screen} screen`}
+      {...(onReload === undefined ? {} : { onReload })}
+    />
+  );
+};
 
 /**
  * A screen of the chat's draft of `app` (its first changed one when none
@@ -210,11 +216,18 @@ export const PreviewFrame = ({
   chatId: string;
   app: string;
   screen?: string;
-}) => (
-  <FramedScreen
-    embedded
-    label="Preview: changes nothing, reads no real data"
-    source={{ chatId, app, ...(screen === undefined ? {} : { screen }) }}
-    title={`Preview of ${screen ?? "the draft's first"} screen`}
-  />
-);
+}) => {
+  const { t } = useLingui();
+  return (
+    <FramedScreen
+      embedded
+      label={t`Preview: changes nothing, reads no real data`}
+      source={{ chatId, app, ...(screen === undefined ? {} : { screen }) }}
+      title={
+        screen === undefined
+          ? t`Preview of the draft's first screen`
+          : t`Preview of ${screen} screen`
+      }
+    />
+  );
+};

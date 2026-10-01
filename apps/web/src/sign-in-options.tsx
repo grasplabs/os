@@ -1,5 +1,6 @@
 import type { SignInOption } from "@grasp-os/shared/rpc";
 import { Button } from "@grasp-os/ui/components/button";
+import { Trans } from "@lingui/react/macro";
 
 import { signIn } from "./core.ts";
 import { ErrorText } from "./error-text.tsx";
@@ -29,7 +30,7 @@ export const SignInOptions = ({
           void signIn(providerId, returnTo);
         }}
       >
-        Sign in with {label}
+        <Trans>Sign in with {label}</Trans>
       </Button>
     ))}
   </div>

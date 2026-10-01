@@ -1,4 +1,5 @@
 import { canBuild } from "@grasp-os/shared/roles";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { createFileRoute } from "@tanstack/react-router";
 
 import { connectionErrorMessage } from "../connection-errors.ts";
@@ -42,15 +43,16 @@ const HeldNotLoaded = ({
 }: {
   held: Loaded<HeldPermissions> | undefined;
 }) => {
+  const { t } = useLingui();
   if (held === undefined || held.state === "ready") {
     return null;
   }
   const why =
     held.state === "offline"
-      ? "Grasp can't be reached right now. Try again in a moment."
+      ? t`Grasp can't be reached right now. Try again in a moment.`
       : held.message;
   return (
-    <ErrorText>{`Which Apps and agents hold permissions: ${why}`}</ErrorText>
+    <ErrorText>{t`Which Apps and agents hold permissions: ${why}`}</ErrorText>
   );
 };
 
@@ -58,6 +60,7 @@ const Connections = () => {
   const { catalog, connections, held } = Route.useLoaderData();
   const { identity } = Route.useRouteContext();
   const { connection, connectionError } = Route.useSearch();
+  const { t } = useLingui();
   const names = new Map(
     catalog.state === "ready"
       ? catalog.data.entries.map(({ source, id, name }) => [
@@ -83,15 +86,21 @@ const Connections = () => {
     connection !== undefined && listed.some(({ id }) => id === connection);
   return (
     <main className="flex max-w-4xl flex-col gap-8 p-6">
-      <h1 className="text-2xl font-medium">Connections</h1>
-      {connected ? <output className="text-sm">Connected.</output> : null}
+      <h1 className="text-2xl font-medium">
+        <Trans>Connections</Trans>
+      </h1>
+      {connected ? (
+        <output className="text-sm">
+          <Trans>Connected.</Trans>
+        </output>
+      ) : null}
       {connectionError === undefined ? null : (
         <ErrorText>{connectionErrorMessage(connectionError)}</ErrorText>
       )}
       <HeldNotLoaded held={held} />
       <section aria-labelledby="mine" className="flex flex-col gap-3">
         <h2 className="text-lg font-medium" id="mine">
-          My connections
+          <Trans>My connections</Trans>
         </h2>
         <NotLoaded page={connections} />
         {connections.state === "ready" ? (
@@ -101,13 +110,13 @@ const Connections = () => {
             offered={offered}
             held={held}
             identity={identity}
-            empty="You haven't connected an account of your own yet."
+            empty={t`You haven't connected an account of your own yet.`}
           />
         ) : null}
       </section>
       <section aria-labelledby="shared" className="flex flex-col gap-3">
         <h2 className="text-lg font-medium" id="shared">
-          Shared connections
+          <Trans>Shared connections</Trans>
         </h2>
         <NotLoaded page={connections} />
         {connections.state === "ready" ? (
@@ -117,13 +126,13 @@ const Connections = () => {
             offered={offered}
             held={held}
             identity={identity}
-            empty="Your organization has no shared connections yet."
+            empty={t`Your organization has no shared connections yet.`}
           />
         ) : null}
       </section>
       <section aria-labelledby="catalog" className="flex flex-col gap-3">
         <h2 className="text-lg font-medium" id="catalog">
-          Connect
+          <Trans>Connect</Trans>
         </h2>
         <NotLoaded page={catalog} />
         {catalog.state === "ready" ? (

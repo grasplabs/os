@@ -26,12 +26,14 @@ import {
   TableHeader,
   TableRow,
 } from "@grasp-os/ui/components/table";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { createFileRoute, useRouter } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { changeThenRefresh } from "../change-then-refresh.ts";
 import type { Session } from "../core.ts";
 import { ErrorText } from "../error-text.tsx";
+import { roleLabel } from "../labels.ts";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import { useCoreAction } from "../use-core-action.ts";
 
@@ -42,7 +44,9 @@ import { useCoreAction } from "../use-core-action.ts";
 // ending your own sessions, and demoting yourself (which core allows while
 // another admin exists) is left out so nobody loses this page by accident.
 
-const roles = roleSchema.options.map((role) => ({ label: role, value: role }));
+/** The roles to pick from, in the page's language. */
+const roleItems = (): { label: string; value: Role }[] =>
+  roleSchema.options.map((role) => ({ label: roleLabel(role), value: role }));
 
 type Change = (members: Session["members"]) => Promise<unknown>;
 
@@ -60,6 +64,9 @@ const MemberActions = ({
   const { busy, failure, run: runAction } = useCoreAction();
   const [confirming, setConfirming] = useState(false);
   const [promoting, setPromoting] = useState(false);
+  const { t } = useLingui();
+  const roles = roleItems();
+  const { name } = member;
   // Names needn't be unique; with the email, each row's controls are.
   const who = `${member.name} (${member.email})`;
   const run = async (change: Change, report?: Report): Promise<void> => {
@@ -97,7 +104,7 @@ const MemberActions = ({
             }
           }}
         >
-          <SelectTrigger aria-label={`Role of ${who}`}>
+          <SelectTrigger aria-label={t`Role of ${who}`}>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -111,10 +118,14 @@ const MemberActions = ({
         <Dialog open={promoting} onOpenChange={setPromoting}>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Make {member.name} an admin?</DialogTitle>
+              <DialogTitle>
+                <Trans>Make {name} an admin?</Trans>
+              </DialogTitle>
               <DialogDescription>
-                Admins can change anyone&apos;s role, end their sessions and
-                remove them, other admins included.
+                <Trans>
+                  Admins can change anyone&apos;s role, end their sessions and
+                  remove them, other admins included.
+                </Trans>
               </DialogDescription>
             </DialogHeader>
             <DialogFooter showCloseButton>
@@ -124,7 +135,7 @@ const MemberActions = ({
                   setRole("admin");
                 }}
               >
-                Make admin
+                <Trans>Make admin</Trans>
               </Button>
             </DialogFooter>
           </DialogContent>
@@ -132,14 +143,14 @@ const MemberActions = ({
         <Button
           variant="outline"
           disabled={busy}
-          aria-label={`End sessions for ${who}`}
+          aria-label={t`End sessions for ${who}`}
           onClick={() => {
             void run(async (members) => {
               await members.revokeSessions(member.userId);
             });
           }}
         >
-          End sessions
+          <Trans>End sessions</Trans>
         </Button>
         <Dialog open={confirming} onOpenChange={setConfirming}>
           <DialogTrigger
@@ -147,18 +158,22 @@ const MemberActions = ({
               <Button
                 variant="destructive"
                 disabled={busy}
-                aria-label={`Remove ${who}`}
+                aria-label={t`Remove ${who}`}
               />
             }
           >
-            Remove
+            <Trans>Remove</Trans>
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Remove {member.name}?</DialogTitle>
+              <DialogTitle>
+                <Trans>Remove {name}?</Trans>
+              </DialogTitle>
               <DialogDescription>
-                They are signed out everywhere, their personal connections are
-                disconnected, and they cannot sign in again.
+                <Trans>
+                  They are signed out everywhere, their personal connections are
+                  disconnected, and they cannot sign in again.
+                </Trans>
               </DialogDescription>
             </DialogHeader>
             <DialogFooter showCloseButton>
@@ -174,7 +189,7 @@ const MemberActions = ({
                   }, onNotice);
                 }}
               >
-                Remove
+                <Trans>Remove</Trans>
               </Button>
             </DialogFooter>
           </DialogContent>
@@ -193,9 +208,15 @@ const MembersTable = ({ members, me }: { members: Member[]; me: string }) => {
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>Name</TableHead>
-            <TableHead>Email</TableHead>
-            <TableHead>Role</TableHead>
+            <TableHead>
+              <Trans>Name</Trans>
+            </TableHead>
+            <TableHead>
+              <Trans>Email</Trans>
+            </TableHead>
+            <TableHead>
+              <Trans>Role</Trans>
+            </TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -205,7 +226,7 @@ const MembersTable = ({ members, me }: { members: Member[]; me: string }) => {
               <TableCell>{member.email}</TableCell>
               <TableCell>
                 {member.userId === me ? (
-                  member.role
+                  roleLabel(member.role)
                 ) : (
                   <MemberActions member={member} onNotice={setNotice} />
                 )}
@@ -223,7 +244,9 @@ const Members = () => {
   const { identity } = Route.useRouteContext();
   return (
     <main className="flex max-w-4xl flex-col gap-6 p-6">
-      <h1 className="text-2xl font-medium">Members</h1>
+      <h1 className="text-2xl font-medium">
+        <Trans>Members</Trans>
+      </h1>
       <NotLoaded page={page} />
       {page.state === "ready" ? (
         <MembersTable members={page.data} me={identity.userId} />

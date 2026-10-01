@@ -8,6 +8,9 @@ import {
   TableHeader,
   TableRow,
 } from "@grasp-os/ui/components/table";
+import { i18n } from "@lingui/core";
+import { msg } from "@lingui/core/macro";
+import { Trans } from "@lingui/react/macro";
 import { createFileRoute, Link } from "@tanstack/react-router";
 
 import { timeoutMs, withTimeout } from "../core.ts";
@@ -66,10 +69,11 @@ const listApps = async (session: Session): Promise<ListedApp[]> => {
 const contentsCell = (
   contents: AppContents | undefined,
   show: (read: AppContents) => string
-): string => (contents === undefined ? "Contents unavailable" : show(contents));
+): string =>
+  contents === undefined ? i18n._(msg`Contents unavailable`) : show(contents);
 
 const versionOf = ({ version }: AppContents): string =>
-  version === null ? "Not released" : String(version);
+  version === null ? i18n._(msg`Not released`) : String(version);
 
 /** Names as a list for a table cell, or a dash for none. */
 const listed = (names: string[]): string =>
@@ -79,7 +83,7 @@ const AppsTable = ({ apps }: { apps: ListedApp[] }) => {
   if (apps.length === 0) {
     return (
       <p className="text-muted-foreground text-sm">
-        There are no Apps you can open yet.
+        <Trans>There are no Apps you can open yet.</Trans>
       </p>
     );
   }
@@ -87,11 +91,21 @@ const AppsTable = ({ apps }: { apps: ListedApp[] }) => {
     <Table>
       <TableHeader>
         <TableRow>
-          <TableHead>Name</TableHead>
-          <TableHead>Description</TableHead>
-          <TableHead>Version</TableHead>
-          <TableHead>Screens</TableHead>
-          <TableHead>Workflows</TableHead>
+          <TableHead>
+            <Trans>Name</Trans>
+          </TableHead>
+          <TableHead>
+            <Trans>Description</Trans>
+          </TableHead>
+          <TableHead>
+            <Trans>Version</Trans>
+          </TableHead>
+          <TableHead>
+            <Trans>Screens</Trans>
+          </TableHead>
+          <TableHead>
+            <Trans>Workflows</Trans>
+          </TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -125,7 +139,9 @@ const Apps = () => {
   const page = Route.useLoaderData();
   return (
     <main className="flex flex-col gap-6 p-6">
-      <h1 className="text-2xl font-medium">Apps</h1>
+      <h1 className="text-2xl font-medium">
+        <Trans>Apps</Trans>
+      </h1>
       <NotLoaded page={page} />
       {page.state === "ready" ? <AppsTable apps={page.data} /> : null}
     </main>

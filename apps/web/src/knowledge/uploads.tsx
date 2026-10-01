@@ -8,6 +8,10 @@ import {
 } from "@grasp-os/shared/uploads";
 import type { Upload, UploadStatus } from "@grasp-os/shared/uploads";
 import { Input } from "@grasp-os/ui/components/input";
+import { i18n } from "@lingui/core";
+import type { MessageDescriptor } from "@lingui/core";
+import { msg } from "@lingui/core/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { Link, useRouter } from "@tanstack/react-router";
 import { useEffect, useId, useRef, useState } from "react";
 
@@ -86,15 +90,17 @@ const follow = async (
     ? { upload: current }
     : {
         upload: current,
-        problem: "Still being read. It shows in the file list once it's ready.",
+        problem: i18n._(
+          msg`Still being read. It shows in the file list once it's ready.`
+        ),
       };
 };
 
-const statusLabels: Readonly<Record<UploadStatus, string>> = {
-  pending: "Pending",
-  extracting: "Extracting",
-  ready: "Ready",
-  failed: "Failed",
+const statusLabels: Readonly<Record<UploadStatus, MessageDescriptor>> = {
+  pending: msg`Pending`,
+  extracting: msg`Extracting`,
+  ready: msg`Ready`,
+  failed: msg`Failed`,
 };
 
 /**
@@ -105,48 +111,53 @@ const UploadRow = ({
   upload,
   problem,
   listed,
-}: Followed & { listed: ReadonlySet<string> }) => (
-  <li className="flex flex-col gap-1 text-sm">
-    <span className="flex flex-wrap items-center gap-2">
-      <span>{upload.name}</span>
-      <output>
-        {upload.failure === null
-          ? statusLabels[upload.status]
-          : `${statusLabels[upload.status]}: ${upload.failure.message}`}
-      </output>
-      {upload.status === "ready" && upload.documentId !== null ? (
-        <>
-          <Link
-            className="underline"
-            params={{ collection: upload.collectionId }}
-            search={{ doc: upload.documentId }}
-            to="/knowledge/$collection"
-          >
-            {`Open ${upload.name}`}
-          </Link>
-          {/* Core serves it as an attachment only, to those who may read it. */}
-          <a
-            className="underline"
-            download
-            href={uploadOriginalPath(encodeURIComponent(upload.id))}
-          >
-            {`Download ${upload.name}`}
-          </a>
-        </>
-      ) : null}
-    </span>
-    {/* The file list shows its first page only: a name that sorts past it
+}: Followed & { listed: ReadonlySet<string> }) => {
+  const { t } = useLingui();
+  const { name } = upload;
+  const status = i18n._(statusLabels[upload.status]);
+  return (
+    <li className="flex flex-col gap-1 text-sm">
+      <span className="flex flex-wrap items-center gap-2">
+        <span>{upload.name}</span>
+        <output>
+          {upload.failure === null
+            ? status
+            : `${status}: ${upload.failure.message}`}
+        </output>
+        {upload.status === "ready" && upload.documentId !== null ? (
+          <>
+            <Link
+              className="underline"
+              params={{ collection: upload.collectionId }}
+              search={{ doc: upload.documentId }}
+              to="/knowledge/$collection"
+            >
+              {t`Open ${name}`}
+            </Link>
+            {/* Core serves it as an attachment only, to those who may read it. */}
+            <a
+              className="underline"
+              download
+              href={uploadOriginalPath(encodeURIComponent(upload.id))}
+            >
+              {t`Download ${name}`}
+            </a>
+          </>
+        ) : null}
+      </span>
+      {/* The file list shows its first page only: a name that sorts past it
         opens from here. */}
-    {upload.status === "ready" &&
-    upload.documentId !== null &&
-    !listed.has(upload.documentId) ? (
-      <p className="text-muted-foreground">
-        {`It's past the first ${pageMaxLimit} files listed: open it from here.`}
-      </p>
-    ) : null}
-    <ErrorText>{problem}</ErrorText>
-  </li>
-);
+      {upload.status === "ready" &&
+      upload.documentId !== null &&
+      !listed.has(upload.documentId) ? (
+        <p className="text-muted-foreground">
+          {t`It's past the first ${pageMaxLimit} files listed: open it from here.`}
+        </p>
+      ) : null}
+      <ErrorText>{problem}</ErrorText>
+    </li>
+  );
+};
 
 /**
  * Uploading files into the collection `collectionId`, and their status;
@@ -218,10 +229,10 @@ export const Uploads = ({
   return (
     <section aria-labelledby="uploads" className="flex flex-col gap-2">
       <h3 className="font-medium" id="uploads">
-        Upload
+        <Trans>Upload</Trans>
       </h3>
       <label className="text-sm" htmlFor={inputId}>
-        Upload a PDF, Word or Excel file
+        <Trans>Upload a PDF, Word or Excel file</Trans>
       </label>
       <Input
         accept={Object.keys(uploadTypes)

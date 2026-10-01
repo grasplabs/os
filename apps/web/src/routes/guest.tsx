@@ -10,6 +10,9 @@ import {
   CardTitle,
 } from "@grasp-os/ui/components/card";
 import { Textarea } from "@grasp-os/ui/components/textarea";
+import { i18n } from "@lingui/core";
+import { msg } from "@lingui/core/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 
@@ -37,17 +40,21 @@ const dateTime = new Intl.DateTimeFormat(undefined, {
 const endedText = (view: GuestView): string | undefined => {
   switch (view.status) {
     case "finished": {
-      return "You finished this chat. Thank you for your time.";
+      return i18n._(msg`You finished this chat. Thank you for your time.`);
     }
     case "revoked": {
-      return "This chat has been closed by whoever sent you the link.";
+      return i18n._(
+        msg`This chat has been closed by whoever sent you the link.`
+      );
     }
     case "expired": {
-      return "This link has expired. Ask whoever sent it for a new one.";
+      return i18n._(
+        msg`This link has expired. Ask whoever sent it for a new one.`
+      );
     }
     case "open": {
       return view.turnsLeft === 0
-        ? "This chat has reached its length. Press Finish to end it."
+        ? i18n._(msg`This chat has reached its length. Press Finish to end it.`)
         : undefined;
     }
     default: {
@@ -57,25 +64,28 @@ const endedText = (view: GuestView): string | undefined => {
 };
 
 /** The messages so far: theirs, and the answers. */
-const Messages = ({ view }: { view: GuestView }) => (
-  <ol aria-label="Messages" className="flex flex-col gap-3">
-    {view.messages.map((message) => (
-      <li
-        key={`${message.at}-${message.role}`}
-        className={
-          message.role === "guest"
-            ? "bg-muted self-end rounded-lg p-3 text-sm whitespace-pre-wrap"
-            : "self-start text-sm whitespace-pre-wrap"
-        }
-      >
-        <span className="sr-only">
-          {message.role === "guest" ? "You: " : "Grasp: "}
-        </span>
-        {message.text}
-      </li>
-    ))}
-  </ol>
-);
+const Messages = ({ view }: { view: GuestView }) => {
+  const { t } = useLingui();
+  return (
+    <ol aria-label={t`Messages`} className="flex flex-col gap-3">
+      {view.messages.map((message) => (
+        <li
+          key={`${message.at}-${message.role}`}
+          className={
+            message.role === "guest"
+              ? "bg-muted self-end rounded-lg p-3 text-sm whitespace-pre-wrap"
+              : "self-start text-sm whitespace-pre-wrap"
+          }
+        >
+          <span className="sr-only">
+            {message.role === "guest" ? t`You:` : "Grasp:"}{" "}
+          </span>
+          {message.text}
+        </li>
+      ))}
+    </ol>
+  );
+};
 
 /**
  * The chat `secret` opened, open for the guest's next message until it
@@ -89,6 +99,9 @@ const Chat = ({ secret, first }: { secret: string; first: GuestView }) => {
   const [failure, setFailure] = useState<string | undefined>();
   const ended = endedText(view);
   const open = view.status === "open";
+  const { t } = useLingui();
+  const { name } = view;
+  const until = dateTime.format(new Date(view.expiresAt));
 
   const call = async (
     request: { action: "send"; text: string } | { action: "finish" }
@@ -109,16 +122,18 @@ const Chat = ({ secret, first }: { secret: string; first: GuestView }) => {
     <Card className="w-full max-w-2xl">
       <CardHeader>
         <CardTitle>
-          <h1>Hi {view.name}</h1>
+          <h1>
+            <Trans>Hi {name}</Trans>
+          </h1>
         </CardTitle>
         <CardDescription>
-          This chat asks how your work is done. Everything you write is kept and
-          read by the people who invited you, who may copy it into their own
-          records and keep it there. Please don&apos;t share passwords, bank
-          details or anything you wouldn&apos;t put in an email.
-          {open
-            ? ` The link works until ${dateTime.format(new Date(view.expiresAt))}.`
-            : ""}
+          <Trans>
+            This chat asks how your work is done. Everything you write is kept
+            and read by the people who invited you, who may copy it into their
+            own records and keep it there. Please don&apos;t share passwords,
+            bank details or anything you wouldn&apos;t put in an email.
+          </Trans>
+          {open ? ` ${t`The link works until ${until}.`}` : ""}
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -130,7 +145,7 @@ const Chat = ({ secret, first }: { secret: string; first: GuestView }) => {
           {open && view.turnsLeft > 0 ? (
             <div className="flex flex-col gap-2">
               <label className="text-sm" htmlFor="guest-message">
-                Your message
+                <Trans>Your message</Trans>
               </label>
               <Textarea
                 id="guest-message"
@@ -160,7 +175,7 @@ const Chat = ({ secret, first }: { secret: string; first: GuestView }) => {
                   })();
                 }}
               >
-                Send
+                <Trans>Send</Trans>
               </Button>
             ) : null}
             <Button
@@ -170,7 +185,7 @@ const Chat = ({ secret, first }: { secret: string; first: GuestView }) => {
                 void call({ action: "finish" });
               }}
             >
-              Finish
+              <Trans>Finish</Trans>
             </Button>
           </div>
         </CardFooter>
@@ -200,8 +215,9 @@ const Guest = () => {
       const answer =
         secret === ""
           ? {
-              error:
-                "This link doesn't work. Ask whoever sent it for a new one.",
+              error: i18n._(
+                msg`This link doesn't work. Ask whoever sent it for a new one.`
+              ),
             }
           : await guestCall({ action: "open", token: secret });
       if (!current) {
@@ -224,11 +240,15 @@ const Guest = () => {
   return (
     <main className="flex min-h-svh flex-col items-center justify-center gap-4 p-6">
       {shown.state === "loading" ? (
-        <p className="text-muted-foreground text-sm">Opening the chat…</p>
+        <p className="text-muted-foreground text-sm">
+          <Trans>Opening the chat…</Trans>
+        </p>
       ) : null}
       {shown.state === "refused" ? (
         <>
-          <h1 className="text-2xl font-medium">Chat</h1>
+          <h1 className="text-2xl font-medium">
+            <Trans>Chat</Trans>
+          </h1>
           <ErrorText>{shown.message}</ErrorText>
         </>
       ) : null}

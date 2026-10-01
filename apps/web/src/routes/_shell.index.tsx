@@ -19,6 +19,7 @@ import {
   SelectValue,
 } from "@grasp-os/ui/components/select";
 import { Textarea } from "@grasp-os/ui/components/textarea";
+import { Trans, useLingui } from "@lingui/react/macro";
 import {
   createFileRoute,
   Link,
@@ -99,6 +100,7 @@ const Composer = ({
   const { busy, failure, run } = useCoreAction();
   const [text, setText] = useState("");
   const [model, setModel] = useState(models[0] ?? "");
+  const { t } = useLingui();
   const items = models.map((value) => ({ value, label: value }));
   const send = async (): Promise<void> => {
     const question = text;
@@ -139,14 +141,14 @@ const Composer = ({
       }}
     >
       <label className="sr-only" htmlFor="chat-question">
-        Your question
+        <Trans>Your question</Trans>
       </label>
       <Textarea
         id="chat-question"
         onChange={(event) => {
           setText(event.target.value);
         }}
-        placeholder="Describe what you want"
+        placeholder={t`Describe what you want`}
         value={text}
       />
       <div className="flex items-center gap-2">
@@ -159,7 +161,7 @@ const Composer = ({
           }}
           value={model}
         >
-          <SelectTrigger aria-label="Model">
+          <SelectTrigger aria-label={t`Model`}>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -179,20 +181,20 @@ const Composer = ({
             type="button"
             variant="outline"
           >
-            Stop
+            <Trans>Stop</Trans>
           </Button>
         ) : (
           <Button
             disabled={busy || text.trim() === "" || model === ""}
             type="submit"
           >
-            Send
+            <Trans>Send</Trans>
           </Button>
         )}
       </div>
       {models.length === 0 ? (
         <p className="text-muted-foreground text-sm">
-          No model is set up for this deployment yet.
+          <Trans>No model is set up for this deployment yet.</Trans>
         </p>
       ) : null}
       <ErrorText>{failure}</ErrorText>
@@ -220,14 +222,16 @@ const RenameChat = ({ chat }: { chat: ChatSummary }) => {
   return (
     <Dialog onOpenChange={setOpen} open={open}>
       <DialogTrigger render={<Button size="sm" variant="ghost" />}>
-        Rename
+        <Trans>Rename</Trans>
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Rename this chat</DialogTitle>
+          <DialogTitle>
+            <Trans>Rename this chat</Trans>
+          </DialogTitle>
         </DialogHeader>
         <label className="text-sm" htmlFor="chat-title">
-          Title
+          <Trans>Title</Trans>
         </label>
         <Input
           id="chat-title"
@@ -244,7 +248,7 @@ const RenameChat = ({ chat }: { chat: ChatSummary }) => {
               void save();
             }}
           >
-            Save
+            <Trans>Save</Trans>
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -258,6 +262,7 @@ const DeleteChat = ({ chat }: { chat: ChatSummary }) => {
   const navigate = useNavigate();
   const { busy, failure, run } = useCoreAction();
   const [open, setOpen] = useState(false);
+  const { title } = chat;
   const remove = async (): Promise<void> => {
     const removed = await run(async (session) => {
       await session.chats.remove(chat.id);
@@ -272,15 +277,19 @@ const DeleteChat = ({ chat }: { chat: ChatSummary }) => {
   return (
     <Dialog onOpenChange={setOpen} open={open}>
       <DialogTrigger render={<Button size="sm" variant="ghost" />}>
-        Delete
+        <Trans>Delete</Trans>
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Delete “{chat.title}”?</DialogTitle>
+          <DialogTitle>
+            <Trans>Delete “{title}”?</Trans>
+          </DialogTitle>
         </DialogHeader>
         <p className="text-sm">
-          Its messages are deleted for good, and every change its agent holds
-          for you is rejected. What the agent did stays in the audit log.
+          <Trans>
+            Its messages are deleted for good, and every change its agent holds
+            for you is rejected. What the agent did stays in the audit log.
+          </Trans>
         </p>
         <ErrorText>{failure}</ErrorText>
         <DialogFooter showCloseButton>
@@ -291,7 +300,7 @@ const DeleteChat = ({ chat }: { chat: ChatSummary }) => {
             }}
             variant="destructive"
           >
-            Delete
+            <Trans>Delete</Trans>
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -308,16 +317,20 @@ const Provenance = ({
   names: ReadonlyMap<string, string>;
 }) => {
   const { sources, restricted } = view.provenance;
+  const from = sources.map((id) => names.get(id) ?? id).join(", ");
   if (sources.length === 0 && !restricted) {
     return null;
   }
   return (
     <p className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs">
-      {restricted ? <Badge variant="destructive">Restricted</Badge> : null}
+      {restricted ? (
+        <Badge variant="destructive">
+          <Trans>Restricted</Trans>
+        </Badge>
+      ) : null}
       {sources.length === 0 ? null : (
         <span>
-          Answers may hold data from:{" "}
-          {sources.map((id) => names.get(id) ?? id).join(", ")}
+          <Trans>Answers may hold data from: {from}</Trans>
         </span>
       )}
     </p>
@@ -338,6 +351,7 @@ const OpenChat = ({
   const [failure, setFailure] = useState<string>();
   const [panel, setPanel] = useState(false);
   const core = useCore();
+  const { t } = useLingui();
   useEffect(
     () =>
       followChat(
@@ -370,7 +384,7 @@ const OpenChat = ({
               size="sm"
               variant="outline"
             >
-              Side panel
+              <Trans>Side panel</Trans>
             </Button>
           </div>
           <Provenance names={sourceNames} view={view} />
@@ -383,7 +397,9 @@ const OpenChat = ({
             running={view.running}
           />
           {view.running && view.partial === null ? (
-            <output className="text-muted-foreground text-sm">Working…</output>
+            <output className="text-muted-foreground text-sm">
+              <Trans>Working…</Trans>
+            </output>
           ) : null}
           <ErrorText>{view.stopped ?? undefined}</ErrorText>
           <HeldWrites chatId={chat.id} version={view.held} />
@@ -393,7 +409,7 @@ const OpenChat = ({
       {/* Over the chat, as a drawer, on narrow screens; beside it on wide ones. */}
       {panel ? (
         <aside
-          aria-label="Side panel"
+          aria-label={t`Side panel`}
           className="bg-background fixed inset-0 z-50 flex flex-col gap-2 overflow-y-auto p-4 lg:static lg:z-auto lg:w-96 lg:shrink-0 lg:border-l"
         >
           <Button
@@ -404,7 +420,7 @@ const OpenChat = ({
             size="sm"
             variant="outline"
           >
-            Close
+            <Trans>Close</Trans>
           </Button>
           <SidePanel
             chatId={chat.id}
@@ -420,6 +436,7 @@ const OpenChat = ({
 const Chat = () => {
   const page = Route.useLoaderData();
   const { chat: open } = Route.useSearch();
+  const { t } = useLingui();
   if (page.state !== "ready") {
     return (
       <main className="p-6">
@@ -433,11 +450,11 @@ const Chat = () => {
     chats.find(({ id }) => id === open) ??
     (open === undefined
       ? undefined
-      : { id: open, title: "Chat", createdAt: "", running: false });
+      : { id: open, title: t`Chat`, createdAt: "", running: false });
   return (
     <main className="flex h-full min-h-0">
       <nav
-        aria-label="Chats"
+        aria-label={t`Chats`}
         className="flex w-60 shrink-0 flex-col gap-2 border-r p-3"
       >
         <Link
@@ -445,7 +462,7 @@ const Chat = () => {
           search={{}}
           to="/"
         >
-          New chat
+          <Trans>New chat</Trans>
         </Link>
         <ul className="flex flex-col gap-1 overflow-y-auto">
           {chats.map(({ id, title }) => (
@@ -472,11 +489,13 @@ const Chat = () => {
           className="flex flex-1 flex-col gap-3 p-4"
         >
           <h1 className="text-lg font-medium" id="new-chat">
-            New chat
+            <Trans>New chat</Trans>
           </h1>
           <p className="text-muted-foreground mt-auto text-sm">
-            Describe what you want. The agent answers from what it can read, and
-            holds every change to an outside system until you confirm it.
+            <Trans>
+              Describe what you want. The agent answers from what it can read,
+              and holds every change to an outside system until you confirm it.
+            </Trans>
           </p>
           <Composer models={models} running={false} />
         </section>

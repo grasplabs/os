@@ -12,6 +12,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@grasp-os/ui/components/card";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { useEffect, useId, useState } from "react";
 
 import type { CoreConnection } from "../core-connection.ts";
@@ -100,6 +101,9 @@ const TextValue = ({
   const lines = value.split("\n");
   const start = startOf(value);
   const long = isCutShort(value);
+  const { t } = useLingui();
+  const count = lines.length;
+  const characters = value.length;
   return (
     <dd className="flex flex-col items-start gap-1">
       <span className="break-words whitespace-pre-wrap">
@@ -118,8 +122,8 @@ const TextValue = ({
           variant="outline"
         >
           {all
-            ? "Show less"
-            : `Show all ${lines.length} lines (${value.length} characters)`}
+            ? t`Show less`
+            : t`Show all ${count} lines (${characters} characters)`}
         </Button>
       ) : null}
     </dd>
@@ -191,6 +195,7 @@ const ExactInput = ({
 }) => {
   const [open, setOpen] = useState(!shown);
   const id = useId();
+  const { t } = useLingui();
   return (
     <div className="flex flex-col items-start gap-2">
       <Button
@@ -205,7 +210,9 @@ const ExactInput = ({
         size="sm"
         variant="ghost"
       >
-        {open ? "Hide" : "Show"} exactly what will be sent
+        {open
+          ? t`Hide exactly what will be sent`
+          : t`Show exactly what will be sent`}
       </Button>
       {open ? (
         <pre
@@ -227,6 +234,7 @@ const HeldWrite = ({
   onDecided: () => void;
 }) => {
   const { busy, failure, run } = useCoreAction();
+  const { t } = useLingui();
   // Read again however it went: a failed decision may have changed
   // something too (the action gone already, say).
   const decide = async (
@@ -252,28 +260,42 @@ const HeldWrite = ({
   const unseenId = useId();
   const title = description?.title ?? action.action;
   const connection = action.connectionName ?? action.connectionId;
-  const what = `${title} on ${connection}`;
+  const what = t`${title} on ${connection}`;
+  const { resource } = action;
+  const tool = action.action;
+  let where = connection;
+  if (resource !== null && description !== undefined) {
+    where = t`${connection}, ${resource} (${tool})`;
+  } else if (resource !== null) {
+    where = t`${connection}, ${resource}`;
+  } else if (description !== undefined) {
+    where = t`${connection} (${tool})`;
+  }
   return (
     <Card size="sm">
       <CardHeader>
-        <CardTitle>Waiting for you: {title}</CardTitle>
+        <CardTitle>
+          <Trans>Waiting for you: {title}</Trans>
+        </CardTitle>
       </CardHeader>
       <CardContent>
         <div className="flex flex-col gap-2">
           <p className="text-muted-foreground text-sm">
-            On {connection}
-            {action.resource === null ? "" : `, ${action.resource}`}
-            {description === undefined ? "" : ` (${action.action})`}
+            <Trans>On {where}</Trans>
           </p>
           <p className="text-muted-foreground text-sm">
-            Asked for{" "}
-            <time dateTime={action.requestedAt}>
-              {new Date(action.requestedAt).toLocaleString()}
-            </time>
+            <Trans>
+              Asked for{" "}
+              <time dateTime={action.requestedAt}>
+                {new Date(action.requestedAt).toLocaleString()}
+              </time>
+            </Trans>
           </p>
           {action.restricted ? (
             <Badge variant="destructive">
-              This chat read restricted data: this may send it out
+              <Trans>
+                This chat read restricted data: this may send it out
+              </Trans>
             </Badge>
           ) : null}
           {description === undefined ? null : (
@@ -286,8 +308,10 @@ const HeldWrite = ({
           )}
           {description?.complete === false ? (
             <p className="text-sm" role="note">
-              More will be sent than is shown above. Read exactly what will be
-              sent before you confirm.
+              <Trans>
+                More will be sent than is shown above. Read exactly what will be
+                sent before you confirm.
+              </Trans>
             </p>
           ) : null}
           <ExactInput
@@ -299,8 +323,10 @@ const HeldWrite = ({
           />
           {unseen ? (
             <p className="text-muted-foreground text-sm" id={unseenId}>
-              Part of what will be sent is cut short above. Show it all, or
-              exactly what will be sent, to confirm.
+              <Trans>
+                Part of what will be sent is cut short above. Show it all, or
+                exactly what will be sent, to confirm.
+              </Trans>
             </p>
           ) : null}
           <ErrorText>{failure}</ErrorText>
@@ -310,7 +336,7 @@ const HeldWrite = ({
         <div className="flex gap-2">
           <Button
             aria-describedby={unseen ? unseenId : undefined}
-            aria-label={`Confirm ${what}`}
+            aria-label={t`Confirm ${what}`}
             disabled={busy || unseen}
             onClick={() => {
               void decide(
@@ -322,10 +348,10 @@ const HeldWrite = ({
               );
             }}
           >
-            Confirm
+            <Trans>Confirm</Trans>
           </Button>
           <Button
-            aria-label={`Reject ${what}`}
+            aria-label={t`Reject ${what}`}
             disabled={busy}
             onClick={() => {
               void decide(async (session) => {
@@ -334,7 +360,7 @@ const HeldWrite = ({
             }}
             variant="outline"
           >
-            Reject
+            <Trans>Reject</Trans>
           </Button>
         </div>
       </CardFooter>
@@ -357,6 +383,7 @@ export const HeldWrites = ({
   const [held, setHeld] = useState<Held>({ state: "loading" });
   const core = useCore();
   const [reads, setReads] = useState(0);
+  const { t } = useLingui();
   useEffect(() => {
     let current = true;
     const read = async (): Promise<void> => {
@@ -379,7 +406,7 @@ export const HeldWrites = ({
     return null;
   }
   return (
-    <section aria-label="Waiting for you" className="flex flex-col gap-2">
+    <section aria-label={t`Waiting for you`} className="flex flex-col gap-2">
       {held.actions.map((action) => (
         <HeldWrite
           action={action}

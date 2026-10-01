@@ -11,6 +11,9 @@ import {
   CardTitle,
 } from "@grasp-os/ui/components/card";
 import { Textarea } from "@grasp-os/ui/components/textarea";
+import { i18n } from "@lingui/core";
+import { msg } from "@lingui/core/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 
@@ -73,19 +76,28 @@ const outcomeOf = (decision: DecisionView): string => {
   const { decided } = decision;
   // `closed` is only ever an open decision whose run has ended.
   if (decision.status === "closed") {
-    return "The workflow run that asked this has ended, so this decision has closed.";
+    return i18n._(
+      msg`The workflow run that asked this has ended, so this decision has closed.`
+    );
   }
   if (decision.status === "timed_out" || decided === undefined) {
-    return "Nobody answered in time, so this decision has closed.";
+    return i18n._(msg`Nobody answered in time, so this decision has closed.`);
   }
-  const answer = decision.status === "approved" ? "Approved" : "Rejected";
-  return `${answer} by ${decided.by.name} on ${dateTime.format(new Date(decided.at))}.`;
+  const { name } = decided.by;
+  const date = dateTime.format(new Date(decided.at));
+  return decision.status === "approved"
+    ? i18n._(msg`Approved by ${name} on ${date}.`)
+    : i18n._(msg`Rejected by ${name} on ${date}.`);
 };
 
 const Answer = ({ decision }: { decision: DecisionView }) => {
   const [current, setCurrent] = useState(decision);
   const [comment, setComment] = useState("");
   const { busy, failure, run } = useCoreAction();
+  const { t } = useLingui();
+  const app = current.app.name;
+  const { workflow } = current;
+  const until = dateTime.format(new Date(current.expiresAt));
   const answer = async (approved: boolean): Promise<void> => {
     const note = comment.trim();
     const answered = await run(
@@ -106,10 +118,9 @@ const Answer = ({ decision }: { decision: DecisionView }) => {
           <h1>{current.description}</h1>
         </CardTitle>
         <CardDescription>
-          Asked by {current.app.name} ({current.workflow})
           {current.status === "open"
-            ? `, open until ${dateTime.format(new Date(current.expiresAt))}`
-            : ""}
+            ? t`Asked by ${app} (${workflow}), open until ${until}`
+            : t`Asked by ${app} (${workflow})`}
         </CardDescription>
       </CardHeader>
       {current.status === "open" ? (
@@ -117,7 +128,7 @@ const Answer = ({ decision }: { decision: DecisionView }) => {
           <CardContent>
             <div className="flex flex-col gap-2">
               <label className="text-sm" htmlFor="decision-comment">
-                Comment (optional)
+                <Trans>Comment (optional)</Trans>
               </label>
               <Textarea
                 id="decision-comment"
@@ -139,7 +150,7 @@ const Answer = ({ decision }: { decision: DecisionView }) => {
                   void answer(true);
                 }}
               >
-                Approve
+                <Trans>Approve</Trans>
               </Button>
               <Button
                 variant="outline"
@@ -148,7 +159,7 @@ const Answer = ({ decision }: { decision: DecisionView }) => {
                   void answer(false);
                 }}
               >
-                Reject
+                <Trans>Reject</Trans>
               </Button>
             </div>
           </CardFooter>
@@ -165,12 +176,15 @@ const Answer = ({ decision }: { decision: DecisionView }) => {
 const Decision = () => {
   const page = Route.useLoaderData();
   const { error } = Route.useSearch();
+  const { t } = useLingui();
   if (page.state === "offline") {
     return (
       <main className="flex min-h-svh flex-col items-center justify-center gap-4 p-6">
-        <h1 className="text-2xl font-medium">Decision</h1>
+        <h1 className="text-2xl font-medium">
+          <Trans>Decision</Trans>
+        </h1>
         <ErrorText>
-          Grasp can&apos;t be reached right now. Try again in a moment.
+          {t`Grasp can't be reached right now. Try again in a moment.`}
         </ErrorText>
       </main>
     );
@@ -178,9 +192,11 @@ const Decision = () => {
   if (page.state === "signed-out") {
     return (
       <main className="flex min-h-svh flex-col items-center justify-center gap-4 p-6">
-        <h1 className="text-2xl font-medium">Sign in to answer</h1>
+        <h1 className="text-2xl font-medium">
+          <Trans>Sign in to answer</Trans>
+        </h1>
         <p className="text-muted-foreground text-sm">
-          Only the people this decision is from can answer it.
+          <Trans>Only the people this decision is from can answer it.</Trans>
         </p>
         <SignInOptions
           options={page.signInOptions}
@@ -191,12 +207,17 @@ const Decision = () => {
       </main>
     );
   }
+  const { name } = page;
   return (
     <main className="flex min-h-svh flex-col items-center justify-center gap-4 p-6">
-      <p className="text-muted-foreground text-sm">Signed in as {page.name}</p>
+      <p className="text-muted-foreground text-sm">
+        <Trans>Signed in as {name}</Trans>
+      </p>
       {page.state === "refused" ? (
         <>
-          <h1 className="text-2xl font-medium">Decision</h1>
+          <h1 className="text-2xl font-medium">
+            <Trans>Decision</Trans>
+          </h1>
           <ErrorText>{page.message}</ErrorText>
         </>
       ) : (

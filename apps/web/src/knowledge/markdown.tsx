@@ -7,6 +7,7 @@ import {
   TableHeader,
   TableRow,
 } from "@grasp-os/ui/components/table";
+import { Trans } from "@lingui/react/macro";
 import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import Markdown from "react-markdown";
@@ -154,7 +155,9 @@ export const DocumentMarkdown = ({
   const body = bodyOf(text).trim();
   if (body === "") {
     return (
-      <p className="text-muted-foreground text-sm">This document is empty.</p>
+      <p className="text-muted-foreground text-sm">
+        <Trans>This document is empty.</Trans>
+      </p>
     );
   }
   return (
