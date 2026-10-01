@@ -43,6 +43,22 @@ const expectKitRendered = async (page: Page): Promise<void> => {
 
   await page.getByRole("button", { name: "Show toast" }).click();
   await expect(page.getByText("Your changes are saved.")).toBeVisible();
+
+  await expect(page.getByRole("button", { name: "Chat" })).toBeVisible();
+  await expect(page.getByText("A title is needed.")).toBeVisible();
+
+  await page.getByRole("button", { name: "Open sheet" }).click();
+  const sheet = page.getByRole("dialog", { name: "Sheet" });
+  await expect(sheet).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(sheet).toBeHidden();
+
+  await page.getByRole("button", { name: "Open popover" }).click();
+  await expect(page.getByText("Anchored to its button.")).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  await page.getByRole("button", { name: "Show details" }).click();
+  await expect(page.getByText("The details.")).toBeVisible();
 };
 
 test("renders the UI kit in light mode", async ({ page }) => {

@@ -103,6 +103,9 @@ export default defineConfig({
           // Components are added with the shadcn CLI; keep its code style.
           "func-style": "off",
           "react/function-component-definition": "off",
+          // shadcn gives divs ARIA roles (group, list, link, status) for
+          // their layout; a semantic tag would bring its own styles.
+          "jsx-a11y/prefer-tag-over-role": "off",
         },
       },
     ],

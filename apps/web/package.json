@@ -17,6 +17,7 @@
     "@grasp-os/ui": "workspace:*",
     "@tanstack/react-router": "catalog:",
     "capnweb": "catalog:",
+    "lucide-react": "catalog:",
     "react": "catalog:",
     "react-dom": "catalog:",
     "react-markdown": "catalog:",

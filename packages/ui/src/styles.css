@@ -163,6 +163,19 @@
 }
 
 @layer base {
+  /*
+   * The sidebar's widths (components/sidebar.tsx), as variables a page
+   * overrides in its own stylesheet instead of an inline style.
+   */
+  [data-slot="sidebar-wrapper"] {
+    --sidebar-width: 16rem;
+    --sidebar-width-icon: 3rem;
+  }
+
+  [data-slot="sidebar"][data-mobile="true"] {
+    --sidebar-width: 18rem;
+  }
+
   * {
     @apply border-border outline-ring/50;
   }
