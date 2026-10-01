@@ -74,6 +74,7 @@ catalog:
   "@babel/standalone": 7.29.9
   "@babel/types": 7.29.8
   "@base-ui/react": 1.8.0
+  "@fontsource-variable/geist": 5.2.8
   "@rolldown/plugin-babel": 0.2.4
   "@tailwindcss/vite": 4.3.3
   "@tanstack/react-router": 1.170.38

@@ -51,6 +51,9 @@ catalogs:
     '@earendil-works/pi-ai':
       specifier: 0.87.1
       version: 0.87.1
+    '@fontsource-variable/geist':
+      specifier: 5.2.8
+      version: 5.2.8
     '@modelcontextprotocol/sdk':
       specifier: 1.30.0
       version: 1.30.0
@@ -294,6 +297,9 @@ importers:
 
   apps/console:
     dependencies:
+      '@fontsource-variable/geist':
+        specifier: 'catalog:'
+        version: 5.2.8
       '@grasp-os/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -471,6 +477,9 @@ importers:
       '@base-ui/react':
         specifier: 'catalog:'
         version: 1.8.0(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
+      '@fontsource-variable/geist':
+        specifier: 'catalog:'
+        version: 5.2.8
       '@grasp-os/sdk':
         specifier: workspace:*
         version: link:../../packages/sdk
@@ -1957,6 +1966,9 @@ packages:
 
   '@floating-ui/utils@0.2.12':
     resolution: {integrity: sha512-HpCo8tmWzLVad5s2d19EhAz5zqrrQ6s69qd6moPMQvkOuSwDT1YgRfWSVuc4ennqrgv3OHppiOGMQ7oC13yIww==}
+
+  '@fontsource-variable/geist@5.2.8':
+    resolution: {integrity: sha512-cJ6m9e+8MQ5dCYJsLylfZrgBh6KkG4bOLckB35Tr9J/EqdkEM6QllH5PxqP1dhTvFup+HtMRPuz9xOjxXJggxw==}
 
   '@google/genai@2.21.0':
     resolution: {integrity: sha512-+PDtco2/Z0ONdzCGekCoCT+O1VJS9xJQNN4XzQpXG/t3El/SWWMkCWlFRO1KmivOHPa4Q0VjUYu1HBKCZ/v33Q==}
@@ -7993,6 +8005,8 @@ snapshots:
       react-dom: 19.3.0(react@19.3.0)
 
   '@floating-ui/utils@0.2.12': {}
+
+  '@fontsource-variable/geist@5.2.8': {}
 
   '@google/genai@2.21.0(@modelcontextprotocol/sdk@1.30.0(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.5))(supports-color@10.2.2)':
     dependencies:

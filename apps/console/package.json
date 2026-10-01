@@ -14,6 +14,7 @@
     "db:migrate": "wrangler d1 migrations apply DB --remote"
   },
   "dependencies": {
+    "@fontsource-variable/geist": "catalog:",
     "@grasp-os/shared": "workspace:*",
     "@grasp-os/ui": "workspace:*",
     "@tanstack/react-router": "catalog:",

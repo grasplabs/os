@@ -1,4 +1,6 @@
 @import "@grasp-os/ui/styles.css";
+/* The theme's sans, bundled so it is served from this origin (the CSP's default-src). */
+@import "@fontsource-variable/geist";
 
 @source "../";
 
@@ -13,4 +15,20 @@
 
 .base-ui-disable-scrollbar::-webkit-scrollbar {
   display: none;
+}
+
+/*
+ * No scrollbars anywhere in the product. Every area still scrolls with the
+ * wheel, touchpad, touch or keyboard; only the bar is gone. The
+ * grasp/no-scrollbars lint rule keeps code from bringing one back. App
+ * screens keep theirs: this sheet isn't the kit's.
+ */
+@layer base {
+  * {
+    scrollbar-width: none;
+  }
+
+  *::-webkit-scrollbar {
+    display: none;
+  }
 }
