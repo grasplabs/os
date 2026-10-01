@@ -79,3 +79,12 @@ test("renders the UI kit in dark mode", async ({ page }) => {
   await expectKitRendered(page);
   expect(await bodyBackground(page)).not.toBe(light);
 });
+
+test("serves the Grasp favicon the page names", async ({ page }) => {
+  await page.goto("/kit");
+  const href = await page.locator('link[rel="icon"]').getAttribute("href");
+  expect(href).toBe("/favicon.svg");
+  const icon = await page.request.get("/favicon.svg");
+  expect(icon.ok()).toBe(true);
+  expect(icon.headers()["content-type"]).toContain("image/svg+xml");
+});

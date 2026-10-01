@@ -137,6 +137,8 @@ import {
 import { createFileRoute, notFound } from "@tanstack/react-router";
 import { BookOpenIcon, MessagesSquareIcon, SearchIcon } from "lucide-react";
 
+import { GraspMark } from "../grasp-mark.tsx";
+
 const models = [
   { label: "Small", value: "small" },
   { label: "Large", value: "large" },
@@ -323,7 +325,12 @@ const Kit = () => (
   <Toaster>
     <TooltipProvider>
       <main className="mx-auto flex max-w-3xl flex-col gap-6 p-6">
-        <h1 className="text-2xl font-medium">UI kit</h1>
+        <div className="flex items-center gap-3">
+          <div className="bg-primary text-primary-foreground flex size-8 items-center justify-center rounded-lg">
+            <GraspMark className="size-4" />
+          </div>
+          <h1 className="text-2xl font-medium">UI kit</h1>
+        </div>
 
         <Frame />
 
