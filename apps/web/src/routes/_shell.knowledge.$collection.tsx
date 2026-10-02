@@ -6,13 +6,22 @@ import type {
   DocumentSummary,
   VersionSummary,
 } from "@grasp-os/shared/knowledge";
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@grasp-os/ui/components/empty";
 import { Trans, useLingui } from "@lingui/react/macro";
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { FileTextIcon } from "lucide-react";
 
 import type { Session } from "../core.ts";
-import { SiteHeader } from "../frame/site-header.tsx";
 import { CollectionMarkers } from "../knowledge/collection-markers.tsx";
 import { DocumentView } from "../knowledge/document.tsx";
+import { KnowledgeFrame } from "../knowledge/frame.tsx";
+import { loadKnowledgeNav } from "../knowledge/nav-data.ts";
 import { Uploads } from "../knowledge/uploads.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 
@@ -71,34 +80,51 @@ const loadDocument = async (
   return { doc, versions: history.versions, backlinks: links.backlinks };
 };
 
-const FileList = ({
-  documents,
-  open,
-}: {
-  documents: DocumentSummary[];
-  open: string | undefined;
-}) => {
+/** The collection's files, each a row that opens it. */
+const FileList = ({ documents }: { documents: DocumentSummary[] }) => {
+  const { i18n } = useLingui();
   if (documents.length === 0) {
     return (
-      <p className="text-muted-foreground text-sm">
-        <Trans>This collection has no files yet.</Trans>
-      </p>
+      <Empty>
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <FileTextIcon />
+          </EmptyMedia>
+          <EmptyTitle>
+            <Trans>This collection has no files yet.</Trans>
+          </EmptyTitle>
+          <EmptyDescription>
+            <Trans>
+              Documents written here, and files uploaded to it, show up here for
+              Grasp and its agents to read.
+            </Trans>
+          </EmptyDescription>
+        </EmptyHeader>
+      </Empty>
     );
   }
   return (
     <>
-      <ul className="flex flex-col gap-1">
+      <ul className="-mx-2 flex flex-col">
         {documents.map((document) => (
-          <li className="text-sm" key={document.id}>
+          <li key={document.id}>
             <Link
-              aria-current={document.id === open ? "page" : undefined}
-              className={
-                document.id === open ? "font-medium underline" : "underline"
-              }
+              className="hover:bg-muted flex items-center gap-3 rounded-lg px-2 py-2 text-sm"
               from="/knowledge/$collection"
               search={{ doc: document.id }}
             >
-              {document.path}
+              <FileTextIcon
+                aria-hidden="true"
+                className="text-muted-foreground size-4 flex-none"
+              />
+              <span className="min-w-0 flex-1 truncate">{document.path}</span>
+              <span className="text-muted-foreground flex-none text-xs tabular-nums">
+                {new Date(document.updatedAt).toLocaleDateString(i18n.locale, {
+                  day: "numeric",
+                  month: "short",
+                  year: "numeric",
+                })}
+              </span>
             </Link>
           </li>
         ))}
@@ -113,9 +139,8 @@ const FileList = ({
 };
 
 const CollectionView = () => {
-  const { collection, open } = Route.useLoaderData();
+  const { collection, open, nav } = Route.useLoaderData();
   const { t } = useLingui();
-  const { doc } = Route.useSearch();
   const { identity } = Route.useRouteContext();
   // Core says whether the person may change it, by the rule it applies to
   // every change: the page offers only the changes core would take.
@@ -128,45 +153,56 @@ const CollectionView = () => {
       ? collection.data.documents.map(({ path, id }) => [path, id])
       : []
   );
+  const name =
+    collection.state === "ready"
+      ? collection.data.collection.name
+      : t`Collection`;
+  const { collection: collectionId } = Route.useParams();
+  const document = open?.state === "ready" ? open.data.doc : undefined;
   return (
-    <>
-      <SiteHeader
-        crumbs={[
-          { label: t`Knowledge`, to: "/knowledge" },
-          {
-            label:
-              collection.state === "ready"
-                ? collection.data.collection.name
-                : t`Collection`,
-          },
-        ]}
-      />
-      <div className="flex max-w-6xl flex-col gap-6 p-6">
-        <NotLoaded page={collection} />
-        {collection.state === "ready" ? (
-          <>
-            <div className="flex flex-col gap-1">
-              <h1 className="text-2xl font-medium">
-                {collection.data.collection.name}
-              </h1>
-              <CollectionMarkers collection={collection.data.collection} />
-              {collection.data.collection.description === "" ? null : (
-                <p className="text-muted-foreground text-sm">
-                  {collection.data.collection.description}
-                </p>
-              )}
-            </div>
-            <div className="flex flex-col gap-6 md:flex-row">
-              <div className="flex flex-col gap-6 md:w-64 md:shrink-0">
-                <section
-                  aria-labelledby="files"
-                  className="flex flex-col gap-2"
-                >
-                  <h2 className="text-lg font-medium" id="files">
-                    <Trans>Files</Trans>
-                  </h2>
-                  <FileList documents={collection.data.documents} open={doc} />
-                </section>
+    <KnowledgeFrame
+      at={{
+        collection: collectionId,
+        ...(collection.state === "ready"
+          ? { documents: collection.data.documents }
+          : {}),
+        ...(document === undefined
+          ? {}
+          : { document: { id: document.id, path: document.path } }),
+      }}
+      crumbs={[
+        { label: t`Knowledge`, to: "/knowledge" },
+        ...(document === undefined
+          ? [{ label: name }]
+          : [
+              {
+                label: name,
+                to: "/knowledge/$collection" as const,
+                params: { collection: collectionId },
+              },
+              { label: document.title },
+            ]),
+      ]}
+      data={nav}
+    >
+      {open === undefined || open.state !== "ready" ? (
+        <div className="min-w-0 flex-1 overflow-y-auto">
+          <div className="mx-auto flex w-full max-w-5xl flex-col gap-8 px-6 py-8 md:px-12">
+            {open === undefined ? null : <NotLoaded page={open} />}
+            <NotLoaded page={collection} />
+            {collection.state === "ready" ? (
+              <>
+                <header className="flex flex-col gap-2.5">
+                  <h1 className="text-2xl font-medium tracking-tight">
+                    {collection.data.collection.name}
+                  </h1>
+                  {collection.data.collection.description === "" ? null : (
+                    <p className="text-muted-foreground text-sm leading-relaxed">
+                      {collection.data.collection.description}
+                    </p>
+                  )}
+                  <CollectionMarkers collection={collection.data.collection} />
+                </header>
                 {writable ? (
                   <Uploads
                     // Another collection starts with no uploads to follow.
@@ -175,27 +211,33 @@ const CollectionView = () => {
                     listed={new Set(paths.values())}
                   />
                 ) : null}
-              </div>
-              <div className="min-w-0 flex-1">
-                {open === undefined ? null : <NotLoaded page={open} />}
-                {open?.state === "ready" ? (
-                  <DocumentView
-                    // A new document starts with its editor closed.
-                    key={open.data.doc.id}
-                    backlinks={open.data.backlinks}
-                    doc={open.data.doc}
-                    me={identity.userId}
-                    resolve={(path) => paths.get(path)}
-                    versions={open.data.versions}
-                    writable={writable}
-                  />
-                ) : null}
-              </div>
-            </div>
-          </>
-        ) : null}
-      </div>
-    </>
+                <section
+                  aria-labelledby="files"
+                  className="flex flex-col gap-2"
+                >
+                  <h2 className="text-sm font-medium" id="files">
+                    <Trans>Files</Trans>
+                  </h2>
+                  <FileList documents={collection.data.documents} />
+                </section>
+              </>
+            ) : null}
+          </div>
+        </div>
+      ) : (
+        <DocumentView
+          // A new document starts with its editor closed.
+          key={open.data.doc.id}
+          backlinks={open.data.backlinks}
+          collection={name}
+          doc={open.data.doc}
+          me={identity.userId}
+          resolve={(path) => paths.get(path)}
+          versions={open.data.versions}
+          writable={writable}
+        />
+      )}
+    </KnowledgeFrame>
   );
 };
 
@@ -205,7 +247,13 @@ export const Route = createFileRoute("/_shell/knowledge/$collection")({
   loaderDeps: ({ search: { doc } }) => ({ doc }),
   // The collection and the open document are read on their own, and say on
   // their own why they failed.
-  loader: async ({ context: { core }, params, deps: { doc } }) => {
+  loader: async ({
+    abortController,
+    context: { core },
+    params,
+    deps: { doc },
+  }) => {
+    const navLoad = loadKnowledgeNav(core, abortController.signal);
     const [collection, open] = await Promise.all([
       loadFromCore(
         core,
@@ -219,7 +267,7 @@ export const Route = createFileRoute("/_shell/knowledge/$collection")({
               await loadDocument(session, params.collection, doc)
           ),
     ]);
-    return { collection, open };
+    return { collection, open, nav: await navLoad };
   },
   component: CollectionView,
 });

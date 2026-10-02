@@ -99,6 +99,10 @@ msgstr "{connection}, {resource} ({tool})"
 msgid "{count, plural, one {# change waits for you to confirm or reject it.} other {# changes wait for you to confirm or reject them.}}"
 msgstr "{count, plural, one {# wijziging wacht tot je die bevestigt of afwijst.} other {# wijzigingen wachten tot je ze bevestigt of afwijst.}}"
 
+#: src/knowledge/timeline.tsx
+msgid "{count, plural, one {# version} other {# versions}}"
+msgstr "{count, plural, one {# versie} other {# versies}}"
+
 #: src/chat/sources.tsx
 msgid "{count, plural, one {Answers draw on # source} other {Answers draw on # sources}}"
 msgstr "{count, plural, one {Antwoorden steunen op # bron} other {Antwoorden steunen op # bronnen}}"
@@ -106,6 +110,10 @@ msgstr "{count, plural, one {Antwoorden steunen op # bron} other {Antwoorden ste
 #: src/chat/builds-state.ts
 msgid "{count, plural, one {once} other {# times}}"
 msgstr "{count, plural, one {één keer} other {# keer}}"
+
+#: src/knowledge/timeline.tsx
+msgid "{folded, plural, one {# earlier} other {# earlier}}"
+msgstr "{folded, plural, one {# eerdere} other {# eerdere}}"
 
 #: src/connections/connection-list.tsx
 msgid "{holder}: {actions} on {resource}"
@@ -456,6 +464,10 @@ msgstr "In opbouw"
 msgid "Breadcrumb"
 msgstr "Kruimelpad"
 
+#: src/knowledge/frame.tsx
+msgid "Browse"
+msgstr "Bladeren"
+
 #: src/routes/_shell.models.tsx
 msgid "Budgets"
 msgstr "Budgetten"
@@ -523,9 +535,14 @@ msgstr "Chats"
 msgid "Clear"
 msgstr "Wissen"
 
+#: src/knowledge/frame.tsx
 #: src/routes/_shell.index.tsx
 msgid "Close"
 msgstr "Sluiten"
+
+#: src/knowledge/nav.tsx
+msgid "Close {name}"
+msgstr "{name} sluiten"
 
 #: src/chat/thread.tsx
 msgid "Code"
@@ -540,6 +557,7 @@ msgstr "Code die het kan gebruiken is gewijzigd: {0}"
 msgid "Code step"
 msgstr "Codestap"
 
+#: src/knowledge/document.tsx
 #: src/routes/_shell.knowledge.$collection.tsx
 msgid "Collection"
 msgstr "Collectie"
@@ -551,6 +569,10 @@ msgstr "Collectie {collectionId}"
 #: src/routes/_shell.knowledge.index.tsx
 msgid "Collections"
 msgstr "Collecties"
+
+#: src/routes/_shell.knowledge.index.tsx
+msgid "Collections hold the documents Grasp and its agents may read. An admin shares them with you, or you add your own."
+msgstr "Collecties bevatten de documenten die Grasp en zijn agents mogen lezen. Een admin deelt ze met je, of je voegt je eigen toe."
 
 #: src/routes/decisions.$decision.tsx
 msgid "Comment (optional)"
@@ -688,6 +710,7 @@ msgstr "Beslissen"
 
 #: src/activity/audit-log.tsx
 #: src/activity/pending.tsx
+#: src/labels.ts
 #: src/routes/_shell.workflows.$app.$workflow.tsx
 #: src/routes/decisions.$decision.tsx
 msgid "Decision"
@@ -741,6 +764,14 @@ msgstr "{label} ontkoppelen?"
 msgid "Disconnected"
 msgstr "Ontkoppeld"
 
+#: src/labels.ts
+msgid "Document"
+msgstr "Document"
+
+#: src/routes/_shell.knowledge.$collection.tsx
+msgid "Documents written here, and files uploaded to it, show up here for Grasp and its agents to read."
+msgstr "Documenten die hier worden geschreven en bestanden die je uploadt, verschijnen hier zodat Grasp en zijn agents ze kunnen lezen."
+
 #: src/chat/thread.tsx
 #: src/routes/_shell.workflows.index.tsx
 msgid "Done"
@@ -749,6 +780,10 @@ msgstr "Klaar"
 #: src/knowledge/uploads.tsx
 msgid "Download {name}"
 msgstr "{name} downloaden"
+
+#: src/knowledge/uploads.tsx
+msgid "Drop files here"
+msgstr "Zet bestanden hier neer"
 
 #: src/routes/_shell.models.tsx
 msgid "Each person"
@@ -811,9 +846,21 @@ msgstr "Elke aanroep blijft in de EU: ja."
 msgid "Everyone"
 msgstr "Iedereen"
 
+#: src/routes/_shell.knowledge.index.tsx
+msgid "Everything Grasp and its agents may read, in collections: your own, your teams' and your organization's. Agents read a document when they need it, and always have the memory files in mind."
+msgstr "Alles wat Grasp en zijn agents mogen lezen, in collecties: die van jezelf, van je teams en van je organisatie. Agents lezen een document wanneer ze het nodig hebben en houden de geheugenbestanden altijd voor ogen."
+
 #: src/chat/chat-list.tsx
 msgid "Expand the chats"
 msgstr "Chats uitklappen"
+
+#: src/knowledge/nav.tsx
+msgid "Expand the navigation"
+msgstr "Navigatie uitklappen"
+
+#: src/knowledge/document.tsx
+msgid "Export"
+msgstr "Exporteren"
 
 #: src/activity/audit-log.tsx
 msgid "Export CSV"
@@ -846,6 +893,10 @@ msgstr "Mislukt"
 msgid "Failed ({failedRunDays} days)"
 msgstr "Mislukt ({failedRunDays} dagen)"
 
+#: src/labels.ts
+msgid "File"
+msgstr "Bestand"
+
 #: src/chat/builds.tsx
 #: src/routes/_shell.knowledge.$collection.tsx
 msgid "Files"
@@ -866,6 +917,10 @@ msgstr "Afronden"
 #: src/chat/chat-list.tsx
 msgid "Fold the chats"
 msgstr "Chats inklappen"
+
+#: src/knowledge/nav.tsx
+msgid "Fold the navigation"
+msgstr "Navigatie inklappen"
 
 #: src/activity/pending.tsx
 msgid "For"
@@ -929,7 +984,7 @@ msgstr "Verbergen"
 msgid "Hide exactly what will be sent"
 msgstr "Verberg wat precies wordt verstuurd"
 
-#: src/knowledge/document.tsx
+#: src/knowledge/timeline.tsx
 #: src/routes/_shell.workflows.$app.$workflow.tsx
 msgid "History"
 msgstr "Geschiedenis"
@@ -1016,6 +1071,8 @@ msgid "Jump to the newest message"
 msgstr "Naar het nieuwste bericht"
 
 #: src/frame/app-sidebar.tsx
+#: src/knowledge/frame.tsx
+#: src/knowledge/nav.tsx
 #: src/routes/_shell.knowledge.$collection.tsx
 #: src/routes/_shell.knowledge.index.tsx
 msgid "Knowledge"
@@ -1041,6 +1098,10 @@ msgstr "Laatst op {date}"
 #: src/routes/_shell.workflows.index.tsx
 msgid "Last run"
 msgstr "Laatste run"
+
+#: src/knowledge/uploads.tsx
+msgid "Let go to add them"
+msgstr "Laat los om ze toe te voegen"
 
 #: src/activity/audit-log.tsx
 msgid "Load older"
@@ -1100,6 +1161,7 @@ msgstr "Kan iets buiten Grasp wijzigen"
 msgid "Members"
 msgstr "Leden"
 
+#: src/labels.ts
 #: src/routes/_shell.knowledge.index.tsx
 msgid "Memory"
 msgstr "Geheugen"
@@ -1199,6 +1261,10 @@ msgstr "Geen gebeurtenissen gevonden."
 #: src/chat/builds.tsx
 msgid "No file changes."
 msgstr "Geen bestandswijzigingen."
+
+#: src/knowledge/nav.tsx
+msgid "No files yet."
+msgstr "Nog geen bestanden."
 
 #: src/chat/builds-state.ts
 msgid "No longer runs {how}"
@@ -1366,6 +1432,7 @@ msgstr "Alleen de mensen voor wie deze beslissing is, kunnen erop antwoorden."
 msgid "Only when a condition holds:"
 msgstr "Alleen als aan een voorwaarde is voldaan:"
 
+#: src/knowledge/nav.tsx
 #: src/knowledge/uploads.tsx
 msgid "Open {name}"
 msgstr "{name} openen"
@@ -1381,6 +1448,10 @@ msgstr "Chat openen"
 #: src/routes/guest.tsx
 msgid "Opening the chat…"
 msgstr "Chat wordt geopend…"
+
+#: src/knowledge/uploads.tsx
+msgid "or choose them from your computer"
+msgstr "of kies ze op je computer"
 
 #: src/chat/builds-state.ts
 msgid "Other Apps may no longer call {name}"
@@ -1607,15 +1678,15 @@ msgstr "Herhaalt, één keer per item:"
 msgid "Replace version {newerVersion} with mine"
 msgstr "Versie {newerVersion} vervangen door de mijne"
 
-#: src/knowledge/document.tsx
+#: src/knowledge/timeline.tsx
 msgid "Restore"
 msgstr "Herstellen"
 
-#: src/knowledge/document.tsx
+#: src/knowledge/timeline.tsx
 msgid "Restore version {number}"
 msgstr "Versie {number} herstellen"
 
-#: src/knowledge/document.tsx
+#: src/knowledge/timeline.tsx
 msgid "Restored version {restoredFrom}"
 msgstr "Versie {restoredFrom} hersteld"
 
@@ -1690,10 +1761,6 @@ msgstr "Voert de eigen testcases van de workflow uit met de waarden die nu zijn 
 msgid "Save"
 msgstr "Opslaan"
 
-#: src/knowledge/document.tsx
-msgid "Saved by"
-msgstr "Opgeslagen door"
-
 #: src/routes/_shell.workflows.$app.$workflow.tsx
 msgid "Saved."
 msgstr "Opgeslagen."
@@ -1712,13 +1779,16 @@ msgid "Screens"
 msgstr "Schermen"
 
 #: src/connections/catalog.tsx
-#: src/routes/_shell.knowledge.index.tsx
 msgid "Search"
 msgstr "Zoeken"
 
-#: src/routes/_shell.knowledge.index.tsx
+#: src/knowledge/nav.tsx
 msgid "Search Knowledge"
 msgstr "Zoeken in Kennis"
+
+#: src/routes/_shell.knowledge.index.tsx
+msgid "Search reads every collection you may read. Try other words, or fewer."
+msgstr "Zoeken leest elke collectie die je mag lezen. Probeer andere woorden, of minder."
 
 #: src/activity/pending.tsx
 msgid "See it in the log"
@@ -1773,6 +1843,10 @@ msgstr "Toon wat precies wordt verstuurd"
 #: src/chat/held-writes.tsx
 msgid "Show less"
 msgstr "Minder tonen"
+
+#: src/knowledge/nav.tsx
+msgid "Show more"
+msgstr "Meer tonen"
 
 #: src/routes/_shell.notifications.tsx
 msgid "Show older"
@@ -1833,6 +1907,10 @@ msgstr "Het inloggen is verlopen of elders gestart. Probeer het opnieuw."
 #: src/routes/decisions.$decision.tsx
 msgid "Signed in as {name}"
 msgstr "Ingelogd als {name}"
+
+#: src/labels.ts
+msgid "Skill"
+msgstr "Skill"
 
 #: src/workflows/runs.tsx
 msgid "Someone else"
@@ -2142,7 +2220,6 @@ msgid "Trying again…"
 msgstr "Opnieuw proberen…"
 
 #: src/activity/audit-log.tsx
-#: src/knowledge/document.tsx
 msgid "Type"
 msgstr "Type"
 
@@ -2190,6 +2267,10 @@ msgstr "Geverifieerd"
 #: src/workflows/runs.tsx
 msgid "Version"
 msgstr "Versie"
+
+#: src/knowledge/timeline.tsx
+msgid "Version {number}"
+msgstr "Versie {number}"
 
 #: src/routes/_shell.apps.$app.tsx
 #: src/routes/_shell.workflows.$app.$workflow.tsx
@@ -2254,17 +2335,9 @@ msgstr "Waar kijken we vandaag naar?"
 msgid "What the App holds"
 msgstr "Wat de app heeft"
 
-#: src/knowledge/document.tsx
-msgid "When"
-msgstr "Wanneer"
-
 #: src/chat/builds-state.ts
 msgid "when someone starts it"
 msgstr "als iemand hem start"
-
-#: src/knowledge/document.tsx
-msgid "When to use"
-msgstr "Wanneer te gebruiken"
 
 #: src/routes/_shell.connections.tsx
 msgid "Which Apps and agents hold permissions: {why}"
@@ -2323,7 +2396,7 @@ msgid "Yesterday"
 msgstr "Gisteren"
 
 #: src/connections/connection-list.tsx
-#: src/knowledge/document.tsx
+#: src/knowledge/timeline.tsx
 #: src/routes/_shell.workflows.index.tsx
 #: src/workflows/runs.tsx
 msgid "You"

@@ -5,100 +5,28 @@ import type {
 } from "@grasp-os/shared/knowledge";
 import { Button } from "@grasp-os/ui/components/button";
 import { Input } from "@grasp-os/ui/components/input";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@grasp-os/ui/components/table";
 import { Textarea } from "@grasp-os/ui/components/textarea";
-import { i18n } from "@lingui/core";
-import { msg } from "@lingui/core/macro";
 import { Trans, useLingui } from "@lingui/react/macro";
 import { Link, useRouter } from "@tanstack/react-router";
+import { DownloadIcon, PencilIcon } from "lucide-react";
 import { useState } from "react";
 
-import { changeThenRefresh } from "../change-then-refresh.ts";
 import { ErrorText } from "../error-text.tsx";
+import { documentTypeLabel } from "../labels.ts";
 import { useCoreAction } from "../use-core-action.ts";
 import { DocumentMarkdown } from "./markdown.tsx";
 import { saveOrNewer } from "./save.ts";
+import { Timeline } from "./timeline.tsx";
 import type { ResolveLink } from "./wiki-links.ts";
 
-// One document: its details (with the documents that link to it), its
-// text rendered, and, where the person may change it, an editor and its
-// history to restore from. Every save names the version it was edited
+// One document, read like a note in the prototype's brain
+// (grasplabs/prototype `routes/brain/$noteId.tsx`): its kind, title and
+// when to use it, its properties with the documents that link to it as
+// chips, then its text, and its history as a timeline beside it, or under
+// it on a narrower window. Where the person may change it: an editor, and
+// restoring from its history. Every save names the version it was edited
 // from, so a save that would overwrite one made since, in another tab or
 // by someone else, shows that version instead.
-
-const dateTime = new Intl.DateTimeFormat(undefined, {
-  dateStyle: "medium",
-  timeStyle: "short",
-});
-
-/** Who saved a version: the person themselves, or their user ID. */
-const savedBy = (author: string, me: string): string =>
-  author === me ? i18n._(msg`You`) : author;
-
-/** The documents that link to this one, each opening where it is. */
-const UsedBy = ({ backlinks }: { backlinks: Backlink[] }) =>
-  backlinks.length === 0 ? (
-    "–"
-  ) : (
-    <ul className="flex flex-col gap-1">
-      {backlinks.map((backlink) => (
-        <li key={backlink.documentId}>
-          <Link
-            className="underline"
-            params={{ collection: backlink.collectionId }}
-            search={{ doc: backlink.documentId }}
-            to="/knowledge/$collection"
-          >
-            {backlink.title}
-          </Link>
-        </li>
-      ))}
-    </ul>
-  );
-
-const Details = ({
-  doc,
-  backlinks,
-}: {
-  doc: DocumentRead;
-  backlinks: Backlink[];
-}) => (
-  <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm sm:grid-cols-4">
-    <dt className="text-muted-foreground">
-      <Trans>Path</Trans>
-    </dt>
-    <dd>{doc.path}</dd>
-    <dt className="text-muted-foreground">
-      <Trans>Type</Trans>
-    </dt>
-    <dd>{doc.type}</dd>
-    <dt className="text-muted-foreground">
-      <Trans>Version</Trans>
-    </dt>
-    <dd>{doc.currentVersion}</dd>
-    <dt className="text-muted-foreground">
-      <Trans>Review by</Trans>
-    </dt>
-    <dd>{doc.reviewDate ?? "–"}</dd>
-    <dt className="text-muted-foreground">
-      <Trans>When to use</Trans>
-    </dt>
-    <dd className="col-span-1 sm:col-span-3">{doc.description || "–"}</dd>
-    <dt className="text-muted-foreground">
-      <Trans>Used by</Trans>
-    </dt>
-    <dd className="col-span-1 sm:col-span-3">
-      <UsedBy backlinks={backlinks} />
-    </dd>
-  </dl>
-);
 
 const Editor = ({
   doc,
@@ -232,105 +160,106 @@ const Editor = ({
   );
 };
 
-const History = ({
+/** Downloads the document's text, frontmatter and all, as Markdown. */
+const exportMarkdown = (doc: DocumentRead): void => {
+  const name = doc.path.split("/").at(-1) ?? doc.title;
+  const url = URL.createObjectURL(
+    new Blob([doc.version.text], { type: "text/markdown;charset=utf-8" })
+  );
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name.endsWith(".md") ? name : `${name}.md`;
+  link.click();
+  URL.revokeObjectURL(url);
+};
+
+/** A document another one links to, or that links to it, as a chip. */
+const DocumentChip = ({
+  collectionId,
+  documentId,
+  title,
+}: {
+  collectionId: string;
+  documentId: string;
+  title: string;
+}) => (
+  <Link
+    className="bg-muted hover:bg-accent inline-flex max-w-full items-center gap-1.5 rounded-md px-2 py-0.5 text-sm"
+    params={{ collection: collectionId }}
+    search={{ doc: documentId }}
+    to="/knowledge/$collection"
+  >
+    <span
+      aria-hidden="true"
+      className="bg-muted-foreground/60 size-1.5 flex-none rounded-full"
+    />
+    <span className="truncate">{title}</span>
+  </Link>
+);
+
+/** The document's properties: where it is, its version and review, and what uses it. */
+const Properties = ({
   doc,
-  versions,
-  me,
-  writable,
+  collection,
+  backlinks,
 }: {
   doc: DocumentRead;
-  versions: VersionSummary[];
-  me: string;
-  writable: boolean;
-}) => {
-  const router = useRouter();
-  const { busy, failure, run } = useCoreAction();
-  const { t } = useLingui();
-  const restore = async (version: number): Promise<void> => {
-    await run(async (session) => {
-      // Read again whatever the outcome: a restore refused as a conflict
-      // means the page shows an old version.
-      await changeThenRefresh(
-        async () =>
-          await session.knowledge.restoreVersion({
-            documentId: doc.id,
-            version,
-            ifVersion: doc.currentVersion,
-          }),
-        async () => {
-          await router.invalidate({ sync: true });
-        }
-      );
-    });
-  };
-  return (
-    <section aria-labelledby="history" className="flex flex-col gap-2">
-      <h3 className="font-medium" id="history">
-        <Trans>History</Trans>
-      </h3>
-      <ErrorText>{failure}</ErrorText>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>
-              <Trans>Version</Trans>
-            </TableHead>
-            <TableHead>
-              <Trans>Saved by</Trans>
-            </TableHead>
-            <TableHead>
-              <Trans>When</Trans>
-            </TableHead>
-            <TableHead>
-              <Trans>What changed</Trans>
-            </TableHead>
-            {writable ? <TableHead /> : null}
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {versions.map((version) => {
-            const { number, restoredFrom } = version;
-            return (
-              <TableRow key={version.number}>
-                <TableCell>{version.number}</TableCell>
-                <TableCell>{savedBy(version.author, me)}</TableCell>
-                <TableCell>
-                  {dateTime.format(new Date(version.createdAt))}
-                </TableCell>
-                <TableCell>
-                  {restoredFrom === null
-                    ? (version.message ?? "")
-                    : t`Restored version ${restoredFrom}`}
-                </TableCell>
-                {writable ? (
-                  <TableCell>
-                    {version.number === doc.currentVersion ? null : (
-                      <Button
-                        aria-label={t`Restore version ${number}`}
-                        disabled={busy}
-                        onClick={() => {
-                          void restore(version.number);
-                        }}
-                        size="sm"
-                        variant="outline"
-                      >
-                        <Trans>Restore</Trans>
-                      </Button>
-                    )}
-                  </TableCell>
-                ) : null}
-              </TableRow>
-            );
-          })}
-        </TableBody>
-      </Table>
-    </section>
-  );
-};
+  collection: string;
+  backlinks: Backlink[];
+}) => (
+  <dl className="grid grid-cols-[8rem_minmax(0,1fr)] gap-x-4 gap-y-2 text-sm">
+    <dt className="text-muted-foreground py-0.5">
+      <Trans>Collection</Trans>
+    </dt>
+    <dd className="py-0.5">
+      <Link
+        className="hover:underline"
+        params={{ collection: doc.collectionId }}
+        search={{}}
+        to="/knowledge/$collection"
+      >
+        {collection}
+      </Link>
+    </dd>
+    <dt className="text-muted-foreground py-0.5">
+      <Trans>Path</Trans>
+    </dt>
+    <dd className="py-0.5 break-all">{doc.path}</dd>
+    <dt className="text-muted-foreground py-0.5">
+      <Trans>Version</Trans>
+    </dt>
+    <dd className="py-0.5 tabular-nums">{doc.currentVersion}</dd>
+    <dt className="text-muted-foreground py-0.5">
+      <Trans>Review by</Trans>
+    </dt>
+    <dd className="py-0.5">{doc.reviewDate ?? "–"}</dd>
+    <dt className="text-muted-foreground py-0.5">
+      <Trans>Used by</Trans>
+    </dt>
+    <dd className="min-w-0">
+      {backlinks.length === 0 ? (
+        <span className="text-muted-foreground py-0.5">–</span>
+      ) : (
+        <ul className="flex flex-wrap gap-1.5">
+          {backlinks.map((backlink) => (
+            <li className="min-w-0" key={backlink.documentId}>
+              <DocumentChip
+                collectionId={backlink.collectionId}
+                documentId={backlink.documentId}
+                title={backlink.title}
+              />
+            </li>
+          ))}
+        </ul>
+      )}
+    </dd>
+  </dl>
+);
 
 /** A document, with its editor and history where the person may change it. */
 export const DocumentView = ({
   doc,
+  collection,
   versions,
   backlinks,
   resolve,
@@ -338,6 +267,8 @@ export const DocumentView = ({
   writable,
 }: {
   doc: DocumentRead;
+  /** The name of the collection it is in. */
+  collection: string;
   versions: VersionSummary[];
   backlinks: Backlink[];
   /** The collection's document at a `[[link]]`'s path, if the page has it. */
@@ -346,37 +277,87 @@ export const DocumentView = ({
   writable: boolean;
 }) => {
   const [editing, setEditing] = useState(false);
+  const timeline = (
+    <Timeline doc={doc} me={me} versions={versions} writable={writable} />
+  );
   return (
-    <section aria-labelledby="document" className="flex flex-col gap-4">
-      <div className="flex items-center gap-2">
-        <h2 className="text-xl font-medium" id="document">
-          {doc.title}
-        </h2>
-        {writable && !editing ? (
-          <Button
-            className="ml-auto"
-            onClick={() => {
-              setEditing(true);
-            }}
-            variant="outline"
-          >
-            <Trans>Edit</Trans>
-          </Button>
-        ) : null}
+    <div className="flex min-h-0 min-w-0 flex-1">
+      <div className="min-w-0 flex-1 overflow-y-auto">
+        <div className="mx-auto flex w-full max-w-3xl flex-col gap-8 px-6 py-8 md:px-12">
+          <header className="flex flex-col gap-5">
+            <div className="flex flex-col gap-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+                <span className="bg-muted text-muted-foreground inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-medium">
+                  <span
+                    aria-hidden="true"
+                    className="bg-muted-foreground/60 size-1.5 rounded-full"
+                  />
+                  {documentTypeLabel(doc.type)}
+                </span>
+                <div className="flex items-center gap-1.5">
+                  {writable && !editing ? (
+                    <Button
+                      onClick={() => {
+                        setEditing(true);
+                      }}
+                      size="sm"
+                      variant="outline"
+                    >
+                      <PencilIcon data-icon="inline-start" />
+                      <Trans>Edit</Trans>
+                    </Button>
+                  ) : null}
+                  <Button
+                    onClick={() => {
+                      exportMarkdown(doc);
+                    }}
+                    size="sm"
+                    variant="outline"
+                  >
+                    <DownloadIcon data-icon="inline-start" />
+                    <Trans>Export</Trans>
+                  </Button>
+                </div>
+              </div>
+              <h1 className="text-2xl font-medium tracking-tight wrap-break-word">
+                {doc.title}
+              </h1>
+              {doc.description === "" ? null : (
+                <p className="text-muted-foreground text-sm leading-relaxed">
+                  {doc.description}
+                </p>
+              )}
+            </div>
+            <Properties
+              backlinks={backlinks}
+              collection={collection}
+              doc={doc}
+            />
+          </header>
+          {editing ? (
+            <Editor
+              doc={doc}
+              resolve={resolve}
+              onClose={() => {
+                setEditing(false);
+              }}
+            />
+          ) : (
+            <DocumentMarkdown
+              resolve={resolve}
+              text={doc.version.text}
+              title={doc.title}
+            />
+          )}
+          {/* Too narrow for the side panel: the history follows the page. */}
+          <div className="min-[1536px]:hidden">{timeline}</div>
+        </div>
       </div>
-      <Details backlinks={backlinks} doc={doc} />
-      {editing ? (
-        <Editor
-          doc={doc}
-          resolve={resolve}
-          onClose={() => {
-            setEditing(false);
-          }}
-        />
-      ) : (
-        <DocumentMarkdown resolve={resolve} text={doc.version.text} />
-      )}
-      <History doc={doc} me={me} versions={versions} writable={writable} />
-    </section>
+      <aside className="bg-sidebar hidden w-96 flex-none flex-col overflow-y-auto border-l min-[1536px]:flex">
+        <div className="flex flex-1 flex-col gap-4 px-5 pt-4 pb-6">
+          {timeline}
+        </div>
+      </aside>
+    </div>
   );
 };

@@ -17,24 +17,31 @@ import type { ReactNode } from "react";
 export type Crumb =
   | { label: string }
   | { label: string; to: "/" | "/knowledge" | "/apps" | "/workflows" }
-  | { label: string; to: "/apps/$app"; params: { app: string } };
+  | { label: string; to: "/apps/$app"; params: { app: string } }
+  | {
+      label: string;
+      to: "/knowledge/$collection";
+      params: { collection: string };
+    };
+
+/** Where a crumb leads, as a link. */
+const crumbLink = (crumb: Extract<Crumb, { to: string }>) => {
+  if (!("params" in crumb)) {
+    return <Link to={crumb.to} />;
+  }
+  return "app" in crumb.params ? (
+    <Link params={crumb.params} to="/apps/$app" />
+  ) : (
+    <Link params={crumb.params} search={{}} to="/knowledge/$collection" />
+  );
+};
 
 const CrumbLink = ({ crumb }: { crumb: Crumb }) => {
   if (!("to" in crumb)) {
     return <BreadcrumbPage>{crumb.label}</BreadcrumbPage>;
   }
   return (
-    <BreadcrumbLink
-      render={
-        "params" in crumb ? (
-          <Link params={crumb.params} to={crumb.to} />
-        ) : (
-          <Link to={crumb.to} />
-        )
-      }
-    >
-      {crumb.label}
-    </BreadcrumbLink>
+    <BreadcrumbLink render={crumbLink(crumb)}>{crumb.label}</BreadcrumbLink>
   );
 };
 

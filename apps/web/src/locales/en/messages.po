@@ -99,6 +99,10 @@ msgstr "{connection}, {resource} ({tool})"
 msgid "{count, plural, one {# change waits for you to confirm or reject it.} other {# changes wait for you to confirm or reject them.}}"
 msgstr "{count, plural, one {# change waits for you to confirm or reject it.} other {# changes wait for you to confirm or reject them.}}"
 
+#: src/knowledge/timeline.tsx
+msgid "{count, plural, one {# version} other {# versions}}"
+msgstr "{count, plural, one {# version} other {# versions}}"
+
 #: src/chat/sources.tsx
 msgid "{count, plural, one {Answers draw on # source} other {Answers draw on # sources}}"
 msgstr "{count, plural, one {Answers draw on # source} other {Answers draw on # sources}}"
@@ -106,6 +110,10 @@ msgstr "{count, plural, one {Answers draw on # source} other {Answers draw on # 
 #: src/chat/builds-state.ts
 msgid "{count, plural, one {once} other {# times}}"
 msgstr "{count, plural, one {once} other {# times}}"
+
+#: src/knowledge/timeline.tsx
+msgid "{folded, plural, one {# earlier} other {# earlier}}"
+msgstr "{folded, plural, one {# earlier} other {# earlier}}"
 
 #: src/connections/connection-list.tsx
 msgid "{holder}: {actions} on {resource}"
@@ -456,6 +464,10 @@ msgstr "Being built"
 msgid "Breadcrumb"
 msgstr "Breadcrumb"
 
+#: src/knowledge/frame.tsx
+msgid "Browse"
+msgstr "Browse"
+
 #: src/routes/_shell.models.tsx
 msgid "Budgets"
 msgstr "Budgets"
@@ -523,9 +535,14 @@ msgstr "Chats"
 msgid "Clear"
 msgstr "Clear"
 
+#: src/knowledge/frame.tsx
 #: src/routes/_shell.index.tsx
 msgid "Close"
 msgstr "Close"
+
+#: src/knowledge/nav.tsx
+msgid "Close {name}"
+msgstr "Close {name}"
 
 #: src/chat/thread.tsx
 msgid "Code"
@@ -540,6 +557,7 @@ msgstr "Code it may use changed: {0}"
 msgid "Code step"
 msgstr "Code step"
 
+#: src/knowledge/document.tsx
 #: src/routes/_shell.knowledge.$collection.tsx
 msgid "Collection"
 msgstr "Collection"
@@ -551,6 +569,10 @@ msgstr "Collection {collectionId}"
 #: src/routes/_shell.knowledge.index.tsx
 msgid "Collections"
 msgstr "Collections"
+
+#: src/routes/_shell.knowledge.index.tsx
+msgid "Collections hold the documents Grasp and its agents may read. An admin shares them with you, or you add your own."
+msgstr "Collections hold the documents Grasp and its agents may read. An admin shares them with you, or you add your own."
 
 #: src/routes/decisions.$decision.tsx
 msgid "Comment (optional)"
@@ -688,6 +710,7 @@ msgstr "Decide"
 
 #: src/activity/audit-log.tsx
 #: src/activity/pending.tsx
+#: src/labels.ts
 #: src/routes/_shell.workflows.$app.$workflow.tsx
 #: src/routes/decisions.$decision.tsx
 msgid "Decision"
@@ -741,6 +764,14 @@ msgstr "Disconnect {label}?"
 msgid "Disconnected"
 msgstr "Disconnected"
 
+#: src/labels.ts
+msgid "Document"
+msgstr "Document"
+
+#: src/routes/_shell.knowledge.$collection.tsx
+msgid "Documents written here, and files uploaded to it, show up here for Grasp and its agents to read."
+msgstr "Documents written here, and files uploaded to it, show up here for Grasp and its agents to read."
+
 #: src/chat/thread.tsx
 #: src/routes/_shell.workflows.index.tsx
 msgid "Done"
@@ -749,6 +780,10 @@ msgstr "Done"
 #: src/knowledge/uploads.tsx
 msgid "Download {name}"
 msgstr "Download {name}"
+
+#: src/knowledge/uploads.tsx
+msgid "Drop files here"
+msgstr "Drop files here"
 
 #: src/routes/_shell.models.tsx
 msgid "Each person"
@@ -811,9 +846,21 @@ msgstr "Every call stays in the EU: yes."
 msgid "Everyone"
 msgstr "Everyone"
 
+#: src/routes/_shell.knowledge.index.tsx
+msgid "Everything Grasp and its agents may read, in collections: your own, your teams' and your organization's. Agents read a document when they need it, and always have the memory files in mind."
+msgstr "Everything Grasp and its agents may read, in collections: your own, your teams' and your organization's. Agents read a document when they need it, and always have the memory files in mind."
+
 #: src/chat/chat-list.tsx
 msgid "Expand the chats"
 msgstr "Expand the chats"
+
+#: src/knowledge/nav.tsx
+msgid "Expand the navigation"
+msgstr "Expand the navigation"
+
+#: src/knowledge/document.tsx
+msgid "Export"
+msgstr "Export"
 
 #: src/activity/audit-log.tsx
 msgid "Export CSV"
@@ -846,6 +893,10 @@ msgstr "Failed"
 msgid "Failed ({failedRunDays} days)"
 msgstr "Failed ({failedRunDays} days)"
 
+#: src/labels.ts
+msgid "File"
+msgstr "File"
+
 #: src/chat/builds.tsx
 #: src/routes/_shell.knowledge.$collection.tsx
 msgid "Files"
@@ -866,6 +917,10 @@ msgstr "Finish"
 #: src/chat/chat-list.tsx
 msgid "Fold the chats"
 msgstr "Fold the chats"
+
+#: src/knowledge/nav.tsx
+msgid "Fold the navigation"
+msgstr "Fold the navigation"
 
 #: src/activity/pending.tsx
 msgid "For"
@@ -929,7 +984,7 @@ msgstr "Hide"
 msgid "Hide exactly what will be sent"
 msgstr "Hide exactly what will be sent"
 
-#: src/knowledge/document.tsx
+#: src/knowledge/timeline.tsx
 #: src/routes/_shell.workflows.$app.$workflow.tsx
 msgid "History"
 msgstr "History"
@@ -1016,6 +1071,8 @@ msgid "Jump to the newest message"
 msgstr "Jump to the newest message"
 
 #: src/frame/app-sidebar.tsx
+#: src/knowledge/frame.tsx
+#: src/knowledge/nav.tsx
 #: src/routes/_shell.knowledge.$collection.tsx
 #: src/routes/_shell.knowledge.index.tsx
 msgid "Knowledge"
@@ -1041,6 +1098,10 @@ msgstr "Last on {date}"
 #: src/routes/_shell.workflows.index.tsx
 msgid "Last run"
 msgstr "Last run"
+
+#: src/knowledge/uploads.tsx
+msgid "Let go to add them"
+msgstr "Let go to add them"
 
 #: src/activity/audit-log.tsx
 msgid "Load older"
@@ -1100,6 +1161,7 @@ msgstr "May change something outside Grasp"
 msgid "Members"
 msgstr "Members"
 
+#: src/labels.ts
 #: src/routes/_shell.knowledge.index.tsx
 msgid "Memory"
 msgstr "Memory"
@@ -1199,6 +1261,10 @@ msgstr "No events match."
 #: src/chat/builds.tsx
 msgid "No file changes."
 msgstr "No file changes."
+
+#: src/knowledge/nav.tsx
+msgid "No files yet."
+msgstr "No files yet."
 
 #: src/chat/builds-state.ts
 msgid "No longer runs {how}"
@@ -1366,6 +1432,7 @@ msgstr "Only the people this decision is from can answer it."
 msgid "Only when a condition holds:"
 msgstr "Only when a condition holds:"
 
+#: src/knowledge/nav.tsx
 #: src/knowledge/uploads.tsx
 msgid "Open {name}"
 msgstr "Open {name}"
@@ -1381,6 +1448,10 @@ msgstr "Open the chat"
 #: src/routes/guest.tsx
 msgid "Opening the chat…"
 msgstr "Opening the chat…"
+
+#: src/knowledge/uploads.tsx
+msgid "or choose them from your computer"
+msgstr "or choose them from your computer"
 
 #: src/chat/builds-state.ts
 msgid "Other Apps may no longer call {name}"
@@ -1607,15 +1678,15 @@ msgstr "Repeats, once per item:"
 msgid "Replace version {newerVersion} with mine"
 msgstr "Replace version {newerVersion} with mine"
 
-#: src/knowledge/document.tsx
+#: src/knowledge/timeline.tsx
 msgid "Restore"
 msgstr "Restore"
 
-#: src/knowledge/document.tsx
+#: src/knowledge/timeline.tsx
 msgid "Restore version {number}"
 msgstr "Restore version {number}"
 
-#: src/knowledge/document.tsx
+#: src/knowledge/timeline.tsx
 msgid "Restored version {restoredFrom}"
 msgstr "Restored version {restoredFrom}"
 
@@ -1690,10 +1761,6 @@ msgstr "Runs the workflow's own test cases with the values set now. Nothing is c
 msgid "Save"
 msgstr "Save"
 
-#: src/knowledge/document.tsx
-msgid "Saved by"
-msgstr "Saved by"
-
 #: src/routes/_shell.workflows.$app.$workflow.tsx
 msgid "Saved."
 msgstr "Saved."
@@ -1712,13 +1779,16 @@ msgid "Screens"
 msgstr "Screens"
 
 #: src/connections/catalog.tsx
-#: src/routes/_shell.knowledge.index.tsx
 msgid "Search"
 msgstr "Search"
 
-#: src/routes/_shell.knowledge.index.tsx
+#: src/knowledge/nav.tsx
 msgid "Search Knowledge"
 msgstr "Search Knowledge"
+
+#: src/routes/_shell.knowledge.index.tsx
+msgid "Search reads every collection you may read. Try other words, or fewer."
+msgstr "Search reads every collection you may read. Try other words, or fewer."
 
 #: src/activity/pending.tsx
 msgid "See it in the log"
@@ -1773,6 +1843,10 @@ msgstr "Show exactly what will be sent"
 #: src/chat/held-writes.tsx
 msgid "Show less"
 msgstr "Show less"
+
+#: src/knowledge/nav.tsx
+msgid "Show more"
+msgstr "Show more"
 
 #: src/routes/_shell.notifications.tsx
 msgid "Show older"
@@ -1833,6 +1907,10 @@ msgstr "Sign-in timed out or was started elsewhere. Try again."
 #: src/routes/decisions.$decision.tsx
 msgid "Signed in as {name}"
 msgstr "Signed in as {name}"
+
+#: src/labels.ts
+msgid "Skill"
+msgstr "Skill"
 
 #: src/workflows/runs.tsx
 msgid "Someone else"
@@ -2142,7 +2220,6 @@ msgid "Trying again…"
 msgstr "Trying again…"
 
 #: src/activity/audit-log.tsx
-#: src/knowledge/document.tsx
 msgid "Type"
 msgstr "Type"
 
@@ -2190,6 +2267,10 @@ msgstr "Verified"
 #: src/workflows/runs.tsx
 msgid "Version"
 msgstr "Version"
+
+#: src/knowledge/timeline.tsx
+msgid "Version {number}"
+msgstr "Version {number}"
 
 #: src/routes/_shell.apps.$app.tsx
 #: src/routes/_shell.workflows.$app.$workflow.tsx
@@ -2254,17 +2335,9 @@ msgstr "What should we look at today?"
 msgid "What the App holds"
 msgstr "What the App holds"
 
-#: src/knowledge/document.tsx
-msgid "When"
-msgstr "When"
-
 #: src/chat/builds-state.ts
 msgid "when someone starts it"
 msgstr "when someone starts it"
-
-#: src/knowledge/document.tsx
-msgid "When to use"
-msgstr "When to use"
 
 #: src/routes/_shell.connections.tsx
 msgid "Which Apps and agents hold permissions: {why}"
@@ -2323,7 +2396,7 @@ msgid "Yesterday"
 msgstr "Yesterday"
 
 #: src/connections/connection-list.tsx
-#: src/knowledge/document.tsx
+#: src/knowledge/timeline.tsx
 #: src/routes/_shell.workflows.index.tsx
 #: src/workflows/runs.tsx
 msgid "You"

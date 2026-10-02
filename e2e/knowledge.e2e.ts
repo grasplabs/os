@@ -24,14 +24,11 @@ const fixture = (name: string): string =>
     )
   );
 
-/** The history table's row for `version`. */
+/** The history timeline's entry for `version`. */
 const versionRow = (page: Page, version: number) =>
   page
     .getByRole("region", { name: "History" })
-    .getByRole("row")
-    .filter({
-      has: page.getByRole("cell", { name: String(version), exact: true }),
-    });
+    .getByRole("listitem", { name: `Version ${version}`, exact: true });
 
 test("a person searches, edits a document, meets a newer version instead of overwriting it, and restores an earlier one", async ({
   browser,
@@ -107,8 +104,10 @@ test("a person searches, edits a document, meets a newer version instead of over
       page.getByRole("region", { name: "Memory" }).getByRole("alert")
     ).toHaveCount(0);
 
-    await page.getByRole("searchbox", { name: "Search Knowledge" }).fill(word);
-    await page.getByRole("button", { name: "Search" }).click();
+    // Search sits at the top of the navigation, and runs on Enter.
+    const search = page.getByRole("searchbox", { name: "Search Knowledge" });
+    await search.fill(word);
+    await search.press("Enter");
     const results = page.getByRole("region", { name: "Results" });
     const hit = results.getByRole("listitem").filter({ hasText: word });
     await expect(
@@ -137,22 +136,24 @@ test("a person searches, edits a document, meets a newer version instead of over
     await expect(article.locator("img")).toHaveCount(0);
     // The frontmatter is a detail, not text.
     await expect(article.getByText("description:")).toHaveCount(0);
-    await expect(
-      page.getByRole("definition").getByText("Who gets how much leave")
-    ).toBeVisible();
+    // When to use it is the one sentence under its title.
+    await expect(page.getByText("Who gets how much leave")).toBeVisible();
 
     // A `[[link]]` opens the document it names here, and each lists the
-    // other as using it.
+    // other as using it. The title is the page's heading (the text may
+    // start with the same one).
     await article.getByRole("link", { name: "the pay policy" }).click();
     await expect(
-      page.getByRole("heading", { level: 2, name: "Pay" })
+      page.getByRole("heading", { level: 1, name: "Pay" }).first()
     ).toBeVisible();
     await page
       .getByRole("definition")
       .getByRole("link", { name: "Leave", exact: true })
       .click();
     await expect(
-      page.getByRole("heading", { level: 2, name: "Leave", exact: true })
+      page
+        .getByRole("heading", { level: 1, name: "Leave", exact: true })
+        .first()
     ).toBeVisible();
     await expect(
       page.getByRole("definition").getByRole("link", { name: "Pay" })
@@ -300,8 +301,10 @@ test("a person uploads a file and follows it through core failing for a moment u
   expect(original.headers()["content-disposition"]).toMatch(/^attachment/u);
   await ready.getByRole("link", { name: "Open expense-policy.pdf" }).click();
   await expect(
-    page.getByRole("heading", { level: 2, name: "expense-policy" })
+    page.getByRole("heading", { level: 1, name: "expense-policy" })
   ).toBeVisible();
+  // Back to the collection, to upload more.
+  await page.goBack();
 
   // A refusal ends the following, with core's reason.
   refusing = true;
@@ -332,8 +335,9 @@ test("a person uploads a file and follows it through core failing for a moment u
   ).toHaveCount(0);
   await past.getByRole("link", { name: "Open offices.xlsx" }).click();
   await expect(
-    page.getByRole("heading", { level: 2, name: "offices", exact: true })
+    page.getByRole("heading", { level: 1, name: "offices", exact: true })
   ).toBeVisible();
+  await page.goBack();
 
   await input.setInputFiles(fixture("scan.pdf"));
   await expect(
@@ -383,6 +387,8 @@ test("someone who may only read a collection is offered no upload, edit or resto
   await expect(
     owner.getByRole("button", { name: "Restore version 1" })
   ).toBeVisible();
+  // Uploading is on the collection's own page.
+  await owner.goto(`/knowledge/${collectionId}`);
   await expect(owner.getByRole("region", { name: "Upload" })).toBeVisible();
 
   // Anyone else reads it, and is offered nothing core would refuse.
@@ -391,5 +397,7 @@ test("someone who may only read a collection is offered no upload, edit or resto
   await expect(page.getByText("Twenty weeks.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Edit" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /^Restore/u })).toHaveCount(0);
+  await page.goto(`/knowledge/${collectionId}`);
+  await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
   await expect(page.getByRole("region", { name: "Upload" })).toHaveCount(0);
 });

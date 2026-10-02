@@ -7,12 +7,18 @@ import {
   uploadTypes,
 } from "@grasp-os/shared/uploads";
 import type { Upload, UploadStatus } from "@grasp-os/shared/uploads";
-import { Input } from "@grasp-os/ui/components/input";
+import { buttonVariants } from "@grasp-os/ui/components/button";
 import { i18n } from "@lingui/core";
 import type { MessageDescriptor } from "@lingui/core";
 import { msg } from "@lingui/core/macro";
 import { Trans, useLingui } from "@lingui/react/macro";
 import { Link, useRouter } from "@tanstack/react-router";
+import {
+  ArrowUpIcon,
+  CircleAlertIcon,
+  DownloadIcon,
+  FileTextIcon,
+} from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 
 import { readWithin } from "../core-connection.ts";
@@ -115,47 +121,103 @@ const UploadRow = ({
   const { t } = useLingui();
   const { name } = upload;
   const status = i18n._(statusLabels[upload.status]);
+  const ready = upload.status === "ready" && upload.documentId !== null;
   return (
-    <li className="flex flex-col gap-1 text-sm">
-      <span className="flex flex-wrap items-center gap-2">
-        <span>{upload.name}</span>
-        <output>
+    <li className="bg-card grid min-h-14 grid-cols-[2.5rem_minmax(0,1fr)_auto] items-center gap-x-3 rounded-lg border py-2 pr-2 pl-2.5 text-sm">
+      <span className="text-muted-foreground grid size-10 place-items-center">
+        {upload.status === "failed" ? (
+          <CircleAlertIcon className="text-status-attention size-5" />
+        ) : (
+          <FileTextIcon className="size-5" />
+        )}
+      </span>
+      <span className="grid min-w-0 gap-0.5">
+        <span className="truncate font-medium" title={upload.name}>
+          {upload.name}
+        </span>
+        <output className="text-muted-foreground text-xs">
           {upload.failure === null
             ? status
             : `${status}: ${upload.failure.message}`}
         </output>
-        {upload.status === "ready" && upload.documentId !== null ? (
-          <>
-            <Link
-              className="underline"
-              params={{ collection: upload.collectionId }}
-              search={{ doc: upload.documentId }}
-              to="/knowledge/$collection"
-            >
-              {t`Open ${name}`}
-            </Link>
-            {/* Core serves it as an attachment only, to those who may read it. */}
-            <a
-              className="underline"
-              download
-              href={uploadOriginalPath(encodeURIComponent(upload.id))}
-            >
-              {t`Download ${name}`}
-            </a>
-          </>
+        {/* The file list shows its first page only: a name that sorts past it
+          opens from here. */}
+        {ready &&
+        upload.documentId !== null &&
+        !listed.has(upload.documentId) ? (
+          <p className="text-muted-foreground text-xs">
+            {t`It's past the first ${pageMaxLimit} files listed: open it from here.`}
+          </p>
         ) : null}
+        <ErrorText>{problem}</ErrorText>
       </span>
-      {/* The file list shows its first page only: a name that sorts past it
-        opens from here. */}
-      {upload.status === "ready" &&
-      upload.documentId !== null &&
-      !listed.has(upload.documentId) ? (
-        <p className="text-muted-foreground">
-          {t`It's past the first ${pageMaxLimit} files listed: open it from here.`}
-        </p>
-      ) : null}
-      <ErrorText>{problem}</ErrorText>
+      {ready && upload.documentId !== null ? (
+        <span className="flex items-center gap-1">
+          <Link
+            className={buttonVariants({ size: "sm", variant: "ghost" })}
+            params={{ collection: upload.collectionId }}
+            search={{ doc: upload.documentId }}
+            to="/knowledge/$collection"
+          >
+            {t`Open ${name}`}
+          </Link>
+          {/* Core serves it as an attachment only, to those who may read it. */}
+          <a
+            aria-label={t`Download ${name}`}
+            className={buttonVariants({ size: "icon-sm", variant: "ghost" })}
+            download
+            href={uploadOriginalPath(encodeURIComponent(upload.id))}
+          >
+            <DownloadIcon />
+          </a>
+        </span>
+      ) : (
+        <span />
+      )}
     </li>
+  );
+};
+
+/** Three sheets of paper, the drop's one picture, fanned wider under a file. */
+const Sheets = ({ dragging }: { dragging: boolean }) => {
+  const sheet =
+    "bg-card text-muted-foreground absolute inset-0 grid origin-bottom place-items-end justify-center rounded-md border pb-1.5 shadow-xs transition-transform duration-300";
+  const lines = (
+    <>
+      <span className="absolute top-2 left-1.75 h-0.5 w-4 rounded-full bg-current opacity-30" />
+      <span className="absolute top-3.25 left-1.75 h-0.5 w-2.75 rounded-full bg-current opacity-30" />
+    </>
+  );
+  return (
+    <span
+      aria-hidden="true"
+      className="relative mx-auto mt-2.5 mb-3.5 block h-11 w-9"
+    >
+      <span
+        className={
+          dragging
+            ? `${sheet} -translate-x-5 -rotate-[22deg]`
+            : `${sheet} -translate-x-2 -rotate-10 group-hover:-translate-x-3 group-hover:-rotate-15`
+        }
+      >
+        {lines}
+      </span>
+      <span
+        className={
+          dragging
+            ? `${sheet} translate-x-5 rotate-[22deg]`
+            : `${sheet} translate-x-2 rotate-10 group-hover:translate-x-3 group-hover:rotate-15`
+        }
+      >
+        {lines}
+      </span>
+      <span
+        className={dragging ? `${sheet} text-foreground -translate-y-2` : sheet}
+      >
+        {lines}
+        <ArrowUpIcon className="size-3.5" strokeWidth={2} />
+      </span>
+    </span>
   );
 };
 
@@ -175,6 +237,8 @@ export const Uploads = ({
   const core = useCore();
   const { busy, failure, run } = useCoreAction();
   const [followed, setFollowed] = useState<Followed[]>([]);
+  const [dragging, setDragging] = useState(false);
+  const { t } = useLingui();
   // Whether the page is still open: nobody sees the status once it isn't.
   const open = useRef(true);
   useEffect(() => {
@@ -226,30 +290,74 @@ export const Uploads = ({
       await router.invalidate({ sync: true });
     }
   };
+  const accept = Object.keys(uploadTypes)
+    .map((extension) => `.${extension}`)
+    .join(",");
   return (
     <section aria-labelledby="uploads" className="flex flex-col gap-2">
-      <h3 className="font-medium" id="uploads">
+      <h2 className="text-sm font-medium" id="uploads">
         <Trans>Upload</Trans>
-      </h3>
-      <label className="text-sm" htmlFor={inputId}>
-        <Trans>Upload a PDF, Word or Excel file</Trans>
-      </label>
-      <Input
-        accept={Object.keys(uploadTypes)
-          .map((extension) => `.${extension}`)
-          .join(",")}
-        disabled={busy}
-        id={inputId}
-        onChange={(event) => {
-          const [file] = event.target.files ?? [];
-          // Empty again, so the same file can be chosen once more.
-          event.target.value = "";
-          if (file !== undefined) {
+      </h2>
+      <div
+        className={
+          dragging
+            ? "group bg-muted/30 has-focus-visible:ring-ring/50 border-foreground/40 relative grid min-w-0 rounded-2xl border border-dashed has-focus-visible:ring-3"
+            : "group bg-card hover:bg-muted/50 has-focus-visible:ring-ring/50 relative grid min-w-0 rounded-2xl border border-dashed has-focus-visible:ring-3"
+        }
+        onDragEnter={(event) => {
+          event.preventDefault();
+          setDragging(true);
+        }}
+        onDragLeave={(event) => {
+          const into = event.relatedTarget;
+          if (!(into instanceof Node && event.currentTarget.contains(into))) {
+            setDragging(false);
+          }
+        }}
+        onDragOver={(event) => {
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "copy";
+        }}
+        onDrop={(event) => {
+          event.preventDefault();
+          setDragging(false);
+          for (const file of event.dataTransfer.files) {
             void upload(file);
           }
         }}
-        type="file"
-      />
+      >
+        <label
+          className="flex w-full cursor-pointer flex-col items-stretch justify-center rounded-2xl px-5 pt-5.5 pb-6.5 text-center text-sm"
+          htmlFor={inputId}
+        >
+          <Sheets dragging={dragging} />
+          <span className="font-medium">
+            {dragging ? t`Let go to add them` : t`Drop files here`}
+          </span>
+          <span className="text-muted-foreground mt-1">
+            {t`or choose them from your computer`}
+          </span>
+          <span className="text-muted-foreground pt-1.5 text-xs">
+            <Trans>Upload a PDF, Word or Excel file</Trans>
+          </span>
+        </label>
+        <input
+          accept={accept}
+          className="sr-only"
+          disabled={busy}
+          id={inputId}
+          multiple
+          onChange={(event) => {
+            const files = [...(event.target.files ?? [])];
+            // Empty again, so the same file can be chosen once more.
+            event.target.value = "";
+            for (const file of files) {
+              void upload(file);
+            }
+          }}
+          type="file"
+        />
+      </div>
       <ErrorText>{failure}</ErrorText>
       {followed.length === 0 ? null : (
         <ul className="flex flex-col gap-2">
