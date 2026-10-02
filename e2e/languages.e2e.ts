@@ -41,6 +41,8 @@ test("signing in speaks the browser's language", async ({ browser }) => {
   const context = await browser.newContext({ locale: "fr-FR" });
   const page = await context.newPage();
   await page.goto("/sign-in");
-  await expect(page.getByText("Connectez-vous pour continuer.")).toBeVisible();
+  await expect(
+    page.getByText("Utilisez le compte de votre organisation pour continuer.")
+  ).toBeVisible();
   await context.close();
 });

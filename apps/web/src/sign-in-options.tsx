@@ -19,16 +19,19 @@ export const SignInOptions = ({
   error: string | undefined;
   returnTo?: string;
 }) => (
-  <div className="flex flex-col items-center gap-2">
+  <div className="flex w-full flex-col items-center gap-2">
     <ErrorText>
       {error === undefined ? undefined : signInErrorMessage(error)}
     </ErrorText>
-    {options.map(({ providerId, label }) => (
+    {options.map(({ providerId, label }, index) => (
       <Button
+        className="w-full"
         key={providerId}
         onClick={() => {
           void signIn(providerId, returnTo);
         }}
+        size="xl"
+        variant={index === 0 ? "default" : "outline"}
       >
         <Trans>Sign in with {label}</Trans>
       </Button>

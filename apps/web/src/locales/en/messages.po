@@ -981,6 +981,10 @@ msgstr "Knowledge"
 msgid "Language"
 msgstr "Language"
 
+#: src/language-picker.tsx
+msgid "Language: {name}"
+msgstr "Language: {name}"
+
 #: src/routes/_shell.notifications.tsx
 msgid "Last on {date}"
 msgstr "Last on {date}"
@@ -1725,8 +1729,8 @@ msgid "Sign in to answer"
 msgstr "Sign in to answer"
 
 #: src/routes/sign-in.tsx
-msgid "Sign in to go on."
-msgstr "Sign in to go on."
+msgid "Sign in to Grasp"
+msgstr "Sign in to Grasp"
 
 #: src/sign-in-options.tsx
 msgid "Sign in with {label}"
@@ -2072,6 +2076,10 @@ msgstr "Upload"
 #: src/knowledge/uploads.tsx
 msgid "Upload a PDF, Word or Excel file"
 msgstr "Upload a PDF, Word or Excel file"
+
+#: src/routes/sign-in.tsx
+msgid "Use your organization’s account to go on."
+msgstr "Use your organization’s account to go on."
 
 #: src/knowledge/document.tsx
 msgid "Used by"

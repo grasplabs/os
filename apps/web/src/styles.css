@@ -40,3 +40,20 @@
     --header-height: calc(var(--spacing) * 12);
   }
 }
+
+/*
+ * The dot figures (buddy/grasp-buddy.tsx): ink dots, and warmth where there
+ * is activity, the one place with hues besides status.
+ */
+:root {
+  --brain-ink: var(--foreground);
+  --brain-heat: oklch(0.63 0.2 35);
+  --brain-glow: oklch(0.86 0.13 82);
+}
+
+@media screen {
+  .dark {
+    --brain-heat: oklch(0.68 0.19 38);
+    --brain-glow: oklch(0.88 0.12 85);
+  }
+}

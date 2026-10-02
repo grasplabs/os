@@ -981,6 +981,10 @@ msgstr "Kennis"
 msgid "Language"
 msgstr "Taal"
 
+#: src/language-picker.tsx
+msgid "Language: {name}"
+msgstr "Taal: {name}"
+
 #: src/routes/_shell.notifications.tsx
 msgid "Last on {date}"
 msgstr "Laatst op {date}"
@@ -1725,8 +1729,8 @@ msgid "Sign in to answer"
 msgstr "Log in om te antwoorden"
 
 #: src/routes/sign-in.tsx
-msgid "Sign in to go on."
-msgstr "Log in om verder te gaan."
+msgid "Sign in to Grasp"
+msgstr "Inloggen bij Grasp"
 
 #: src/sign-in-options.tsx
 msgid "Sign in with {label}"
@@ -2072,6 +2076,10 @@ msgstr "Uploaden"
 #: src/knowledge/uploads.tsx
 msgid "Upload a PDF, Word or Excel file"
 msgstr "Upload een PDF-, Word- of Excelbestand"
+
+#: src/routes/sign-in.tsx
+msgid "Use your organization’s account to go on."
+msgstr "Gebruik het account van je organisatie om verder te gaan."
 
 #: src/knowledge/document.tsx
 msgid "Used by"

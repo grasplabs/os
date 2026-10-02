@@ -20,7 +20,9 @@ test("loads the frontend from core, reaches core over RPC, and asks whoever isn'
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Grasp" })).toBeVisible();
   // Only once core answered: without an answer, the page says so instead.
-  await expect(page.getByText("Sign in to go on.")).toBeVisible();
+  await expect(
+    page.getByText("Use your organization’s account to go on.")
+  ).toBeVisible();
   await expect(page.getByRole("alert")).toHaveCount(0);
   expect(new URL(page.url()).searchParams.get("returnTo")).toBe("/");
 });
@@ -152,7 +154,9 @@ test("shows the members page only to someone signed in, and never signs them out
   page,
 }) => {
   await page.goto("/members");
-  await expect(page.getByText("Sign in to go on.")).toBeVisible();
+  await expect(
+    page.getByText("Use your organization’s account to go on.")
+  ).toBeVisible();
   expect(new URL(page.url()).pathname).toBe("/sign-in");
   expect(new URL(page.url()).searchParams.get("returnTo")).toBe("/members");
   await expect(page.getByRole("heading", { name: "Members" })).toHaveCount(0);
@@ -190,7 +194,9 @@ test("shows the members page only to someone signed in, and never signs them out
     page.getByText("Grasp can't be reached right now. Try again in a moment.")
   ).toBeVisible({ timeout: reconnectMs });
   expect(new URL(page.url()).pathname).toBe("/members");
-  await expect(page.getByText("Sign in to go on.")).toHaveCount(0);
+  await expect(
+    page.getByText("Use your organization’s account to go on.")
+  ).toHaveCount(0);
 
   // Trying again shows it's trying, then says so again while core fails.
   const unreachable = page.getByRole("alert");
@@ -273,7 +279,9 @@ test("sends someone whose session ended elsewhere to sign in, and back to the pa
   // while they were signed in, is refused at the next page they open.
   await endSession(member);
   await nav.getByRole("link", { name: "Apps" }).click();
-  await expect(page.getByText("Sign in to go on.")).toBeVisible({
+  await expect(
+    page.getByText("Use your organization’s account to go on.")
+  ).toBeVisible({
     timeout: reconnectMs,
   });
   expect(new URL(page.url()).pathname).toBe("/sign-in");

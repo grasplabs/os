@@ -981,6 +981,10 @@ msgstr "Connaissances"
 msgid "Language"
 msgstr "Langue"
 
+#: src/language-picker.tsx
+msgid "Language: {name}"
+msgstr "Langue : {name}"
+
 #: src/routes/_shell.notifications.tsx
 msgid "Last on {date}"
 msgstr "Dernière fois le {date}"
@@ -1725,8 +1729,8 @@ msgid "Sign in to answer"
 msgstr "Connectez-vous pour répondre"
 
 #: src/routes/sign-in.tsx
-msgid "Sign in to go on."
-msgstr "Connectez-vous pour continuer."
+msgid "Sign in to Grasp"
+msgstr "Se connecter à Grasp"
 
 #: src/sign-in-options.tsx
 msgid "Sign in with {label}"
@@ -2072,6 +2076,10 @@ msgstr "Importer"
 #: src/knowledge/uploads.tsx
 msgid "Upload a PDF, Word or Excel file"
 msgstr "Importez un fichier PDF, Word ou Excel"
+
+#: src/routes/sign-in.tsx
+msgid "Use your organization’s account to go on."
+msgstr "Utilisez le compte de votre organisation pour continuer."
 
 #: src/knowledge/document.tsx
 msgid "Used by"
