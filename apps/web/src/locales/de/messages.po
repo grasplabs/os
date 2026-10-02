@@ -95,6 +95,14 @@ msgstr "{connection}, {resource}"
 msgid "{connection}, {resource} ({tool})"
 msgstr "{connection}, {resource} ({tool})"
 
+#: src/chat/held-writes.tsx
+msgid "{count, plural, one {# change waits for you to confirm or reject it.} other {# changes wait for you to confirm or reject them.}}"
+msgstr "{count, plural, one {# Änderung wartet darauf, dass Sie sie bestätigen oder ablehnen.} other {# Änderungen warten darauf, dass Sie sie bestätigen oder ablehnen.}}"
+
+#: src/chat/sources.tsx
+msgid "{count, plural, one {Answers draw on # source} other {Answers draw on # sources}}"
+msgstr "{count, plural, one {Antworten stützen sich auf # Quelle} other {Antworten stützen sich auf # Quellen}}"
+
 #: src/chat/builds-state.ts
 msgid "{count, plural, one {once} other {# times}}"
 msgstr "{count, plural, one {einmal} other {#-mal}}"
@@ -322,10 +330,6 @@ msgstr "Eine andere App führt hier bereits Datensätze vom Typ {type}: die dies
 msgid "Another version of this App was made current since this list was read. The list now shows it: review that version, then approve again."
 msgstr "Seit diese Liste geladen wurde, ist eine andere Version dieser App aktuell geworden. Die Liste zeigt sie jetzt: Prüfen Sie diese Version und genehmigen Sie dann erneut."
 
-#: src/routes/_shell.index.tsx
-msgid "Answers may hold data from: {from}"
-msgstr "Antworten können Daten enthalten aus: {from}"
-
 #: src/activity/audit-log.tsx
 msgid "Any type"
 msgstr "Jeder Typ"
@@ -376,6 +380,18 @@ msgstr "Apps und Agenten mit einer Berechtigung"
 #: src/activity/pending.tsx
 msgid "as {binding}"
 msgstr "als {binding}"
+
+#: src/chat/thread.tsx
+msgid "Ask again"
+msgstr "Erneut fragen"
+
+#: src/chat/composer.tsx
+msgid "Ask anything, or describe a process"
+msgstr "Etwas fragen oder einen Prozess beschreiben"
+
+#: src/chat/side-panel.tsx
+msgid "Ask Grasp to build one. While it works, the App shows here to preview before it is proposed."
+msgstr "Bitten Sie Grasp, eine zu erstellen. Während es daran arbeitet, erscheint die App hier zur Vorschau, bevor sie vorgeschlagen wird."
 
 #: src/routes/_shell.notifications.tsx
 msgid "Ask the agent to fix"
@@ -507,17 +523,20 @@ msgstr "Chats"
 msgid "Clear"
 msgstr "Zurücksetzen"
 
-#: src/frame/page-sidebar.tsx
 #: src/routes/_shell.index.tsx
 msgid "Close"
 msgstr "Schließen"
+
+#: src/chat/thread.tsx
+msgid "Code"
+msgstr "Code"
 
 #. placeholder {0}: formatList(workflow.shared)
 #: src/chat/builds.tsx
 msgid "Code it may use changed: {0}"
 msgstr "Code, den er nutzen kann, wurde geändert: {0}"
 
-#: src/chat/conversation.tsx
+#: src/chat/thread.tsx
 msgid "Code step"
 msgstr "Code-Schritt"
 
@@ -635,6 +654,14 @@ msgstr "Zustimmen und verbinden"
 msgid "Contents unavailable"
 msgstr "Inhalt nicht verfügbar"
 
+#: src/chat/thread.tsx
+msgid "Copied"
+msgstr "Kopiert"
+
+#: src/chat/thread.tsx
+msgid "Copy the answer"
+msgstr "Antwort kopieren"
+
 #: src/activity/pending.tsx
 msgid "couldn't be read"
 msgstr "konnte nicht gelesen werden"
@@ -670,17 +697,13 @@ msgstr "Entscheidung"
 msgid "Default: {fallback}"
 msgstr "Standard: {fallback}"
 
-#: src/routes/_shell.index.tsx
+#: src/chat/chat-list.tsx
 msgid "Delete"
 msgstr "Löschen"
 
-#: src/routes/_shell.index.tsx
+#: src/chat/chat-list.tsx
 msgid "Delete “{title}”?"
 msgstr "„{title}“ löschen?"
-
-#: src/routes/_shell.index.tsx
-msgid "Describe what you want"
-msgstr "Beschreiben Sie, was Sie möchten"
 
 #: src/routes/_shell.index.tsx
 msgid "Describe what you want. The agent answers from what it can read, and holds every change to an outside system until you confirm it."
@@ -718,7 +741,7 @@ msgstr "{label} trennen?"
 msgid "Disconnected"
 msgstr "Getrennt"
 
-#: src/chat/conversation.tsx
+#: src/chat/thread.tsx
 #: src/routes/_shell.workflows.index.tsx
 msgid "Done"
 msgstr "Fertig"
@@ -734,6 +757,11 @@ msgstr "Jede Person"
 #: src/routes/_shell.models.tsx
 msgid "Each workflow"
 msgstr "Jeder Workflow"
+
+#: src/chat/chat-list.tsx
+msgctxt "older chats"
+msgid "Earlier"
+msgstr "Früher"
 
 #: src/knowledge/document.tsx
 msgid "Edit"
@@ -763,6 +791,10 @@ msgstr "Geben Sie eine Zahl ein."
 msgid "Enter an amount, such as 12.50."
 msgstr "Geben Sie einen Betrag ein, zum Beispiel 12.50."
 
+#: src/chat/thread.tsx
+msgid "Error"
+msgstr "Fehler"
+
 #: src/routes/_shell.models.tsx
 msgid "EU routing"
 msgstr "EU-Routing"
@@ -778,6 +810,10 @@ msgstr "Jeder Aufruf bleibt in der EU: ja."
 #: src/knowledge/collection-markers.tsx
 msgid "Everyone"
 msgstr "Alle"
+
+#: src/chat/chat-list.tsx
+msgid "Expand the chats"
+msgstr "Chats ausklappen"
 
 #: src/activity/audit-log.tsx
 msgid "Export CSV"
@@ -799,7 +835,7 @@ msgstr "Exporte von {app}: {covered}"
 msgid "Extracting"
 msgstr "Wird ausgelesen"
 
-#: src/chat/conversation.tsx
+#: src/chat/thread.tsx
 #: src/knowledge/uploads.tsx
 #: src/routes/_shell.workflows.index.tsx
 #: src/workflows/runs.tsx
@@ -827,9 +863,9 @@ msgstr "Filter"
 msgid "Finish"
 msgstr "Beenden"
 
-#: src/frame/page-sidebar.tsx
-msgid "Fold the sidebar"
-msgstr "Seitenleiste einklappen"
+#: src/chat/chat-list.tsx
+msgid "Fold the chats"
+msgstr "Chats einklappen"
 
 #: src/activity/pending.tsx
 msgid "For"
@@ -848,6 +884,10 @@ msgstr "Aus"
 #: src/routes/sign-in.tsx
 msgid "Grasp can't be reached right now. Try again in a moment."
 msgstr "Grasp ist gerade nicht erreichbar. Versuchen Sie es gleich noch einmal."
+
+#: src/routes/_shell.index.tsx
+msgid "Grasp holds every change to an outside system until you confirm it."
+msgstr "Grasp hält jede Änderung an einem externen System zurück, bis Sie sie bestätigen."
 
 #: src/routes/_shell.models.tsx
 msgid "Grasp sets these for your organization, as agreed with you. To change them, contact Grasp."
@@ -951,7 +991,7 @@ msgstr "Ihr Zugriff ist abgelaufen. Das Grasp-Team kann sie nicht neu verbinden:
 msgid "Its access ran out. Reconnect it with the same account: Apps and agents keep their permissions for it."
 msgstr "Ihr Zugriff ist abgelaufen. Verbinden Sie sie mit demselben Konto neu: Apps und Agenten behalten ihre Berechtigungen dafür."
 
-#: src/routes/_shell.index.tsx
+#: src/chat/chat-list.tsx
 msgid "Its messages are deleted for good, and every change its agent holds for you is rejected. What the agent did stays in the audit log."
 msgstr "Seine Nachrichten werden endgültig gelöscht, und jede Änderung, die sein Agent für Sie zurückhält, wird abgelehnt. Was der Agent getan hat, bleibt im Prüfprotokoll."
 
@@ -971,6 +1011,10 @@ msgstr "Seine Schritte lassen sich nicht aus seinem Code lesen, er kann also all
 msgid "Its tokens are deleted, every App and agent loses it, and actions waiting on it are dropped. Connect it again to use it again."
 msgstr "Ihre Tokens werden gelöscht, jede App und jeder Agent verliert sie, und Aktionen, die auf sie warten, werden verworfen. Verbinden Sie sie erneut, um sie wieder zu nutzen."
 
+#: src/chat/thread.tsx
+msgid "Jump to the newest message"
+msgstr "Zur neuesten Nachricht springen"
+
 #: src/frame/app-sidebar.tsx
 #: src/routes/_shell.knowledge.$collection.tsx
 #: src/routes/_shell.knowledge.index.tsx
@@ -984,6 +1028,11 @@ msgstr "Sprache"
 #: src/language-picker.tsx
 msgid "Language: {name}"
 msgstr "Sprache: {name}"
+
+#: src/chat/chat-list.tsx
+msgctxt "chats from the past week"
+msgid "Last 7 days"
+msgstr "Letzte 7 Tage"
 
 #: src/routes/_shell.notifications.tsx
 msgid "Last on {date}"
@@ -1055,12 +1104,11 @@ msgstr "Mitglieder"
 msgid "Memory"
 msgstr "Gedächtnis"
 
-#: src/chat/conversation.tsx
+#: src/chat/thread.tsx
 #: src/routes/guest.tsx
 msgid "Messages"
 msgstr "Nachrichten"
 
-#: src/routes/_shell.index.tsx
 #: src/routes/_shell.models.tsx
 msgid "Model"
 msgstr "Modell"
@@ -1068,6 +1116,10 @@ msgstr "Modell"
 #: src/activity/audit-log.tsx
 msgid "Model call"
 msgstr "Modellaufruf"
+
+#: src/chat/composer.tsx
+msgid "Model: {name}. Change model"
+msgstr "Modell: {name}. Modell ändern"
 
 #: src/frame/person-menu.tsx
 #: src/routes/_shell.models.tsx
@@ -1077,6 +1129,14 @@ msgstr "Modelle"
 #: src/routes/_shell.models.tsx
 msgid "Models aren't set up for this deployment yet, so no model call can be made. Grasp sets them up."
 msgstr "Für diese Instanz sind noch keine Modelle eingerichtet, daher ist kein Modellaufruf möglich. Grasp richtet sie ein."
+
+#: src/chat/composer.tsx
+msgid "Models for your organization"
+msgstr "Modelle für Ihre Organisation"
+
+#: src/chat/chat-list.tsx
+msgid "More for {title}"
+msgstr "Mehr zu {title}"
 
 #: src/chat/held-writes.tsx
 msgid "More will be sent than is shown above. Read exactly what will be sent before you confirm."
@@ -1107,6 +1167,7 @@ msgstr "Nie"
 msgid "New"
 msgstr "Neu"
 
+#: src/chat/chat-list.tsx
 #: src/routes/_shell.index.tsx
 msgid "New chat"
 msgstr "Neuer Chat"
@@ -1116,8 +1177,8 @@ msgid "No App you can open has a workflow yet."
 msgstr "Keine App, die Sie öffnen können, hat bisher einen Workflow."
 
 #: src/chat/side-panel.tsx
-msgid "No Apps yet."
-msgstr "Noch keine Apps."
+msgid "No Apps yet"
+msgstr "Noch keine Apps"
 
 #: src/routes/_shell.models.tsx
 msgid "No budget is set: model calls aren't limited by cost."
@@ -1147,7 +1208,7 @@ msgstr "Läuft nicht mehr {how}"
 msgid "No memory files are written yet."
 msgstr "Es wurden noch keine Gedächtnisdateien geschrieben."
 
-#: src/routes/_shell.index.tsx
+#: src/chat/composer.tsx
 msgid "No model is set up for this deployment yet."
 msgstr "Für diese Instanz ist noch kein Modell eingerichtet."
 
@@ -1317,10 +1378,6 @@ msgstr "Als ganze Seite öffnen"
 msgid "Open the chat"
 msgstr "Chat öffnen"
 
-#: src/frame/page-sidebar.tsx
-msgid "Open the sidebar"
-msgstr "Seitenleiste öffnen"
-
 #: src/routes/guest.tsx
 msgid "Opening the chat…"
 msgstr "Chat wird geöffnet…"
@@ -1438,6 +1495,10 @@ msgstr "Nur lesen"
 msgid "Read-only is ticked where Composio says a tool only reads; Grasp doesn't check that. A read-only tool runs without asking. A call of any other tool from chat, or from a person using an App, waits for that person to confirm it; a workflow's run makes it as one of its steps. Mark a tool read-only only if it changes nothing: marked wrongly, it changes things without asking."
 msgstr "„Nur lesen“ ist angehakt, wo Composio angibt, dass ein Werkzeug nur liest; Grasp prüft das nicht. Ein Werkzeug, das nur liest, läuft ohne Nachfrage. Ein Aufruf jedes anderen Werkzeugs aus einem Chat oder durch eine Person, die eine App nutzt, wartet auf deren Bestätigung; ein Workflow-Lauf führt ihn als einen seiner Schritte aus. Markieren Sie ein Werkzeug nur als „Nur lesen“, wenn es nichts ändert: Falsch markiert, ändert es Dinge ohne Nachfrage."
 
+#: src/chat/thread.tsx
+msgid "Reading the workspace"
+msgstr "Workspace wird gelesen"
+
 #: src/chat/builds-state.ts
 msgid "reads the App's data"
 msgstr "liest die Daten der App"
@@ -1445,6 +1506,11 @@ msgstr "liest die Daten der App"
 #: src/knowledge/uploads.tsx
 msgid "Ready"
 msgstr "Bereit"
+
+#: src/chat/chat-list.tsx
+#: src/routes/_shell.index.tsx
+msgid "Recent chats"
+msgstr "Letzte Chats"
 
 #: src/connections/connection-list.tsx
 msgid "Reconnect"
@@ -1467,6 +1533,10 @@ msgstr "{what} ablehnen"
 #: src/activity/pending.tsx
 msgid "Reject {who}"
 msgstr "{who} ablehnen"
+
+#: src/chat/held-writes.tsx
+msgid "Reject all"
+msgstr "Alle ablehnen"
 
 #: src/activity/pending.tsx
 msgid "Reject this request?"
@@ -1516,11 +1586,11 @@ msgstr "Workflow entfernt:"
 msgid "Removed: it acts for whoever uses the App, with everything the App holds"
 msgstr "Entfernt: Er handelte für jeden, der die App nutzt, mit allem, was die App hat"
 
-#: src/routes/_shell.index.tsx
+#: src/chat/chat-list.tsx
 msgid "Rename"
 msgstr "Umbenennen"
 
-#: src/routes/_shell.index.tsx
+#: src/chat/chat-list.tsx
 msgid "Rename this chat"
 msgstr "Diesen Chat umbenennen"
 
@@ -1549,9 +1619,13 @@ msgstr "Version {number} wiederherstellen"
 msgid "Restored version {restoredFrom}"
 msgstr "Version {restoredFrom} wiederhergestellt"
 
-#: src/routes/_shell.index.tsx
+#: src/chat/sources.tsx
 msgid "Restricted"
 msgstr "Eingeschränkt"
+
+#: src/chat/thread.tsx
+msgid "Result"
+msgstr "Ergebnis"
 
 #: src/routes/_shell.knowledge.index.tsx
 msgid "Results"
@@ -1582,7 +1656,7 @@ msgstr "Rolle von {who}"
 msgid "Rules"
 msgstr "Regeln"
 
-#: src/chat/conversation.tsx
+#: src/chat/thread.tsx
 #: src/routes/_shell.workflows.index.tsx
 #: src/workflows/runs.tsx
 msgid "Running"
@@ -1610,8 +1684,8 @@ msgstr "Läuft jetzt"
 msgid "Runs the workflow's own test cases with the values set now. Nothing is changed: what it would change is listed instead."
 msgstr "Führt die eigenen Testfälle des Workflows mit den aktuell gesetzten Werten aus. Es wird nichts geändert: Was er ändern würde, wird stattdessen aufgelistet."
 
+#: src/chat/chat-list.tsx
 #: src/knowledge/document.tsx
-#: src/routes/_shell.index.tsx
 #: src/routes/_shell.workflows.$app.$workflow.tsx
 msgid "Save"
 msgstr "Speichern"
@@ -1650,8 +1724,12 @@ msgstr "Wissen durchsuchen"
 msgid "See it in the log"
 msgstr "Im Protokoll ansehen"
 
-#: src/routes/_shell.index.tsx
 #: src/routes/guest.tsx
+msgid "Send"
+msgstr "Senden"
+
+#: src/chat/composer.tsx
+msgctxt "send the question"
 msgid "Send"
 msgstr "Senden"
 
@@ -1816,15 +1894,16 @@ msgstr "Schritte"
 msgid "Still being read. It shows in the file list once it's ready."
 msgstr "Wird noch gelesen. Sie erscheint in der Dateiliste, sobald sie fertig ist."
 
-#: src/routes/_shell.index.tsx
+#: src/chat/composer.tsx
+msgctxt "stop the answer"
 msgid "Stop"
 msgstr "Stoppen"
 
-#: src/chat/conversation.tsx
+#: src/chat/thread.tsx
 msgid "Stopped"
 msgstr "Gestoppt"
 
-#: src/chat/conversation.tsx
+#: src/chat/thread.tsx
 msgid "Stopped."
 msgstr "Gestoppt."
 
@@ -1900,15 +1979,19 @@ msgstr "Die {top} mit den höchsten Ausgaben; weitere haben weniger ausgegeben."
 msgid "The agent wasn't asked: {reason}"
 msgstr "Der Agent wurde nicht gefragt: {reason}"
 
-#: src/chat/conversation.tsx
+#: src/chat/thread.tsx
 msgid "The answer was cut off at the model's limit."
 msgstr "Die Antwort wurde am Limit des Modells abgeschnitten."
+
+#: src/chat/composer.tsx
+msgid "The default, {each}"
+msgstr "Standard, {each}"
 
 #: src/routes/guest.tsx
 msgid "The link works until {until}."
 msgstr "Der Link funktioniert bis {until}."
 
-#: src/chat/conversation.tsx
+#: src/chat/thread.tsx
 msgid "The model call failed."
 msgstr "Der Modellaufruf ist fehlgeschlagen."
 
@@ -2021,13 +2104,18 @@ msgstr "Diese Ansicht lässt sich nicht erstellen. Bitten Sie einen Builder, sie
 msgid "Time"
 msgstr "Uhrzeit"
 
-#: src/routes/_shell.index.tsx
+#: src/chat/chat-list.tsx
 msgid "Title"
 msgstr "Titel"
 
 #: src/activity/audit-log.tsx
 msgid "To"
 msgstr "Bis"
+
+#: src/chat/chat-list.tsx
+msgctxt "chats from today"
+msgid "Today"
+msgstr "Heute"
 
 #. placeholder {0}: connection.tools.join(", ")
 #: src/connections/connection-list.tsx
@@ -2042,6 +2130,7 @@ msgstr "Erlaubte Werkzeuge: keine erfasst"
 msgid "Tools to allow"
 msgstr "Zu erlaubende Werkzeuge"
 
+#: src/chat/thread.tsx
 #: src/route-error.tsx
 #: src/routes/_shell.tsx
 #: src/screens/screen-frame.tsx
@@ -2157,6 +2246,10 @@ msgstr "Was ihn von selbst laufen lässt, lässt sich nicht aus seinem Code lese
 msgid "What other Apps may call"
 msgstr "Was andere Apps aufrufen dürfen"
 
+#: src/routes/_shell.index.tsx
+msgid "What should we look at today?"
+msgstr "Was sollen wir uns heute ansehen?"
+
 #: src/chat/builds.tsx
 msgid "What the App holds"
 msgstr "Was die App hat"
@@ -2208,10 +2301,6 @@ msgstr "Workflows und mehr"
 msgid "Workflows whose AI steps stay in the EU: {workflows}."
 msgstr "Workflows, deren KI-Schritte in der EU bleiben: {workflows}."
 
-#: src/routes/_shell.index.tsx
-msgid "Working…"
-msgstr "Arbeitet…"
-
 #: src/activity/pending.tsx
 msgid "Would keep {claimed} records here"
 msgstr "Würde hier Datensätze vom Typ {claimed} führen"
@@ -2220,13 +2309,18 @@ msgstr "Würde hier Datensätze vom Typ {claimed} führen"
 msgid "Would run after approval"
 msgstr "Würde nach der Genehmigung laufen"
 
-#: src/chat/conversation.tsx
+#: src/chat/thread.tsx
 msgid "Writing"
 msgstr "Schreibt"
 
 #: src/activity/audit-log.tsx
 msgid "Yes: its hash matches, and it links to the event before it."
 msgstr "Ja: Sein Hash stimmt, und es ist mit dem vorherigen Ereignis verknüpft."
+
+#: src/chat/chat-list.tsx
+msgctxt "when a chat was started"
+msgid "Yesterday"
+msgstr "Gestern"
 
 #: src/connections/connection-list.tsx
 #: src/knowledge/document.tsx
@@ -2255,6 +2349,10 @@ msgstr "Sie haben noch kein eigenes Konto verbunden."
 msgid "You:"
 msgstr "Sie:"
 
+#: src/chat/chat-list.tsx
+msgid "Your chats show up here."
+msgstr "Ihre Chats erscheinen hier."
+
 #: src/routes/guest.tsx
 msgid "Your message"
 msgstr "Ihre Nachricht"
@@ -2263,7 +2361,7 @@ msgstr "Ihre Nachricht"
 msgid "Your organization has no shared connections yet."
 msgstr "Ihre Organisation hat noch keine geteilten Verbindungen."
 
-#: src/routes/_shell.index.tsx
+#: src/chat/composer.tsx
 msgid "Your question"
 msgstr "Ihre Frage"
 

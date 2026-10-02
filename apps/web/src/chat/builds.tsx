@@ -15,6 +15,7 @@ import {
 import { i18n } from "@lingui/core";
 import { msg } from "@lingui/core/macro";
 import { Plural, Trans, useLingui } from "@lingui/react/macro";
+import { EyeIcon, HammerIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import type { CoreConnection } from "../core-connection.ts";
@@ -743,46 +744,56 @@ export const ChatBuilds = ({
     builds.data.drafts.find(({ app }) => app === previewing) ??
     builds.data.drafts[0];
   return (
-    <section aria-label={t`Being built`} className="flex flex-col gap-2">
-      <h3 className="text-sm font-medium">
+    <section aria-label={t`Being built`} className="flex flex-col gap-3">
+      <h3 className="flex items-center gap-2 text-sm font-medium">
+        <HammerIcon
+          aria-hidden="true"
+          className="text-muted-foreground size-4"
+        />
         <Trans>Being built</Trans>
       </h3>
       {builds.data.drafts.map((draft) => {
         const app = names.get(draft.app) ?? draft.app;
         return (
           <div
-            className="flex items-center justify-between gap-2"
+            className="bg-card flex flex-col gap-3 rounded-xl border p-4 text-sm"
             key={draft.app}
           >
-            <p className="text-sm">
-              <Plural
-                value={draft.changed.length}
-                one={`${app}: # file changed in this chat, not proposed yet`}
-                other={`${app}: # files changed in this chat, not proposed yet`}
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex min-w-0 flex-col gap-0.5">
+                <span className="truncate font-medium">{app}</span>
+                <span className="text-muted-foreground">
+                  <Plural
+                    value={draft.changed.length}
+                    one={`${app}: # file changed in this chat, not proposed yet`}
+                    other={`${app}: # files changed in this chat, not proposed yet`}
+                  />
+                </span>
+              </div>
+              {draft === previewed ? null : (
+                <Button
+                  onClick={() => {
+                    setPreviewing(draft.app);
+                  }}
+                  size="sm"
+                  variant="outline"
+                >
+                  <EyeIcon data-icon="inline-start" />
+                  <Trans>Preview</Trans>
+                </Button>
+              )}
+            </div>
+            {draft === previewed ? (
+              <DraftPreview
+                chatId={chatId}
+                draft={previewed}
+                key={previewed.app}
+                name={app}
               />
-            </p>
-            {draft === previewed ? null : (
-              <Button
-                onClick={() => {
-                  setPreviewing(draft.app);
-                }}
-                size="sm"
-                variant="outline"
-              >
-                <Trans>Preview</Trans>
-              </Button>
-            )}
+            ) : null}
           </div>
         );
       })}
-      {previewed === undefined ? null : (
-        <DraftPreview
-          chatId={chatId}
-          draft={previewed}
-          key={previewed.app}
-          name={names.get(previewed.app) ?? previewed.app}
-        />
-      )}
       {pending.map((app) => (
         <PendingVersion
           app={app}

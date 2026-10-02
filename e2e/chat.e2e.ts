@@ -111,10 +111,12 @@ test("a person asks in a new chat, follows the answer, renames it, and reads and
     "The model call failed.",
     { timeout: 30_000 }
   );
-  const chats = page.getByRole("navigation", { name: "Chats" });
+  const chats = page.getByRole("navigation", { name: "Recent chats" });
   await expect(chats.getByRole("link", { name: question })).toBeVisible();
 
-  await page.getByRole("button", { name: "Rename" }).click();
+  // Renamed from the chat's menu in the list.
+  await chats.getByRole("button", { name: `More for ${question}` }).click();
+  await page.getByRole("menuitem", { name: "Rename" }).click();
   await page.getByLabel("Title").fill(title);
   await page.getByRole("button", { name: "Save" }).click();
   await expect(page.getByRole("heading", { level: 1 })).toHaveText(title);
@@ -242,7 +244,7 @@ test("a followed chat says core can't be reached when it stays out of reach", as
   );
   await expect(
     page
-      .getByRole("navigation", { name: "Chats" })
+      .getByRole("navigation", { name: "Recent chats" })
       .getByRole("link", { name: `Out of reach ${tag}.` })
   ).toBeVisible();
 
