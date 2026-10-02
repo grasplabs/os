@@ -93,26 +93,25 @@ test("a page sidebar folds from the keyboard and stays folded over a reload", as
   page,
 }) => {
   await page.goto("/kit");
-  const documents = page.getByRole("navigation", { name: "Documents" });
+  const documents = page.getByRole("complementary", { name: "Documents" });
   await expect(
     documents.getByRole("button", { name: "Pricing" })
   ).toContainText("Pricing");
 
-  await documents.getByRole("button", { name: "Fold the sidebar" }).focus();
+  await documents.getByRole("button", { name: "Fold the documents" }).focus();
   await page.keyboard.press("Enter");
   // Folded, each entry is its icon, named by its tooltip.
-  await expect(
-    documents.getByRole("button", { name: "Open the sidebar" })
-  ).toBeVisible();
+  const expand = documents.getByRole("button", {
+    name: "Expand the documents",
+  });
+  await expect(expand).toBeVisible();
   await expect(documents.getByRole("button", { name: "Pricing" })).toHaveText(
     ""
   );
 
   await page.reload();
-  await expect(
-    documents.getByRole("button", { name: "Open the sidebar" })
-  ).toBeVisible();
-  await documents.getByRole("button", { name: "Open the sidebar" }).click();
+  await expect(expand).toBeVisible();
+  await expand.click();
   await expect(
     documents.getByRole("button", { name: "Pricing" })
   ).toContainText("Pricing");

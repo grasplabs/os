@@ -11,6 +11,7 @@ import { SidebarTrigger } from "@grasp-os/ui/components/sidebar";
 import { useLingui } from "@lingui/react/macro";
 import { Link } from "@tanstack/react-router";
 import { Fragment } from "react";
+import type { ReactNode } from "react";
 
 /** A step on the way to the page; the last one is the page itself. */
 export type Crumb =
@@ -39,10 +40,17 @@ const CrumbLink = ({ crumb }: { crumb: Crumb }) => {
 
 /**
  * The bar above every signed-in page: the sidebar's trigger, then where the
- * page is. It stays in view while the page scrolls. On one line whatever
- * the window: on a narrow one only the step before the page is kept.
+ * page is, and on the right any page action. It stays in view while the
+ * page scrolls. On one line whatever the window: on a narrow one only the
+ * step before the page is kept.
  */
-export const SiteHeader = ({ crumbs }: { crumbs: readonly Crumb[] }) => {
+export const SiteHeader = ({
+  crumbs,
+  actions,
+}: {
+  crumbs: readonly Crumb[];
+  actions?: ReactNode;
+}) => {
   const { t } = useLingui();
   const last = crumbs.length - 1;
   return (
@@ -56,28 +64,35 @@ export const SiteHeader = ({ crumbs }: { crumbs: readonly Crumb[] }) => {
         className="-ml-px h-4 data-vertical:self-auto"
         orientation="vertical"
       />
-      <Breadcrumb aria-label={t`Breadcrumb`} className="mx-4 min-w-0">
-        <BreadcrumbList className="flex-nowrap">
-          {crumbs.map((crumb, index) => (
-            <Fragment key={`${index}:${crumb.label}`}>
-              {index > 0 ? (
-                <BreadcrumbSeparator
-                  className={index < last ? "max-md:hidden" : undefined}
-                />
-              ) : null}
-              <BreadcrumbItem
-                className={
-                  index === last
-                    ? "min-w-8"
-                    : `flex-none ${index < last - 1 ? "max-md:hidden" : ""}`
-                }
-              >
-                <CrumbLink crumb={crumb} />
-              </BreadcrumbItem>
-            </Fragment>
-          ))}
-        </BreadcrumbList>
-      </Breadcrumb>
+      <div className="flex min-w-0 flex-1 items-center gap-1 px-4 lg:gap-2 lg:pr-6">
+        <Breadcrumb aria-label={t`Breadcrumb`} className="min-w-0">
+          <BreadcrumbList className="flex-nowrap">
+            {crumbs.map((crumb, index) => (
+              <Fragment key={`${index}:${crumb.label}`}>
+                {index > 0 ? (
+                  <BreadcrumbSeparator
+                    className={index < last ? "max-md:hidden" : undefined}
+                  />
+                ) : null}
+                <BreadcrumbItem
+                  className={
+                    index === last
+                      ? "min-w-8"
+                      : `flex-none ${index < last - 1 ? "max-md:hidden" : ""}`
+                  }
+                >
+                  <CrumbLink crumb={crumb} />
+                </BreadcrumbItem>
+              </Fragment>
+            ))}
+          </BreadcrumbList>
+        </Breadcrumb>
+        {actions === undefined ? null : (
+          <div className="ml-auto flex flex-none items-center gap-2">
+            {actions}
+          </div>
+        )}
+      </div>
     </header>
   );
 };

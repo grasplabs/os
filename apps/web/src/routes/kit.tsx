@@ -146,11 +146,12 @@ import { useState } from "react";
 
 import {
   PageSidebar,
-  PageSidebarEntry,
-  PageSidebarProvider,
-  PageSidebarSection,
+  PageSidebarBody,
   PageSidebarTop,
-  PageSidebarTrigger,
+  RailButton,
+  RailDivider,
+  RailExpand,
+  usePageSidebarFold,
 } from "../frame/page-sidebar.tsx";
 import { GraspMark } from "../grasp-mark.tsx";
 
@@ -341,6 +342,7 @@ const kitDocuments = ["Onboarding guide", "Pricing", "Holidays"];
 /** The column beside a page's content, folding to a rail of its icons. */
 const PageColumn = () => {
   const [open, setOpen] = useState(kitDocuments[0]);
+  const [folded, setFolded] = usePageSidebarFold("kit");
   return (
     <Card>
       <CardHeader>
@@ -351,30 +353,65 @@ const PageColumn = () => {
       </CardHeader>
       <CardContent>
         <div className="flex h-64 overflow-hidden rounded-lg border">
-          <PageSidebarProvider name="kit">
-            <PageSidebar label="Documents">
-              <PageSidebarTop>
-                <PageSidebarEntry icon={<PlusIcon />} label="New document" />
+          {folded ? (
+            <PageSidebar folded label="Documents">
+              <RailExpand
+                label="Expand the documents"
+                onExpand={() => {
+                  setFolded(false);
+                }}
+              />
+              <RailButton label="New document">
+                <PlusIcon />
+              </RailButton>
+              <RailDivider />
+              {kitDocuments.map((name) => (
+                <RailButton
+                  active={name === open}
+                  key={name}
+                  label={name}
+                  onClick={() => {
+                    setOpen(name);
+                  }}
+                >
+                  <FileTextIcon />
+                </RailButton>
+              ))}
+            </PageSidebar>
+          ) : (
+            <PageSidebar folded={false} label="Documents">
+              <PageSidebarTop
+                fold={{
+                  label: "Fold the documents",
+                  onFold: () => {
+                    setFolded(true);
+                  },
+                }}
+              >
+                <Button variant="outline">
+                  <PlusIcon data-icon="inline-start" />
+                  New document
+                </Button>
               </PageSidebarTop>
-              <PageSidebarSection label="Recent">
+              <PageSidebarBody>
                 {kitDocuments.map((name) => (
-                  <PageSidebarEntry
-                    active={name === open}
-                    icon={<FileTextIcon />}
+                  <Button
+                    aria-current={name === open ? "page" : undefined}
+                    className="justify-start"
                     key={name}
-                    label={name}
                     onClick={() => {
                       setOpen(name);
                     }}
-                  />
+                    variant={name === open ? "secondary" : "ghost"}
+                  >
+                    <FileTextIcon data-icon="inline-start" />
+                    {name}
+                  </Button>
                 ))}
-              </PageSidebarSection>
+              </PageSidebarBody>
             </PageSidebar>
-            <div className="flex flex-1 items-start gap-2 p-4">
-              <PageSidebarTrigger label="Documents" />
-              <p className="text-sm">{open}</p>
-            </div>
-          </PageSidebarProvider>
+          )}
+          <p className="flex-1 p-4 text-sm">{open}</p>
         </div>
       </CardContent>
     </Card>
