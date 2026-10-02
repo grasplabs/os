@@ -1,7 +1,11 @@
-import { Badge } from "@grasp-os/ui/components/badge";
-import { buttonVariants } from "@grasp-os/ui/components/button";
+import {
+  SidebarMenuBadge,
+  SidebarMenuButton,
+  SidebarMenuItem,
+} from "@grasp-os/ui/components/sidebar";
 import { Trans } from "@lingui/react/macro";
-import { Link, useRouter } from "@tanstack/react-router";
+import { Link, useMatchRoute, useRouter } from "@tanstack/react-router";
+import { BellIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { readWithin } from "../core-connection.ts";
@@ -30,9 +34,10 @@ const readUnread = async (
   }
 };
 
-/** The nav's Notifications entry, with its unread count. */
-export const NotificationsLink = () => {
+/** The sidebar's Notifications entry, with its unread count. */
+export const NotificationsItem = () => {
   const router = useRouter();
+  const matchRoute = useMatchRoute();
   const core = useCore();
   const [unread, setUnread] = useState<number>();
   useEffect(() => {
@@ -60,27 +65,28 @@ export const NotificationsLink = () => {
       unsubscribe();
     };
   }, [router, core]);
+  const shown = unread !== undefined && unread > 0;
   return (
-    <li>
-      <Link
-        activeProps={{ className: "bg-muted" }}
-        className={buttonVariants({
-          variant: "ghost",
-          className: "w-full justify-start",
-        })}
-        to="/notifications"
+    <SidebarMenuItem>
+      <SidebarMenuButton
+        isActive={matchRoute({ to: "/notifications" }) !== false}
+        render={<Link to="/notifications" />}
       >
-        <Trans>Notifications</Trans>
-        {unread !== undefined && unread > 0 ? (
-          <Badge className="ml-auto">
+        <BellIcon />
+        <span>
+          <Trans>Notifications</Trans>
+        </span>
+        {/* Inside the link, so its name says how many are unread. */}
+        {shown ? (
+          <SidebarMenuBadge className="top-1.5">
             {unread}
             <span className="sr-only">
               {" "}
               <Trans>unread</Trans>
             </span>
-          </Badge>
+          </SidebarMenuBadge>
         ) : null}
-      </Link>
-    </li>
+      </SidebarMenuButton>
+    </SidebarMenuItem>
   );
 };

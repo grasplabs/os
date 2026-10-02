@@ -10,11 +10,12 @@ import {
 } from "@grasp-os/ui/components/table";
 import { i18n } from "@lingui/core";
 import { msg } from "@lingui/core/macro";
-import { Trans } from "@lingui/react/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { createFileRoute, Link } from "@tanstack/react-router";
 
 import { timeoutMs, withTimeout } from "../core.ts";
 import type { Session } from "../core.ts";
+import { SiteHeader } from "../frame/site-header.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 
 // The Apps the person can open, as core lists them, with what each one's
@@ -136,15 +137,19 @@ const AppsTable = ({ apps }: { apps: ListedApp[] }) => {
 };
 
 const Apps = () => {
+  const { t } = useLingui();
   const page = Route.useLoaderData();
   return (
-    <main className="flex flex-col gap-6 p-6">
-      <h1 className="text-2xl font-medium">
-        <Trans>Apps</Trans>
-      </h1>
-      <NotLoaded page={page} />
-      {page.state === "ready" ? <AppsTable apps={page.data} /> : null}
-    </main>
+    <>
+      <SiteHeader crumbs={[{ label: t`Apps` }]} />
+      <div className="flex flex-col gap-6 p-6">
+        <h1 className="text-2xl font-medium">
+          <Trans>Apps</Trans>
+        </h1>
+        <NotLoaded page={page} />
+        {page.state === "ready" ? <AppsTable apps={page.data} /> : null}
+      </div>
+    </>
   );
 };
 

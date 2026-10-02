@@ -20,6 +20,7 @@ import { useState } from "react";
 
 import type { CoreConnection } from "../core-connection.ts";
 import type { Session } from "../core.ts";
+import { SiteHeader } from "../frame/site-header.tsx";
 import { CollectionMarkers } from "../knowledge/collection-markers.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 
@@ -241,6 +242,7 @@ const CollectionList = ({ collections }: { collections: Collection[] }) => {
 };
 
 const Knowledge = () => {
+  const { t } = useLingui();
   const { collections, memory, results } = Route.useLoaderData();
   const { q } = Route.useSearch();
   const names = new Map(
@@ -249,55 +251,60 @@ const Knowledge = () => {
       : []
   );
   return (
-    <main className="flex max-w-4xl flex-col gap-8 p-6">
-      <h1 className="text-2xl font-medium">
-        <Trans>Knowledge</Trans>
-      </h1>
-      {/* A new query starts from what the address says. */}
-      <SearchBox key={q} query={q ?? ""} />
-      {results === undefined ? null : (
-        <section aria-labelledby="results" className="flex flex-col gap-3">
-          <h2 className="text-lg font-medium" id="results">
-            <Trans>Results</Trans>
+    <>
+      <SiteHeader crumbs={[{ label: t`Knowledge` }]} />
+      <div className="flex max-w-4xl flex-col gap-8 p-6">
+        <h1 className="text-2xl font-medium">
+          <Trans>Knowledge</Trans>
+        </h1>
+        {/* A new query starts from what the address says. */}
+        <SearchBox key={q} query={q ?? ""} />
+        {results === undefined ? null : (
+          <section aria-labelledby="results" className="flex flex-col gap-3">
+            <h2 className="text-lg font-medium" id="results">
+              <Trans>Results</Trans>
+            </h2>
+            <NotLoaded page={results} />
+            {results.state === "ready" ? (
+              <SearchResults collections={names} hits={results.data.hits} />
+            ) : null}
+          </section>
+        )}
+        <section aria-labelledby="memory">
+          <Card>
+            <CardHeader>
+              <CardTitle>
+                <h2 id="memory">
+                  <Trans>Memory</Trans>
+                </h2>
+              </CardTitle>
+              <CardDescription>
+                <Trans>
+                  What every agent has in its context, all the time.
+                </Trans>
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="flex flex-col gap-2">
+                <NotLoaded page={memory} />
+                {memory.state === "ready" ? (
+                  <MemoryCard memory={memory.data} />
+                ) : null}
+              </div>
+            </CardContent>
+          </Card>
+        </section>
+        <section aria-labelledby="collections" className="flex flex-col gap-3">
+          <h2 className="text-lg font-medium" id="collections">
+            <Trans>Collections</Trans>
           </h2>
-          <NotLoaded page={results} />
-          {results.state === "ready" ? (
-            <SearchResults collections={names} hits={results.data.hits} />
+          <NotLoaded page={collections} />
+          {collections.state === "ready" ? (
+            <CollectionList collections={collections.data} />
           ) : null}
         </section>
-      )}
-      <section aria-labelledby="memory">
-        <Card>
-          <CardHeader>
-            <CardTitle>
-              <h2 id="memory">
-                <Trans>Memory</Trans>
-              </h2>
-            </CardTitle>
-            <CardDescription>
-              <Trans>What every agent has in its context, all the time.</Trans>
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="flex flex-col gap-2">
-              <NotLoaded page={memory} />
-              {memory.state === "ready" ? (
-                <MemoryCard memory={memory.data} />
-              ) : null}
-            </div>
-          </CardContent>
-        </Card>
-      </section>
-      <section aria-labelledby="collections" className="flex flex-col gap-3">
-        <h2 className="text-lg font-medium" id="collections">
-          <Trans>Collections</Trans>
-        </h2>
-        <NotLoaded page={collections} />
-        {collections.state === "ready" ? (
-          <CollectionList collections={collections.data} />
-        ) : null}
-      </section>
-    </main>
+      </div>
+    </>
   );
 };
 

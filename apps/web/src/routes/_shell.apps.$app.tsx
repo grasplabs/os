@@ -27,6 +27,7 @@ import {
 import { useState } from "react";
 
 import type { Session } from "../core.ts";
+import { SiteHeader } from "../frame/site-header.tsx";
 import { roleLabel } from "../labels.ts";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import type { Loaded } from "../load-from-core.tsx";
@@ -328,24 +329,33 @@ const AppView = ({
 
 const AppPageView = () => {
   const { page, runs, members } = Route.useLoaderData();
+  const { t } = useLingui();
   return (
-    <main className="flex flex-1 flex-col gap-4 p-6">
-      {page.state === "ready" ? (
-        <AppView
-          key={page.data.app.id}
-          members={members}
-          page={page.data}
-          runs={runs}
-        />
-      ) : (
-        <>
-          <h1 className="text-2xl font-medium">
-            <Trans>App</Trans>
-          </h1>
-          <NotLoaded page={page} />
-        </>
-      )}
-    </main>
+    <>
+      <SiteHeader
+        crumbs={[
+          { label: t`Apps`, to: "/apps" },
+          { label: page.state === "ready" ? page.data.app.name : t`App` },
+        ]}
+      />
+      <div className="flex flex-1 flex-col gap-4 p-6">
+        {page.state === "ready" ? (
+          <AppView
+            key={page.data.app.id}
+            members={members}
+            page={page.data}
+            runs={runs}
+          />
+        ) : (
+          <>
+            <h1 className="text-2xl font-medium">
+              <Trans>App</Trans>
+            </h1>
+            <NotLoaded page={page} />
+          </>
+        )}
+      </div>
+    </>
   );
 };
 

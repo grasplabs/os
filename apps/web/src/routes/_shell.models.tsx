@@ -22,6 +22,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 
 import { ErrorText } from "../error-text.tsx";
+import { SiteHeader } from "../frame/site-header.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 
 // Models, for admins: the models the deployment allows, the client's rules
@@ -307,23 +308,27 @@ const Settings = ({ settings }: { settings: ModelSettings }) => {
 };
 
 const Models = () => {
+  const { t } = useLingui();
   const page = Route.useLoaderData();
   return (
-    <main className="flex max-w-4xl flex-col gap-8 p-6">
-      <div className="flex flex-col gap-2">
-        <h1 className="text-2xl font-medium">
-          <Trans>Models</Trans>
-        </h1>
-        <p className="text-muted-foreground text-sm">
-          <Trans>
-            Grasp sets these for your organization, as agreed with you. To
-            change them, contact Grasp.
-          </Trans>
-        </p>
+    <>
+      <SiteHeader crumbs={[{ label: t`Models` }]} />
+      <div className="flex max-w-4xl flex-col gap-8 p-6">
+        <div className="flex flex-col gap-2">
+          <h1 className="text-2xl font-medium">
+            <Trans>Models</Trans>
+          </h1>
+          <p className="text-muted-foreground text-sm">
+            <Trans>
+              Grasp sets these for your organization, as agreed with you. To
+              change them, contact Grasp.
+            </Trans>
+          </p>
+        </div>
+        <NotLoaded page={page} />
+        {page.state === "ready" ? <Settings settings={page.data} /> : null}
       </div>
-      <NotLoaded page={page} />
-      {page.state === "ready" ? <Settings settings={page.data} /> : null}
-    </main>
+    </>
   );
 };
 

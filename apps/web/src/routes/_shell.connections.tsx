@@ -9,6 +9,7 @@ import type { HeldPermissions } from "../connections/connection-list.tsx";
 import type { Session } from "../core.ts";
 import { listedOrNone } from "../directory.ts";
 import { ErrorText } from "../error-text.tsx";
+import { SiteHeader } from "../frame/site-header.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import type { Loaded } from "../load-from-core.tsx";
 
@@ -85,61 +86,64 @@ const Connections = () => {
   const connected =
     connection !== undefined && listed.some(({ id }) => id === connection);
   return (
-    <main className="flex max-w-4xl flex-col gap-8 p-6">
-      <h1 className="text-2xl font-medium">
-        <Trans>Connections</Trans>
-      </h1>
-      {connected ? (
-        <output className="text-sm">
-          <Trans>Connected.</Trans>
-        </output>
-      ) : null}
-      {connectionError === undefined ? null : (
-        <ErrorText>{connectionErrorMessage(connectionError)}</ErrorText>
-      )}
-      <HeldNotLoaded held={held} />
-      <section aria-labelledby="mine" className="flex flex-col gap-3">
-        <h2 className="text-lg font-medium" id="mine">
-          <Trans>My connections</Trans>
-        </h2>
-        <NotLoaded page={connections} />
-        {connections.state === "ready" ? (
-          <ConnectionList
-            connections={listed.filter(({ scope }) => scope === "personal")}
-            names={names}
-            offered={offered}
-            held={held}
-            identity={identity}
-            empty={t`You haven't connected an account of your own yet.`}
-          />
+    <>
+      <SiteHeader crumbs={[{ label: t`Connections` }]} />
+      <div className="flex max-w-4xl flex-col gap-8 p-6">
+        <h1 className="text-2xl font-medium">
+          <Trans>Connections</Trans>
+        </h1>
+        {connected ? (
+          <output className="text-sm">
+            <Trans>Connected.</Trans>
+          </output>
         ) : null}
-      </section>
-      <section aria-labelledby="shared" className="flex flex-col gap-3">
-        <h2 className="text-lg font-medium" id="shared">
-          <Trans>Shared connections</Trans>
-        </h2>
-        <NotLoaded page={connections} />
-        {connections.state === "ready" ? (
-          <ConnectionList
-            connections={listed.filter(({ scope }) => scope === "shared")}
-            names={names}
-            offered={offered}
-            held={held}
-            identity={identity}
-            empty={t`Your organization has no shared connections yet.`}
-          />
-        ) : null}
-      </section>
-      <section aria-labelledby="catalog" className="flex flex-col gap-3">
-        <h2 className="text-lg font-medium" id="catalog">
-          <Trans>Connect</Trans>
-        </h2>
-        <NotLoaded page={catalog} />
-        {catalog.state === "ready" ? (
-          <Catalog catalog={catalog.data} identity={identity} />
-        ) : null}
-      </section>
-    </main>
+        {connectionError === undefined ? null : (
+          <ErrorText>{connectionErrorMessage(connectionError)}</ErrorText>
+        )}
+        <HeldNotLoaded held={held} />
+        <section aria-labelledby="mine" className="flex flex-col gap-3">
+          <h2 className="text-lg font-medium" id="mine">
+            <Trans>My connections</Trans>
+          </h2>
+          <NotLoaded page={connections} />
+          {connections.state === "ready" ? (
+            <ConnectionList
+              connections={listed.filter(({ scope }) => scope === "personal")}
+              names={names}
+              offered={offered}
+              held={held}
+              identity={identity}
+              empty={t`You haven't connected an account of your own yet.`}
+            />
+          ) : null}
+        </section>
+        <section aria-labelledby="shared" className="flex flex-col gap-3">
+          <h2 className="text-lg font-medium" id="shared">
+            <Trans>Shared connections</Trans>
+          </h2>
+          <NotLoaded page={connections} />
+          {connections.state === "ready" ? (
+            <ConnectionList
+              connections={listed.filter(({ scope }) => scope === "shared")}
+              names={names}
+              offered={offered}
+              held={held}
+              identity={identity}
+              empty={t`Your organization has no shared connections yet.`}
+            />
+          ) : null}
+        </section>
+        <section aria-labelledby="catalog" className="flex flex-col gap-3">
+          <h2 className="text-lg font-medium" id="catalog">
+            <Trans>Connect</Trans>
+          </h2>
+          <NotLoaded page={catalog} />
+          {catalog.state === "ready" ? (
+            <Catalog catalog={catalog.data} identity={identity} />
+          ) : null}
+        </section>
+      </div>
+    </>
   );
 };
 

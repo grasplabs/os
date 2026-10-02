@@ -43,8 +43,9 @@ export const RouteError = ({ error }: ErrorComponentProps) => {
           : undefined
       )
     : failureText(error);
+  // Not a <main>: inside the shell it shows in the frame's.
   return (
-    <main className="flex flex-col items-start gap-4 p-6">
+    <div className="flex flex-col items-start gap-4 p-6">
       <h1 className="text-2xl font-medium">
         <Trans>This page didn&apos;t load</Trans>
       </h1>
@@ -57,6 +58,6 @@ export const RouteError = ({ error }: ErrorComponentProps) => {
       >
         <Trans>Try again</Trans>
       </Button>
-    </main>
+    </div>
   );
 };

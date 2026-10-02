@@ -41,7 +41,10 @@ test("an admin reads the allowed models, the rules and the budgets, and nobody e
     "$250.00 a month, admins alerted at 80%."
   );
   await expect(budgets).toContainText("$20.00 a month, admins alerted at 80%.");
-  await expect(page.getByRole("button")).toHaveCount(1);
+  // Nothing to change: the page's only button is the sidebar's trigger.
+  await expect(page.getByRole("main").getByRole("button")).toHaveText([
+    "Show or hide the sidebar",
+  ]);
 
   const refused = await pageOf(browser, builder);
   await refused.goto("/models");

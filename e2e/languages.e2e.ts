@@ -20,8 +20,10 @@ test("follows the browser's language, then the one the person picks", async ({
   await expect(nav.getByRole("link", { name: "Wissen" })).toBeVisible();
   await expect(page.locator("html")).toHaveAttribute("lang", "de");
 
-  await page.getByRole("combobox", { name: "Sprache" }).click();
-  await page.getByRole("option", { name: "Nederlands" }).click();
+  // The language is in the person menu, at the sidebar's foot.
+  await page.getByRole("button", { name: /Nutzer$/u }).click();
+  await page.getByRole("menuitem", { name: /^Sprache/u }).click();
+  await page.getByRole("menuitemradio", { name: "Nederlands" }).click();
   await expect(
     page.getByRole("navigation", { name: "Hoofdmenu" }).getByRole("link", {
       name: "Kennis",

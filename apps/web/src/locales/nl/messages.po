@@ -155,7 +155,7 @@ msgstr "{path}, zoals het zou draaien"
 msgid "{path}, which would no longer run"
 msgstr "{path}, dat niet meer zou draaien"
 
-#: src/routes/_shell.tsx
+#: src/frame/person-menu.tsx
 msgid "{role}, Grasp staff"
 msgstr "{role}, Grasp-medewerker"
 
@@ -215,8 +215,8 @@ msgstr "Acties"
 msgid "Active"
 msgstr "Actief"
 
+#: src/frame/person-menu.tsx
 #: src/routes/_shell.activity.tsx
-#: src/routes/_shell.tsx
 msgid "Activity"
 msgstr "Activiteit"
 
@@ -363,8 +363,9 @@ msgid "Approved: {who}."
 msgstr "Goedgekeurd: {who}."
 
 #: src/chat/side-panel.tsx
+#: src/frame/app-sidebar.tsx
+#: src/routes/_shell.apps.$app.tsx
 #: src/routes/_shell.apps.index.tsx
-#: src/routes/_shell.tsx
 msgid "Apps"
 msgstr "Apps"
 
@@ -435,6 +436,10 @@ msgstr "Automatisch"
 msgid "Being built"
 msgstr "In opbouw"
 
+#: src/frame/site-header.tsx
+msgid "Breadcrumb"
+msgstr "Kruimelpad"
+
 #: src/routes/_shell.models.tsx
 msgid "Budgets"
 msgstr "Budgetten"
@@ -488,8 +493,8 @@ msgstr "wijzigt de gegevens van de app"
 msgid "Changes the App's data"
 msgstr "Wijzigt de gegevens van de app"
 
+#: src/frame/app-sidebar.tsx
 #: src/routes/_shell.index.tsx
-#: src/routes/_shell.tsx
 #: src/routes/guest.tsx
 msgid "Chat"
 msgstr "Chat"
@@ -502,6 +507,7 @@ msgstr "Chats"
 msgid "Clear"
 msgstr "Wissen"
 
+#: src/frame/page-sidebar.tsx
 #: src/routes/_shell.index.tsx
 msgid "Close"
 msgstr "Sluiten"
@@ -514,6 +520,10 @@ msgstr "Code die het kan gebruiken is gewijzigd: {0}"
 #: src/chat/conversation.tsx
 msgid "Code step"
 msgstr "Codestap"
+
+#: src/routes/_shell.knowledge.$collection.tsx
+msgid "Collection"
+msgstr "Collectie"
 
 #: src/activity/pending.tsx
 msgid "Collection {collectionId}"
@@ -604,8 +614,8 @@ msgstr "Koppeling {connectionId}"
 msgid "Connection {connectionId}, {resource}"
 msgstr "Koppeling {connectionId}, {resource}"
 
+#: src/frame/app-sidebar.tsx
 #: src/routes/_shell.connections.tsx
-#: src/routes/_shell.tsx
 msgid "Connections"
 msgstr "Koppelingen"
 
@@ -817,6 +827,10 @@ msgstr "Filters"
 msgid "Finish"
 msgstr "Afronden"
 
+#: src/frame/page-sidebar.tsx
+msgid "Fold the sidebar"
+msgstr "Zijbalk inklappen"
+
 #: src/activity/pending.tsx
 msgid "For"
 msgstr "Voor"
@@ -957,9 +971,9 @@ msgstr "De stappen kunnen niet uit de code worden gelezen, dus hij kan alles doe
 msgid "Its tokens are deleted, every App and agent loses it, and actions waiting on it are dropped. Connect it again to use it again."
 msgstr "De tokens worden verwijderd, elke app en agent verliest hem en acties die erop wachten, vervallen. Koppel hem opnieuw om hem weer te gebruiken."
 
+#: src/frame/app-sidebar.tsx
 #: src/routes/_shell.knowledge.$collection.tsx
 #: src/routes/_shell.knowledge.index.tsx
-#: src/routes/_shell.tsx
 msgid "Knowledge"
 msgstr "Kennis"
 
@@ -1007,7 +1021,7 @@ msgstr "Servercode wordt geladen…"
 msgid "Loading…"
 msgstr "Laden…"
 
-#: src/routes/_shell.tsx
+#: src/frame/app-sidebar.tsx
 msgid "Main"
 msgstr "Hoofdmenu"
 
@@ -1027,9 +1041,9 @@ msgstr "Versie {version} actueel maken"
 msgid "May change something outside Grasp"
 msgstr "Kan iets buiten Grasp wijzigen"
 
+#: src/frame/person-menu.tsx
 #: src/routes/_shell.apps.$app.tsx
 #: src/routes/_shell.members.tsx
-#: src/routes/_shell.tsx
 msgid "Members"
 msgstr "Leden"
 
@@ -1051,8 +1065,8 @@ msgstr "Model"
 msgid "Model call"
 msgstr "Modelaanroep"
 
+#: src/frame/person-menu.tsx
 #: src/routes/_shell.models.tsx
-#: src/routes/_shell.tsx
 msgid "Models"
 msgstr "Modellen"
 
@@ -1218,7 +1232,7 @@ msgstr "Nog niets uitgegeven."
 msgid "Nothing yet. When a workflow fails while acting for you, you'll see it here."
 msgstr "Nog niets. Als een workflow mislukt terwijl hij namens jou handelt, zie je dat hier."
 
-#: src/notifications/nav-link.tsx
+#: src/notifications/nav-item.tsx
 #: src/routes/_shell.notifications.tsx
 msgid "Notifications"
 msgstr "Meldingen"
@@ -1298,6 +1312,10 @@ msgstr "Volledige pagina openen"
 #: src/routes/_shell.notifications.tsx
 msgid "Open the chat"
 msgstr "Chat openen"
+
+#: src/frame/page-sidebar.tsx
+msgid "Open the sidebar"
+msgstr "Zijbalk openen"
 
 #: src/routes/guest.tsx
 msgid "Opening the chat…"
@@ -1678,6 +1696,10 @@ msgstr "Minder tonen"
 msgid "Show older"
 msgstr "Oudere tonen"
 
+#: src/frame/site-header.tsx
+msgid "Show or hide the sidebar"
+msgstr "Zijbalk tonen of verbergen"
+
 #: src/connections/catalog.tsx
 msgid "Showing the first {count} of {total}. Refine your search to find others."
 msgstr "De eerste {count} van {total} worden getoond. Verfijn je zoekopdracht om andere te vinden."
@@ -1693,6 +1715,10 @@ msgstr "De eerste {runsPageSize} van meer runs worden getoond."
 #: src/routes/_shell.index.tsx
 msgid "Side panel"
 msgstr "Zijpaneel"
+
+#: src/frame/app-sidebar.tsx
+msgid "Sidebar"
+msgstr "Zijbalk"
 
 #: src/routes/decisions.$decision.tsx
 msgid "Sign in to answer"
@@ -1710,7 +1736,7 @@ msgstr "Inloggen met {label}"
 msgid "Sign in with your organization's account."
 msgstr "Log in met het account van je organisatie."
 
-#: src/routes/_shell.tsx
+#: src/frame/person-menu.tsx
 msgid "Sign out"
 msgstr "Uitloggen"
 
@@ -2031,7 +2057,7 @@ msgstr "Type"
 msgid "Unknown"
 msgstr "Onbekend"
 
-#: src/notifications/nav-link.tsx
+#: src/notifications/nav-item.tsx
 msgid "unread"
 msgstr "ongelezen"
 
@@ -2158,9 +2184,9 @@ msgid "Workflow tests fail:"
 msgstr "Workflowtests mislukken:"
 
 #: src/chat/builds.tsx
+#: src/frame/app-sidebar.tsx
 #: src/routes/_shell.apps.$app.tsx
 #: src/routes/_shell.apps.index.tsx
-#: src/routes/_shell.tsx
 #: src/routes/_shell.workflows.$app.$workflow.tsx
 #: src/routes/_shell.workflows.index.tsx
 msgid "Workflows"

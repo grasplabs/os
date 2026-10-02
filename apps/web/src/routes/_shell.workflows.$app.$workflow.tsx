@@ -41,6 +41,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { ErrorText } from "../error-text.tsx";
+import { SiteHeader } from "../frame/site-header.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import type { Loaded } from "../load-from-core.tsx";
 import { useCoreAction } from "../use-core-action.ts";
@@ -592,26 +593,32 @@ const WorkflowView = ({
 const WorkflowPage = () => {
   const { detail, runs, versions } = Route.useLoaderData();
   const { app, workflow } = Route.useParams();
+  const { t } = useLingui();
   return (
-    <main className="flex max-w-6xl flex-col gap-6 p-6">
-      <Link className="text-sm underline" to="/workflows">
-        <Trans>Workflows</Trans>
-      </Link>
-      {detail.state === "ready" ? (
-        <WorkflowView
-          // Another workflow starts with its own forms and test.
-          key={`${app}/${workflow}`}
-          detail={detail.data}
-          runs={runs}
-          versions={versions}
-        />
-      ) : (
-        <>
-          <h1 className="text-2xl font-medium">{workflow}</h1>
-          <NotLoaded page={detail} />
-        </>
-      )}
-    </main>
+    <>
+      <SiteHeader
+        crumbs={[
+          { label: t`Workflows`, to: "/workflows" },
+          { label: workflow },
+        ]}
+      />
+      <div className="flex max-w-6xl flex-col gap-6 p-6">
+        {detail.state === "ready" ? (
+          <WorkflowView
+            // Another workflow starts with its own forms and test.
+            key={`${app}/${workflow}`}
+            detail={detail.data}
+            runs={runs}
+            versions={versions}
+          />
+        ) : (
+          <>
+            <h1 className="text-2xl font-medium">{workflow}</h1>
+            <NotLoaded page={detail} />
+          </>
+        )}
+      </div>
+    </>
   );
 };
 

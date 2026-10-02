@@ -36,6 +36,7 @@ import { Trans, useLingui } from "@lingui/react/macro";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 
 import type { Session } from "../core.ts";
+import { SiteHeader } from "../frame/site-header.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import { dateTime, RunsTable, runStatusLabel } from "../workflows/runs.tsx";
 
@@ -411,68 +412,72 @@ const RunFilters = ({ options }: { options: FilterOptions }) => {
 };
 
 const Workflows = () => {
+  const { t } = useLingui();
   const page = Route.useLoaderData();
   const search = Route.useSearch();
   const { identity } = Route.useRouteContext();
   const navigate = useNavigate({ from: "/workflows/" });
   return (
-    <main className="flex flex-col gap-6 p-6">
-      <h1 className="text-2xl font-medium">
-        <Trans>Workflows</Trans>
-      </h1>
-      <Tabs
-        onValueChange={(tab: string) => {
-          void navigate({
-            // The filters are the Runs tab's: the list has none.
-            search: tab === "runs" ? { tab: "runs" } : {},
-          });
-        }}
-        value={search.tab ?? "workflows"}
-      >
-        <TabsList>
-          <TabsTrigger value="workflows">
-            <Trans>Workflows</Trans>
-          </TabsTrigger>
-          <TabsTrigger value="runs">
-            <Trans>Runs</Trans>
-          </TabsTrigger>
-        </TabsList>
-        <TabsContent value="workflows">
-          {page.tab === "workflows" ? (
-            <div className="flex flex-col gap-4">
-              <NotLoaded page={page.workflows} />
-              {page.workflows.state === "ready" ? (
-                <WorkflowsTable
-                  me={identity.userId}
-                  rows={page.workflows.data}
+    <>
+      <SiteHeader crumbs={[{ label: t`Workflows` }]} />
+      <div className="flex flex-col gap-6 p-6">
+        <h1 className="text-2xl font-medium">
+          <Trans>Workflows</Trans>
+        </h1>
+        <Tabs
+          onValueChange={(tab: string) => {
+            void navigate({
+              // The filters are the Runs tab's: the list has none.
+              search: tab === "runs" ? { tab: "runs" } : {},
+            });
+          }}
+          value={search.tab ?? "workflows"}
+        >
+          <TabsList>
+            <TabsTrigger value="workflows">
+              <Trans>Workflows</Trans>
+            </TabsTrigger>
+            <TabsTrigger value="runs">
+              <Trans>Runs</Trans>
+            </TabsTrigger>
+          </TabsList>
+          <TabsContent value="workflows">
+            {page.tab === "workflows" ? (
+              <div className="flex flex-col gap-4">
+                <NotLoaded page={page.workflows} />
+                {page.workflows.state === "ready" ? (
+                  <WorkflowsTable
+                    me={identity.userId}
+                    rows={page.workflows.data}
+                  />
+                ) : null}
+              </div>
+            ) : null}
+          </TabsContent>
+          <TabsContent value="runs">
+            {page.tab === "runs" ? (
+              <div className="flex flex-col gap-4">
+                <RunFilters
+                  options={
+                    page.filters.state === "ready"
+                      ? page.filters.data
+                      : { apps: [], workflows: [] }
+                  }
                 />
-              ) : null}
-            </div>
-          ) : null}
-        </TabsContent>
-        <TabsContent value="runs">
-          {page.tab === "runs" ? (
-            <div className="flex flex-col gap-4">
-              <RunFilters
-                options={
-                  page.filters.state === "ready"
-                    ? page.filters.data
-                    : { apps: [], workflows: [] }
-                }
-              />
-              <NotLoaded page={page.runs} />
-              {page.runs.state === "ready" ? (
-                <RunsTable
-                  me={identity.userId}
-                  more={page.runs.data.more}
-                  runs={page.runs.data.runs}
-                />
-              ) : null}
-            </div>
-          ) : null}
-        </TabsContent>
-      </Tabs>
-    </main>
+                <NotLoaded page={page.runs} />
+                {page.runs.state === "ready" ? (
+                  <RunsTable
+                    me={identity.userId}
+                    more={page.runs.data.more}
+                    runs={page.runs.data.runs}
+                  />
+                ) : null}
+              </div>
+            ) : null}
+          </TabsContent>
+        </Tabs>
+      </div>
+    </>
   );
 };
 

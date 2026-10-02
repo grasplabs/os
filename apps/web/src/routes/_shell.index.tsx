@@ -35,6 +35,7 @@ import { HeldWrites } from "../chat/held-writes.tsx";
 import { SidePanel } from "../chat/side-panel.tsx";
 import type { Session } from "../core.ts";
 import { ErrorText } from "../error-text.tsx";
+import { SiteHeader } from "../frame/site-header.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import { useCoreAction } from "../use-core-action.ts";
 import { useCore } from "../use-core.ts";
@@ -439,9 +440,12 @@ const Chat = () => {
   const { t } = useLingui();
   if (page.state !== "ready") {
     return (
-      <main className="p-6">
-        <NotLoaded page={page} />
-      </main>
+      <>
+        <SiteHeader crumbs={[{ label: t`Chat` }]} />
+        <div className="p-6">
+          <NotLoaded page={page} />
+        </div>
+      </>
     );
   }
   const { chats, models, sourceNames } = page.data;
@@ -452,62 +456,72 @@ const Chat = () => {
       ? undefined
       : { id: open, title: t`Chat`, createdAt: "", running: false });
   return (
-    <main className="flex h-full min-h-0">
-      <nav
-        aria-label={t`Chats`}
-        className="flex w-60 shrink-0 flex-col gap-2 border-r p-3"
-      >
-        <Link
-          className={buttonVariants({ variant: "outline" })}
-          search={{}}
-          to="/"
+    <>
+      <SiteHeader
+        crumbs={
+          chat === undefined
+            ? [{ label: t`Chat` }]
+            : [{ label: t`Chat`, to: "/" }, { label: chat.title }]
+        }
+      />
+      <div className="flex min-h-0 flex-1">
+        <nav
+          aria-label={t`Chats`}
+          className="flex w-60 shrink-0 flex-col gap-2 border-r p-3"
         >
-          <Trans>New chat</Trans>
-        </Link>
-        <ul className="flex flex-col gap-1 overflow-y-auto">
-          {chats.map(({ id, title }) => (
-            <li key={id}>
-              <Link
-                activeOptions={{ includeSearch: true }}
-                activeProps={{ className: "bg-muted" }}
-                className={buttonVariants({
-                  variant: "ghost",
-                  className: "w-full justify-start truncate",
-                })}
-                search={{ chat: id }}
-                to="/"
-              >
-                {title}
-              </Link>
-            </li>
-          ))}
-        </ul>
-      </nav>
-      {chat === undefined ? (
-        <section
-          aria-labelledby="new-chat"
-          className="flex flex-1 flex-col gap-3 p-4"
-        >
-          <h1 className="text-lg font-medium" id="new-chat">
+          <Link
+            className={buttonVariants({ variant: "outline" })}
+            search={{}}
+            to="/"
+          >
             <Trans>New chat</Trans>
-          </h1>
-          <p className="text-muted-foreground mt-auto text-sm">
-            <Trans>
-              Describe what you want. The agent answers from what it can read,
-              and holds every change to an outside system until you confirm it.
-            </Trans>
-          </p>
-          <Composer models={models} running={false} />
-        </section>
-      ) : (
-        <OpenChat
-          chat={chat}
-          key={chat.id}
-          models={models}
-          sourceNames={sourceNames}
-        />
-      )}
-    </main>
+          </Link>
+          <ul className="flex flex-col gap-1 overflow-y-auto">
+            {chats.map(({ id, title }) => (
+              <li key={id}>
+                <Link
+                  activeOptions={{ includeSearch: true }}
+                  activeProps={{ className: "bg-muted" }}
+                  className={buttonVariants({
+                    variant: "ghost",
+                    className: "w-full justify-start truncate",
+                  })}
+                  search={{ chat: id }}
+                  to="/"
+                >
+                  {title}
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </nav>
+        {chat === undefined ? (
+          <section
+            aria-labelledby="new-chat"
+            className="flex flex-1 flex-col gap-3 p-4"
+          >
+            <h1 className="text-lg font-medium" id="new-chat">
+              <Trans>New chat</Trans>
+            </h1>
+            <p className="text-muted-foreground mt-auto text-sm">
+              <Trans>
+                Describe what you want. The agent answers from what it can read,
+                and holds every change to an outside system until you confirm
+                it.
+              </Trans>
+            </p>
+            <Composer models={models} running={false} />
+          </section>
+        ) : (
+          <OpenChat
+            chat={chat}
+            key={chat.id}
+            models={models}
+            sourceNames={sourceNames}
+          />
+        )}
+      </div>
+    </>
   );
 };
 

@@ -155,7 +155,7 @@ msgstr "{path}, tel qu’il s’exécuterait"
 msgid "{path}, which would no longer run"
 msgstr "{path}, qui ne s’exécuterait plus"
 
-#: src/routes/_shell.tsx
+#: src/frame/person-menu.tsx
 msgid "{role}, Grasp staff"
 msgstr "{role}, équipe Grasp"
 
@@ -215,8 +215,8 @@ msgstr "Actions"
 msgid "Active"
 msgstr "Active"
 
+#: src/frame/person-menu.tsx
 #: src/routes/_shell.activity.tsx
-#: src/routes/_shell.tsx
 msgid "Activity"
 msgstr "Activité"
 
@@ -363,8 +363,9 @@ msgid "Approved: {who}."
 msgstr "Approuvé : {who}."
 
 #: src/chat/side-panel.tsx
+#: src/frame/app-sidebar.tsx
+#: src/routes/_shell.apps.$app.tsx
 #: src/routes/_shell.apps.index.tsx
-#: src/routes/_shell.tsx
 msgid "Apps"
 msgstr "Applications"
 
@@ -435,6 +436,10 @@ msgstr "Automatiquement"
 msgid "Being built"
 msgstr "En construction"
 
+#: src/frame/site-header.tsx
+msgid "Breadcrumb"
+msgstr "Fil d’Ariane"
+
 #: src/routes/_shell.models.tsx
 msgid "Budgets"
 msgstr "Budgets"
@@ -488,8 +493,8 @@ msgstr "modifie les données de l’application"
 msgid "Changes the App's data"
 msgstr "Modifie les données de l’application"
 
+#: src/frame/app-sidebar.tsx
 #: src/routes/_shell.index.tsx
-#: src/routes/_shell.tsx
 #: src/routes/guest.tsx
 msgid "Chat"
 msgstr "Chat"
@@ -502,6 +507,7 @@ msgstr "Discussions"
 msgid "Clear"
 msgstr "Effacer"
 
+#: src/frame/page-sidebar.tsx
 #: src/routes/_shell.index.tsx
 msgid "Close"
 msgstr "Fermer"
@@ -514,6 +520,10 @@ msgstr "Du code qu’il peut utiliser a changé : {0}"
 #: src/chat/conversation.tsx
 msgid "Code step"
 msgstr "Étape de code"
+
+#: src/routes/_shell.knowledge.$collection.tsx
+msgid "Collection"
+msgstr "Collection"
 
 #: src/activity/pending.tsx
 msgid "Collection {collectionId}"
@@ -604,8 +614,8 @@ msgstr "Connexion {connectionId}"
 msgid "Connection {connectionId}, {resource}"
 msgstr "Connexion {connectionId}, {resource}"
 
+#: src/frame/app-sidebar.tsx
 #: src/routes/_shell.connections.tsx
-#: src/routes/_shell.tsx
 msgid "Connections"
 msgstr "Connexions"
 
@@ -817,6 +827,10 @@ msgstr "Filtres"
 msgid "Finish"
 msgstr "Terminer"
 
+#: src/frame/page-sidebar.tsx
+msgid "Fold the sidebar"
+msgstr "Replier la barre latérale"
+
 #: src/activity/pending.tsx
 msgid "For"
 msgstr "Pour"
@@ -957,9 +971,9 @@ msgstr "Ses étapes ne peuvent pas être lues dans son code : il peut donc faire
 msgid "Its tokens are deleted, every App and agent loses it, and actions waiting on it are dropped. Connect it again to use it again."
 msgstr "Ses jetons sont supprimés, chaque application et agent la perd, et les actions qui l’attendent sont abandonnées. Reconnectez-la pour l’utiliser à nouveau."
 
+#: src/frame/app-sidebar.tsx
 #: src/routes/_shell.knowledge.$collection.tsx
 #: src/routes/_shell.knowledge.index.tsx
-#: src/routes/_shell.tsx
 msgid "Knowledge"
 msgstr "Connaissances"
 
@@ -1007,7 +1021,7 @@ msgstr "Chargement du code serveur…"
 msgid "Loading…"
 msgstr "Chargement…"
 
-#: src/routes/_shell.tsx
+#: src/frame/app-sidebar.tsx
 msgid "Main"
 msgstr "Principal"
 
@@ -1027,9 +1041,9 @@ msgstr "Rendre la version {version} actuelle"
 msgid "May change something outside Grasp"
 msgstr "Peut modifier quelque chose en dehors de Grasp"
 
+#: src/frame/person-menu.tsx
 #: src/routes/_shell.apps.$app.tsx
 #: src/routes/_shell.members.tsx
-#: src/routes/_shell.tsx
 msgid "Members"
 msgstr "Membres"
 
@@ -1051,8 +1065,8 @@ msgstr "Modèle"
 msgid "Model call"
 msgstr "Appel de modèle"
 
+#: src/frame/person-menu.tsx
 #: src/routes/_shell.models.tsx
-#: src/routes/_shell.tsx
 msgid "Models"
 msgstr "Modèles"
 
@@ -1218,7 +1232,7 @@ msgstr "Rien de dépensé pour l’instant."
 msgid "Nothing yet. When a workflow fails while acting for you, you'll see it here."
 msgstr "Rien pour l’instant. Quand un workflow échoue alors qu’il agit pour vous, vous le verrez ici."
 
-#: src/notifications/nav-link.tsx
+#: src/notifications/nav-item.tsx
 #: src/routes/_shell.notifications.tsx
 msgid "Notifications"
 msgstr "Notifications"
@@ -1298,6 +1312,10 @@ msgstr "Ouvrir en pleine page"
 #: src/routes/_shell.notifications.tsx
 msgid "Open the chat"
 msgstr "Ouvrir le chat"
+
+#: src/frame/page-sidebar.tsx
+msgid "Open the sidebar"
+msgstr "Ouvrir la barre latérale"
 
 #: src/routes/guest.tsx
 msgid "Opening the chat…"
@@ -1678,6 +1696,10 @@ msgstr "Afficher moins"
 msgid "Show older"
 msgstr "Afficher les plus anciennes"
 
+#: src/frame/site-header.tsx
+msgid "Show or hide the sidebar"
+msgstr "Afficher ou masquer la barre latérale"
+
 #: src/connections/catalog.tsx
 msgid "Showing the first {count} of {total}. Refine your search to find others."
 msgstr "Affichage des {count} premiers sur {total}. Affinez votre recherche pour en trouver d’autres."
@@ -1693,6 +1715,10 @@ msgstr "Affichage des {runsPageSize} premières exécutions sur davantage."
 #: src/routes/_shell.index.tsx
 msgid "Side panel"
 msgstr "Panneau latéral"
+
+#: src/frame/app-sidebar.tsx
+msgid "Sidebar"
+msgstr "Barre latérale"
 
 #: src/routes/decisions.$decision.tsx
 msgid "Sign in to answer"
@@ -1710,7 +1736,7 @@ msgstr "Se connecter avec {label}"
 msgid "Sign in with your organization's account."
 msgstr "Connectez-vous avec le compte de votre organisation."
 
-#: src/routes/_shell.tsx
+#: src/frame/person-menu.tsx
 msgid "Sign out"
 msgstr "Déconnecter"
 
@@ -2031,7 +2057,7 @@ msgstr "Type"
 msgid "Unknown"
 msgstr "Inconnue"
 
-#: src/notifications/nav-link.tsx
+#: src/notifications/nav-item.tsx
 msgid "unread"
 msgstr "non lues"
 
@@ -2158,9 +2184,9 @@ msgid "Workflow tests fail:"
 msgstr "Des tests de workflow échouent :"
 
 #: src/chat/builds.tsx
+#: src/frame/app-sidebar.tsx
 #: src/routes/_shell.apps.$app.tsx
 #: src/routes/_shell.apps.index.tsx
-#: src/routes/_shell.tsx
 #: src/routes/_shell.workflows.$app.$workflow.tsx
 #: src/routes/_shell.workflows.index.tsx
 msgid "Workflows"

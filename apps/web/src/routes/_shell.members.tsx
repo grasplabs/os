@@ -33,6 +33,7 @@ import { useState } from "react";
 import { changeThenRefresh } from "../change-then-refresh.ts";
 import type { Session } from "../core.ts";
 import { ErrorText } from "../error-text.tsx";
+import { SiteHeader } from "../frame/site-header.tsx";
 import { roleLabel } from "../labels.ts";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import { useCoreAction } from "../use-core-action.ts";
@@ -240,18 +241,22 @@ const MembersTable = ({ members, me }: { members: Member[]; me: string }) => {
 };
 
 const Members = () => {
+  const { t } = useLingui();
   const page = Route.useLoaderData();
   const { identity } = Route.useRouteContext();
   return (
-    <main className="flex max-w-4xl flex-col gap-6 p-6">
-      <h1 className="text-2xl font-medium">
-        <Trans>Members</Trans>
-      </h1>
-      <NotLoaded page={page} />
-      {page.state === "ready" ? (
-        <MembersTable members={page.data} me={identity.userId} />
-      ) : null}
-    </main>
+    <>
+      <SiteHeader crumbs={[{ label: t`Members` }]} />
+      <div className="flex max-w-4xl flex-col gap-6 p-6">
+        <h1 className="text-2xl font-medium">
+          <Trans>Members</Trans>
+        </h1>
+        <NotLoaded page={page} />
+        {page.state === "ready" ? (
+          <MembersTable members={page.data} me={identity.userId} />
+        ) : null}
+      </div>
+    </>
   );
 };
 

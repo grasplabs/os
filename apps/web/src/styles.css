@@ -32,3 +32,11 @@
     display: none;
   }
 }
+
+/* The frame's sizes: the app's sidebar and the bar above each page. */
+@layer base {
+  [data-slot="sidebar-wrapper"] {
+    --sidebar-width: calc(var(--spacing) * 60);
+    --header-height: calc(var(--spacing) * 12);
+  }
+}

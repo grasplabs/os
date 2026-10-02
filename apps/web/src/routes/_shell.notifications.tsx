@@ -12,6 +12,7 @@ import { useState } from "react";
 import type { Session } from "../core.ts";
 import { listedOrNone } from "../directory.ts";
 import { ErrorText } from "../error-text.tsx";
+import { SiteHeader } from "../frame/site-header.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import { useCoreAction } from "../use-core-action.ts";
 import { dateTime } from "../workflows/runs.tsx";
@@ -166,18 +167,22 @@ const FailedWorkflow = ({
 };
 
 const Notifications = () => {
+  const { t } = useLingui();
   const page = Route.useLoaderData();
   return (
-    <main className="flex max-w-3xl flex-col gap-4 p-6">
-      <h1 className="text-2xl font-medium">
-        <Trans>Notifications</Trans>
-      </h1>
-      {page.state === "ready" ? (
-        <NotificationList page={page.data} />
-      ) : (
-        <NotLoaded page={page} />
-      )}
-    </main>
+    <>
+      <SiteHeader crumbs={[{ label: t`Notifications` }]} />
+      <div className="flex max-w-3xl flex-col gap-4 p-6">
+        <h1 className="text-2xl font-medium">
+          <Trans>Notifications</Trans>
+        </h1>
+        {page.state === "ready" ? (
+          <NotificationList page={page.data} />
+        ) : (
+          <NotLoaded page={page} />
+        )}
+      </div>
+    </>
   );
 };
 

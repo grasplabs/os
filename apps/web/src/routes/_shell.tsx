@@ -1,120 +1,49 @@
-import { isAdmin } from "@grasp-os/shared/roles";
-import type { Identity } from "@grasp-os/shared/rpc";
-import { Button, buttonVariants } from "@grasp-os/ui/components/button";
-import type { MessageDescriptor } from "@lingui/core";
-import { msg } from "@lingui/core/macro";
-import { Trans, useLingui } from "@lingui/react/macro";
+import { Button } from "@grasp-os/ui/components/button";
+import { SidebarInset, SidebarProvider } from "@grasp-os/ui/components/sidebar";
+import { TooltipProvider } from "@grasp-os/ui/components/tooltip";
+import { useLingui } from "@lingui/react/macro";
 import {
   createFileRoute,
-  Link,
   Outlet,
   redirect,
   useRouter,
   useRouterState,
 } from "@tanstack/react-router";
 import type { ErrorComponentProps } from "@tanstack/react-router";
+import { useState } from "react";
 
-import { loadCoreStatus, signOut } from "../core-connection.ts";
+import { loadCoreStatus } from "../core-connection.ts";
 import { ErrorText } from "../error-text.tsx";
-import { roleLabel } from "../labels.ts";
-import { LanguagePicker } from "../language-picker.tsx";
-import { NotificationsLink } from "../notifications/nav-link.tsx";
+import { keepFolded, readFolded } from "../fold.ts";
+import { AppSidebar } from "../frame/app-sidebar.tsx";
 import { RouteError } from "../route-error.tsx";
 import { signInErrorSearch } from "../sign-in-errors.ts";
 
-// The signed-in product: a nav of its sections beside the page. Everyone
-// else goes to the sign-in page, which sends them back here once they're
-// in. The nav only leaves out what a role can't use; core checks the role
-// on every call whatever the nav shows.
-
-interface Section {
-  to:
-    | "/"
-    | "/knowledge"
-    | "/apps"
-    | "/workflows"
-    | "/connections"
-    | "/activity"
-    | "/models"
-    | "/members";
-  label: MessageDescriptor;
-  /** Whether the section is in `person`'s nav. */
-  shows: (person: Identity) => boolean;
-}
-
-const everyone = (): boolean => true;
-const admins = ({ role }: Identity): boolean => isAdmin(role);
-
-const sections: readonly Section[] = [
-  { to: "/", label: msg`Chat`, shows: everyone },
-  { to: "/knowledge", label: msg`Knowledge`, shows: everyone },
-  { to: "/apps", label: msg`Apps`, shows: everyone },
-  { to: "/workflows", label: msg`Workflows`, shows: everyone },
-  { to: "/connections", label: msg`Connections`, shows: everyone },
-  { to: "/activity", label: msg`Activity`, shows: admins },
-  { to: "/models", label: msg`Models`, shows: admins },
-  // Members are for the organization's own admins, never Grasp staff.
-  {
-    to: "/members",
-    label: msg`Members`,
-    shows: (person) => admins(person) && !person.staff,
-  },
-];
+// The signed-in product: the app's sidebar beside the page, each page
+// headed by its own site header (frame/site-header.tsx). Everyone else goes
+// to the sign-in page, which sends them back here once they're in.
 
 const Shell = () => {
   const { core, identity } = Route.useRouteContext();
-  const { t, i18n } = useLingui();
-  const role = roleLabel(identity.role);
+  // Folded as the person left it in this browser.
+  const [open, setOpen] = useState(() => readFolded("sidebar") !== true);
   return (
-    <div className="flex h-svh">
-      <nav
-        aria-label={t`Main`}
-        className="flex w-56 shrink-0 flex-col gap-4 border-r p-3"
+    <TooltipProvider>
+      <SidebarProvider
+        className="h-svh"
+        open={open}
+        onOpenChange={(next) => {
+          setOpen(next);
+          void keepFolded("sidebar", !next);
+        }}
       >
-        <ul className="flex flex-col gap-1">
-          {sections
-            .filter(({ shows }) => shows(identity))
-            .map(({ to, label }) => (
-              <li key={to}>
-                <Link
-                  to={to}
-                  activeOptions={{ exact: to === "/" }}
-                  activeProps={{ className: "bg-muted" }}
-                  className={buttonVariants({
-                    variant: "ghost",
-                    className: "w-full justify-start",
-                  })}
-                >
-                  {i18n._(label)}
-                </Link>
-              </li>
-            ))}
-          <NotificationsLink />
-        </ul>
-        <div className="mt-auto flex flex-col gap-2">
-          <LanguagePicker />
-          <p className="text-sm">
-            {identity.name}
-            <span className="text-muted-foreground block text-xs">
-              {identity.staff
-                ? t`${role}, Grasp staff`
-                : roleLabel(identity.role)}
-            </span>
-          </p>
-          <Button
-            variant="outline"
-            onClick={() => {
-              void signOut(core);
-            }}
-          >
-            <Trans>Sign out</Trans>
-          </Button>
-        </div>
-      </nav>
-      <div className="flex min-w-0 flex-1 flex-col overflow-y-auto">
-        <Outlet />
-      </div>
-    </div>
+        <AppSidebar core={core} identity={identity} />
+        {/* The page scrolls inside it, so its header stays in view. */}
+        <SidebarInset className="min-h-0 min-w-0 overflow-y-auto">
+          <Outlet />
+        </SidebarInset>
+      </SidebarProvider>
+    </TooltipProvider>
   );
 };
 
