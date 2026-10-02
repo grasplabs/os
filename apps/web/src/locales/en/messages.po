@@ -99,6 +99,10 @@ msgstr "{connection}, {resource} ({tool})"
 msgid "{count, plural, one {# change waits for you to confirm or reject it.} other {# changes wait for you to confirm or reject them.}}"
 msgstr "{count, plural, one {# change waits for you to confirm or reject it.} other {# changes wait for you to confirm or reject them.}}"
 
+#: src/routes/_shell.knowledge.index.tsx
+msgid "{count, plural, one {# file} other {# files}}"
+msgstr "{count, plural, one {# file} other {# files}}"
+
 #: src/knowledge/timeline.tsx
 msgid "{count, plural, one {# version} other {# versions}}"
 msgstr "{count, plural, one {# version} other {# versions}}"
@@ -110,6 +114,10 @@ msgstr "{count, plural, one {Answers draw on # source} other {Answers draw on # 
 #: src/chat/builds-state.ts
 msgid "{count, plural, one {once} other {# times}}"
 msgstr "{count, plural, one {once} other {# times}}"
+
+#: src/routes/_shell.knowledge.index.tsx
+msgid "{count} or more files"
+msgstr "{count} or more files"
 
 #: src/knowledge/timeline.tsx
 msgid "{folded, plural, one {# earlier} other {# earlier}}"
@@ -455,6 +463,10 @@ msgstr "Audit log"
 #: src/workflows/runs.tsx
 msgid "Automatically"
 msgstr "Automatically"
+
+#: src/knowledge/document.tsx
+msgid "Back to the current version"
+msgstr "Back to the current version"
 
 #: src/chat/builds.tsx
 msgid "Being built"
@@ -1263,6 +1275,7 @@ msgid "No file changes."
 msgstr "No file changes."
 
 #: src/knowledge/nav.tsx
+#: src/routes/_shell.knowledge.index.tsx
 msgid "No files yet."
 msgstr "No files yet."
 
@@ -2272,6 +2285,10 @@ msgstr "Version"
 msgid "Version {number}"
 msgstr "Version {number}"
 
+#: src/knowledge/timeline.tsx
+msgid "Version {number}, current"
+msgstr "Version {number}, current"
+
 #: src/routes/_shell.apps.$app.tsx
 #: src/routes/_shell.workflows.$app.$workflow.tsx
 msgid "Version {version}"
@@ -2421,6 +2438,10 @@ msgstr "You haven't connected an account of your own yet."
 #: src/routes/guest.tsx
 msgid "You:"
 msgstr "You:"
+
+#: src/knowledge/document.tsx
+msgid "You're reading version {number}, saved {saved}. The current version is {current}."
+msgstr "You're reading version {number}, saved {saved}. The current version is {current}."
 
 #: src/chat/chat-list.tsx
 msgid "Your chats show up here."

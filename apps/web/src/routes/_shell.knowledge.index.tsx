@@ -1,5 +1,9 @@
-import type { Collection, SearchHit } from "@grasp-os/shared/knowledge";
-import { searchQueryMaxLength } from "@grasp-os/shared/knowledge";
+import type {
+  Collection,
+  DocumentSummary,
+  SearchHit,
+} from "@grasp-os/shared/knowledge";
+import { pageMaxLimit, searchQueryMaxLength } from "@grasp-os/shared/knowledge";
 import {
   Empty,
   EmptyDescription,
@@ -7,9 +11,9 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@grasp-os/ui/components/empty";
-import { Trans, useLingui } from "@lingui/react/macro";
+import { Plural, Trans, useLingui } from "@lingui/react/macro";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { LibraryIcon, SearchXIcon } from "lucide-react";
+import { FileTextIcon, LibraryIcon, SearchXIcon } from "lucide-react";
 
 import {
   CollectionDrawing,
@@ -133,8 +137,77 @@ const MemoryBlock = ({ memory }: { memory: MemoryFiles }) => {
   );
 };
 
+/** How many of a collection's latest documents its block shows. */
+const latestShown = 3;
+
+/** How many files a collection has, as far as its first page tells. */
+const FileCount = ({ count }: { count: number }) => {
+  if (count === 0) {
+    return <Trans>No files yet.</Trans>;
+  }
+  if (count === pageMaxLimit) {
+    return <Trans>{count} or more files</Trans>;
+  }
+  return <Plural one="# file" other="# files" value={count} />;
+};
+
+/**
+ * The documents last saved in a collection, newest first, with how many it
+ * has. Read from its first page: past that (a collection of more than a
+ * page) they are the latest of that page, and the count says "or more".
+ */
+const LatestDocuments = ({
+  documents,
+}: {
+  documents: DocumentSummary[] | undefined;
+}) => {
+  if (documents === undefined) {
+    return null;
+  }
+  const latest = documents
+    .toSorted((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    .slice(0, latestShown);
+  const count = documents.length;
+  return (
+    <div className="flex flex-col gap-1.5">
+      {latest.length === 0 ? null : (
+        <ul className="-mx-2 flex flex-col">
+          {latest.map((document) => (
+            <li key={document.id}>
+              <Link
+                className="hover:bg-muted flex items-center gap-2 rounded-md px-2 py-1 text-sm"
+                params={{ collection: document.collectionId }}
+                search={{ doc: document.id }}
+                to="/knowledge/$collection"
+              >
+                <FileTextIcon
+                  aria-hidden="true"
+                  className="text-muted-foreground size-3.5 flex-none"
+                />
+                <span className="min-w-0 flex-1 truncate">
+                  {document.title}
+                </span>
+              </Link>
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="text-muted-foreground text-xs">
+        <FileCount count={count} />
+      </p>
+    </div>
+  );
+};
+
 /** A block per collection, three to a row, each opening its own page. */
-const CollectionBlocks = ({ collections }: { collections: Collection[] }) => {
+const CollectionBlocks = ({
+  collections,
+  firstPages,
+}: {
+  collections: Collection[];
+  /** Each collection's first page of documents, where core listed it. */
+  firstPages: ReadonlyMap<string, DocumentSummary[]>;
+}) => {
   if (collections.length === 0) {
     return (
       <Empty>
@@ -178,6 +251,7 @@ const CollectionBlocks = ({ collections }: { collections: Collection[] }) => {
             </p>
           )}
           <CollectionMarkers collection={collection} />
+          <LatestDocuments documents={firstPages.get(collection.id)} />
         </li>
       ))}
     </ul>
@@ -186,7 +260,7 @@ const CollectionBlocks = ({ collections }: { collections: Collection[] }) => {
 
 const Knowledge = () => {
   const { t } = useLingui();
-  const { nav, results } = Route.useLoaderData();
+  const { nav, results, firstPages } = Route.useLoaderData();
   const { q } = Route.useSearch();
   const { collections, memory } = nav;
   const names = new Map(
@@ -248,7 +322,10 @@ const Knowledge = () => {
             </h2>
             <NotLoaded page={collections} />
             {collections.state === "ready" ? (
-              <CollectionBlocks collections={collections.data} />
+              <CollectionBlocks
+                collections={collections.data}
+                firstPages={firstPages}
+              />
             ) : null}
           </section>
         </div>
@@ -274,7 +351,29 @@ export const Route = createFileRoute("/_shell/knowledge/")({
             async (session) => await session.knowledge.search(q)
           ),
     ]);
-    return { nav, results };
+    // Each collection's first page, for its block's latest documents: one
+    // that fails shows its block without them.
+    const listed =
+      nav.collections.state === "ready"
+        ? await Promise.all(
+            nav.collections.data.map(
+              async ({ id }) =>
+                [
+                  id,
+                  await loadFromCore(core, async (session) => {
+                    const page = await session.knowledge.listDocuments(id);
+                    return page.documents;
+                  }),
+                ] as const
+            )
+          )
+        : [];
+    const firstPages = new Map(
+      listed.flatMap(([id, page]) =>
+        page.state === "ready" ? [[id, page.data] as const] : []
+      )
+    );
+    return { nav, results, firstPages };
   },
   component: Knowledge,
 });

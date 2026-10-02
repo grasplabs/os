@@ -228,7 +228,7 @@ const Properties = ({
     <dt className="text-muted-foreground py-0.5">
       <Trans>Version</Trans>
     </dt>
-    <dd className="py-0.5 tabular-nums">{doc.currentVersion}</dd>
+    <dd className="py-0.5 tabular-nums">{doc.version.number}</dd>
     <dt className="text-muted-foreground py-0.5">
       <Trans>Review by</Trans>
     </dt>
@@ -256,6 +256,32 @@ const Properties = ({
   </dl>
 );
 
+/** Says an earlier version is open, with the way back to the current one. */
+const EarlierVersion = ({ doc }: { doc: DocumentRead }) => {
+  const { t, i18n } = useLingui();
+  const { number } = doc.version;
+  const current = doc.currentVersion;
+  const saved = new Date(doc.version.createdAt).toLocaleDateString(
+    i18n.locale,
+    { day: "numeric", month: "short", year: "numeric" }
+  );
+  return (
+    <div className="bg-muted flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-lg px-3.5 py-2.5 text-sm">
+      <span>
+        {t`You're reading version ${number}, saved ${saved}. The current version is ${current}.`}
+      </span>
+      <Link
+        className="font-medium underline-offset-4 hover:underline"
+        params={{ collection: doc.collectionId }}
+        search={{ doc: doc.id }}
+        to="/knowledge/$collection"
+      >
+        <Trans>Back to the current version</Trans>
+      </Link>
+    </div>
+  );
+};
+
 /** A document, with its editor and history where the person may change it. */
 export const DocumentView = ({
   doc,
@@ -277,6 +303,8 @@ export const DocumentView = ({
   writable: boolean;
 }) => {
   const [editing, setEditing] = useState(false);
+  // An earlier version, opened from the history: read only.
+  const earlier = doc.version.number !== doc.currentVersion;
   const timeline = (
     <Timeline doc={doc} me={me} versions={versions} writable={writable} />
   );
@@ -295,7 +323,7 @@ export const DocumentView = ({
                   {documentTypeLabel(doc.type)}
                 </span>
                 <div className="flex items-center gap-1.5">
-                  {writable && !editing ? (
+                  {writable && !editing && !earlier ? (
                     <Button
                       onClick={() => {
                         setEditing(true);
@@ -334,6 +362,7 @@ export const DocumentView = ({
               doc={doc}
             />
           </header>
+          {earlier ? <EarlierVersion doc={doc} /> : null}
           {editing ? (
             <Editor
               doc={doc}

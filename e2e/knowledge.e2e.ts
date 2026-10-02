@@ -203,6 +203,18 @@ test("a person searches, edits a document, meets a newer version instead of over
     await page.getByRole("button", { name: "Restore version 1" }).click();
     await expect(versionRow(page, 5)).toContainText("Restored version 1");
     await expect(article.getByText(/sixteen weeks/u)).toBeVisible();
+
+    // An earlier version opens for reading, with the way back to the
+    // current one, and no editor.
+    await versionRow(page, 2).getByRole("link", { name: "Version 2" }).click();
+    await expect(page.getByText("You're reading version 2")).toBeVisible();
+    await expect(article.getByText(/twenty weeks/u)).toBeVisible();
+    await expect(page.getByRole("button", { name: "Edit" })).toHaveCount(0);
+    await page
+      .getByRole("link", { name: "Back to the current version" })
+      .click();
+    await expect(article.getByText(/sixteen weeks/u)).toBeVisible();
+    await expect(page.getByText(/You're reading version/u)).toHaveCount(0);
   } finally {
     mine.core[Symbol.dispose]();
   }
@@ -400,4 +412,16 @@ test("someone who may only read a collection is offered no upload, edit or resto
   await page.goto(`/knowledge/${collectionId}`);
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
   await expect(page.getByRole("region", { name: "Upload" })).toHaveCount(0);
+
+  // On a phone the navigation is a sheet, and choosing in it closes it.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/knowledge");
+  await page.getByRole("button", { name: "Browse" }).click();
+  const sheet = page.getByRole("dialog", { name: "Knowledge" });
+  await sheet
+    .getByRole("link", { name: /^Handbook /u })
+    .first()
+    .click();
+  await expect(sheet).toBeHidden();
+  await expect(page).toHaveURL(/\/knowledge\/[^/?]+$/u);
 });

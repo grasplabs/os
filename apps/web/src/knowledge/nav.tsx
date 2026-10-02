@@ -9,10 +9,8 @@ import {
 import { useLingui } from "@lingui/react/macro";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
-  BookIcon,
   ChevronDownIcon,
   LibraryIcon,
-  LockIcon,
   NotebookPenIcon,
   SearchIcon,
 } from "lucide-react";
@@ -31,6 +29,7 @@ import {
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import type { Loaded } from "../load-from-core.tsx";
 import { useCore } from "../use-core.ts";
+import { CollectionIcon, CollectionMarks } from "./collection-markers.tsx";
 import type { KnowledgeNavData } from "./nav-data.ts";
 import { countDocuments, folderTree, foldersTo } from "./tree.ts";
 import type { Folder } from "./tree.ts";
@@ -45,7 +44,7 @@ import type { Folder } from "./tree.ts";
 /** Where the person is: the collection open, and the document in it. */
 export interface KnowledgeAt {
   collection?: string;
-  document?: { id: string; path: string };
+  document?: DocumentSummary;
   /** The collection's first page of documents, when the page read it. */
   documents?: DocumentSummary[];
 }
@@ -276,7 +275,11 @@ const useListed = (
   const keep = (collection: string, listing: Listed): void => {
     setListed((before) => new Map([...before, [collection, listing]]));
   };
-  const { collection: atCollection, documents: atDocuments } = at;
+  const {
+    collection: atCollection,
+    documents: atDocuments,
+    document: atDocument,
+  } = at;
   const { collections } = data;
   useEffect(() => {
     // Read again whenever the page read the collections again; nothing to
@@ -305,7 +308,8 @@ const useListed = (
     };
   }, [opened, collections, core, atCollection, atDocuments]);
   // The open collection's first page as the page read it, unless the person
-  // asked for more of it here.
+  // asked for more of it here; and the open document in it even past that
+  // page, so it is always there, marked.
   const shown = new Map(listed);
   if (
     atCollection !== undefined &&
@@ -316,6 +320,19 @@ const useListed = (
       documents: atDocuments,
       more: atDocuments.length === pageMaxLimit,
       extended: false,
+    });
+  }
+  const atListing =
+    atCollection === undefined ? undefined : shown.get(atCollection);
+  if (
+    atCollection !== undefined &&
+    atListing !== undefined &&
+    atDocument !== undefined &&
+    !atListing.documents.some(({ id }) => id === atDocument.id)
+  ) {
+    shown.set(atCollection, {
+      ...atListing,
+      documents: [...atListing.documents, atDocument],
     });
   }
   return {
@@ -402,7 +419,6 @@ export const KnowledgeTree = ({
               const current = collection.id === at.collection;
               const { name } = collection;
               const listing = listed.get(collection.id);
-              const Icon = collection.access === "me" ? LockIcon : BookIcon;
               return (
                 <div className="flex flex-col" key={collection.id}>
                   <div className="hover:bg-accent has-aria-[current=page]:bg-accent flex items-center rounded-md">
@@ -419,8 +435,12 @@ export const KnowledgeTree = ({
                       search={{}}
                       to="/knowledge/$collection"
                     >
-                      <Icon className="text-muted-foreground size-4 flex-none" />
+                      <CollectionIcon
+                        className="text-muted-foreground size-4 flex-none"
+                        collection={collection}
+                      />
                       <span className="min-w-0 flex-1 truncate">{name}</span>
+                      <CollectionMarks collection={collection} />
                     </Link>
                     <button
                       aria-expanded={expanded}
@@ -527,7 +547,7 @@ export const KnowledgeNav = ({
                   />
                 }
               >
-                {collection.access === "me" ? <LockIcon /> : <BookIcon />}
+                <CollectionIcon collection={collection} />
               </RailButton>
             ))
           : null}

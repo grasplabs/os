@@ -1,7 +1,7 @@
 import type { DocumentRead, VersionSummary } from "@grasp-os/shared/knowledge";
 import { Button } from "@grasp-os/ui/components/button";
 import { Plural, Trans, useLingui } from "@lingui/react/macro";
-import { useRouter } from "@tanstack/react-router";
+import { Link, useNavigate, useRouter } from "@tanstack/react-router";
 import { ChevronRightIcon } from "lucide-react";
 import { useId, useState } from "react";
 
@@ -13,22 +13,28 @@ import { splitHistory } from "./history.ts";
 // A document's history as the prototype's note timeline
 // (grasplabs/prototype `routes/brain/$noteId.tsx`): each version on a line
 // down the side, with when, who saved it and what changed, the latest five
-// shown and older ones folded by month; where the person may change the
-// document, each earlier version can be restored, saved again as the next.
+// shown and older ones folded by month. Each opens for reading; where the
+// person may change the document, an earlier one can be restored, saved
+// again as the next.
 
-/** One version on the timeline, with the button to restore it. */
+/**
+ * One version on the timeline: it opens for reading, and an earlier one
+ * can be restored.
+ */
 const Saved = ({
+  doc,
   version,
-  current,
   me,
   restore,
 }: {
+  doc: DocumentRead;
   version: VersionSummary;
-  current: boolean;
   me: string;
   /** Restores it, where the person may; undefined where they may not. */
   restore: ((version: number) => void) | undefined;
 }) => {
+  const current = version.number === doc.currentVersion;
+  const shown = version.number === doc.version.number;
   const { t, i18n } = useLingui();
   const { number, restoredFrom } = version;
   const when = new Date(version.createdAt).toLocaleDateString(i18n.locale, {
@@ -47,13 +53,23 @@ const Saved = ({
       </span>
       <div
         className={
-          current
+          shown
             ? "border-foreground flex flex-col gap-0.5 border-l-2 pb-3 pl-3"
             : "flex flex-col gap-0.5 border-l-2 pb-3 pl-3"
         }
       >
         <span className="flex items-center justify-between gap-2">
-          <span className="font-medium">{t`Version ${number}`}</span>
+          <Link
+            aria-current={shown ? "page" : undefined}
+            className="font-medium hover:underline aria-[current=page]:no-underline"
+            params={{ collection: doc.collectionId }}
+            search={
+              current ? { doc: doc.id } : { doc: doc.id, version: number }
+            }
+            to="/knowledge/$collection"
+          >
+            {current ? t`Version ${number}, current` : t`Version ${number}`}
+          </Link>
           {restore === undefined || current ? null : (
             <Button
               aria-label={t`Restore version ${number}`}
@@ -95,6 +111,7 @@ export const Timeline = ({
   writable: boolean;
 }) => {
   const router = useRouter();
+  const navigate = useNavigate();
   const { busy, failure, run } = useCoreAction();
   const { i18n } = useLingui();
   const [unfolded, setUnfolded] = useState(false);
@@ -113,6 +130,12 @@ export const Timeline = ({
             ifVersion: doc.currentVersion,
           }),
         async () => {
+          // The restored text is the current version now: show it.
+          await navigate({
+            to: "/knowledge/$collection",
+            params: { collection: doc.collectionId },
+            search: { doc: doc.id },
+          });
           await router.invalidate({ sync: true });
         }
       );
@@ -173,7 +196,7 @@ export const Timeline = ({
                   <ol className="flex flex-col">
                     {month.versions.map((version) => (
                       <Saved
-                        current={version.number === doc.currentVersion}
+                        doc={doc}
                         key={version.number}
                         me={me}
                         restore={canRestore}
@@ -186,7 +209,7 @@ export const Timeline = ({
             : null}
           {recent.map((version) => (
             <Saved
-              current={version.number === doc.currentVersion}
+              doc={doc}
               key={version.number}
               me={me}
               restore={canRestore}

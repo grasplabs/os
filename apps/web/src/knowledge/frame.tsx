@@ -1,6 +1,7 @@
 import { Button } from "@grasp-os/ui/components/button";
 import { Sheet, SheetContent, SheetTitle } from "@grasp-os/ui/components/sheet";
 import { Trans, useLingui } from "@lingui/react/macro";
+import { useRouterState } from "@tanstack/react-router";
 import { PanelLeftIcon } from "lucide-react";
 import { useState } from "react";
 import type { ReactNode } from "react";
@@ -30,7 +31,14 @@ export const KnowledgeFrame = ({
   children: ReactNode;
 }) => {
   const { t } = useLingui();
-  const [sheet, setSheet] = useState(false);
+  // On a phone the navigation is a sheet over the page: open on the page it
+  // was opened on, so choosing anything in it closes it.
+  const href = useRouterState({ select: (state) => state.location.href });
+  const [openedAt, setOpenedAt] = useState<string>();
+  const sheet = openedAt === href;
+  const setSheet = (open: boolean): void => {
+    setOpenedAt(open ? href : undefined);
+  };
   return (
     <>
       <SiteHeader

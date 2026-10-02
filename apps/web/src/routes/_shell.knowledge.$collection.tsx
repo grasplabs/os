@@ -59,16 +59,17 @@ const loadCollection = async (
 };
 
 /**
- * The document `documentId`, if it is in this collection, with its history
- * and what links to it.
+ * The document `documentId` at `version` (the current one without it), if
+ * it is in this collection, with its history and what links to it.
  */
 const loadDocument = async (
   session: Session,
   collectionId: string,
-  documentId: string
+  documentId: string,
+  version: number | undefined
 ): Promise<OpenDocument> => {
   const [doc, history, links] = await Promise.all([
-    session.knowledge.getDocument(documentId),
+    session.knowledge.getDocument(documentId, version),
     session.knowledge.history(documentId),
     session.knowledge.backlinks(documentId),
   ]);
@@ -166,9 +167,7 @@ const CollectionView = () => {
         ...(collection.state === "ready"
           ? { documents: collection.data.documents }
           : {}),
-        ...(document === undefined
-          ? {}
-          : { document: { id: document.id, path: document.path } }),
+        ...(document === undefined ? {} : { document }),
       }}
       crumbs={[
         { label: t`Knowledge`, to: "/knowledge" },
@@ -227,7 +226,7 @@ const CollectionView = () => {
       ) : (
         <DocumentView
           // A new document starts with its editor closed.
-          key={open.data.doc.id}
+          key={`${open.data.doc.id}@${open.data.doc.version.number}`}
           backlinks={open.data.backlinks}
           collection={name}
           doc={open.data.doc}
@@ -242,16 +241,29 @@ const CollectionView = () => {
 };
 
 export const Route = createFileRoute("/_shell/knowledge/$collection")({
-  validateSearch: (search: Record<string, unknown>): { doc?: string } =>
-    typeof search.doc === "string" ? { doc: search.doc } : {},
-  loaderDeps: ({ search: { doc } }) => ({ doc }),
+  validateSearch: (
+    search: Record<string, unknown>
+  ): { doc?: string; version?: number } => {
+    if (typeof search.doc !== "string") {
+      return {};
+    }
+    // An earlier version to read, by its number; any other value reads the
+    // current one.
+    const { version } = search;
+    return typeof version === "number" &&
+      Number.isSafeInteger(version) &&
+      version > 0
+      ? { doc: search.doc, version }
+      : { doc: search.doc };
+  },
+  loaderDeps: ({ search: { doc, version } }) => ({ doc, version }),
   // The collection and the open document are read on their own, and say on
   // their own why they failed.
   loader: async ({
     abortController,
     context: { core },
     params,
-    deps: { doc },
+    deps: { doc, version },
   }) => {
     const navLoad = loadKnowledgeNav(core, abortController.signal);
     const [collection, open] = await Promise.all([
@@ -264,7 +276,7 @@ export const Route = createFileRoute("/_shell/knowledge/$collection")({
         : loadFromCore(
             core,
             async (session) =>
-              await loadDocument(session, params.collection, doc)
+              await loadDocument(session, params.collection, doc, version)
           ),
     ]);
     return { collection, open, nav: await navLoad };
