@@ -114,6 +114,22 @@ test("a person asks in a new chat, follows the answer, renames it, and reads and
   const chats = page.getByRole("navigation", { name: "Recent chats" });
   await expect(chats.getByRole("link", { name: question })).toBeVisible();
 
+  // Trying again asks the question again, and a draft started meanwhile
+  // stays in the box.
+  const box = page.getByLabel("Your question");
+  const draft = `And then ${tag}?`;
+  await box.fill(draft);
+  await messages.getByRole("button", { name: "Try again" }).click();
+  await expect(
+    messages.getByRole("listitem").filter({ hasText: question })
+  ).toHaveCount(2);
+  await expect(box).toHaveValue(draft);
+  await expect(messages.getByRole("alert")).toHaveText(
+    "The model call failed.",
+    { timeout: 30_000 }
+  );
+  await box.fill("");
+
   // Renamed from the chat's menu in the list.
   await chats.getByRole("button", { name: `More for ${question}` }).click();
   await page.getByRole("menuitem", { name: "Rename" }).click();

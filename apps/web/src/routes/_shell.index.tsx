@@ -105,7 +105,9 @@ const useAsk = (chatId: string | undefined, models: readonly string[]) => {
       }
       return;
     }
-    setText("");
+    // Clears the box only of what was sent from it: asking again sends an
+    // earlier question, and a draft the person started stays.
+    setText((now) => (now === question ? "" : now));
     if (chatId === undefined) {
       await navigate({ to: "/", search: { chat: sent } });
     }

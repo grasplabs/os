@@ -389,14 +389,22 @@ const RejectAll = ({
         disabled={busy}
         onClick={() => {
           void (async () => {
-            await run(
-              async (session) =>
-                await Promise.all(
-                  actions.map(async ({ id }) => {
-                    await session.pendingActions.decline(id);
-                  })
-                )
-            );
+            await run(async (session) => {
+              // Every rejection settles before the list is read again, so
+              // none still running is shown as waiting; then the first
+              // refusal says why.
+              const outcomes = await Promise.allSettled(
+                actions.map(async ({ id }) => {
+                  await session.pendingActions.decline(id);
+                })
+              );
+              const refused = outcomes.find(
+                (outcome) => outcome.status === "rejected"
+              );
+              if (refused !== undefined) {
+                throw refused.reason;
+              }
+            });
             onDecided();
           })();
         }}
