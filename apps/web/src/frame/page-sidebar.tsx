@@ -1,4 +1,6 @@
-import { Button } from "@grasp-os/ui/components/button";
+import { mergeProps } from "@base-ui/react/merge-props";
+import { useRender } from "@base-ui/react/use-render";
+import { Button, buttonVariants } from "@grasp-os/ui/components/button";
 import {
   Tooltip,
   TooltipContent,
@@ -70,7 +72,33 @@ export const PageSidebar = ({
   </aside>
 );
 
-/** A button named by its tooltip: the fold, and the rail's entries. With `render` it is a link. */
+/** A rail entry that is a link: `render` with the rail button's look. */
+const RailLink = ({
+  active,
+  label,
+  render,
+  ...props
+}: useRender.ComponentProps<"a"> & { active: boolean; label: string }) =>
+  useRender({
+    defaultTagName: "a",
+    props: mergeProps<"a">(
+      {
+        "aria-current": active ? "page" : undefined,
+        "aria-label": label,
+        className: buttonVariants({
+          size: "icon",
+          variant: active ? "secondary" : "ghost",
+        }),
+      },
+      props
+    ),
+    render,
+  });
+
+/**
+ * A button named by its tooltip: the fold, and the rail's entries. With
+ * `render` it is a link (a link, not a button, to assistive technology).
+ */
 export const RailButton = ({
   label,
   active = false,
@@ -85,21 +113,27 @@ export const RailButton = ({
   children: ReactNode;
 }) => (
   <Tooltip>
-    <TooltipTrigger
-      render={
-        <Button
-          aria-current={active ? "page" : undefined}
-          aria-label={label}
-          nativeButton={render === undefined}
-          onClick={onClick}
-          render={render}
-          size="icon"
-          variant={active ? "secondary" : "ghost"}
-        />
-      }
-    >
-      {children}
-    </TooltipTrigger>
+    {render === undefined ? (
+      <TooltipTrigger
+        render={
+          <Button
+            aria-current={active ? "page" : undefined}
+            aria-label={label}
+            onClick={onClick}
+            size="icon"
+            variant={active ? "secondary" : "ghost"}
+          />
+        }
+      >
+        {children}
+      </TooltipTrigger>
+    ) : (
+      <TooltipTrigger
+        render={<RailLink active={active} label={label} render={render} />}
+      >
+        {children}
+      </TooltipTrigger>
+    )}
     <TooltipContent className="max-w-64" side="right">
       {label}
     </TooltipContent>

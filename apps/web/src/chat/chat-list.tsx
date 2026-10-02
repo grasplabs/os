@@ -1,6 +1,6 @@
 import type { ChatSummary } from "@grasp-os/shared/chat";
 import { chatTitleSchema } from "@grasp-os/shared/chat";
-import { Button } from "@grasp-os/ui/components/button";
+import { Button, buttonVariants } from "@grasp-os/ui/components/button";
 import {
   Dialog,
   DialogContent,
@@ -336,15 +336,15 @@ export const ChatList = ({
   return (
     <div className="flex h-full min-h-0 flex-col text-sm">
       <PageSidebarTop fold={fold}>
-        <Button
-          nativeButton={false}
+        <Link
+          className={buttonVariants({ variant: "outline" })}
           onClick={onPick}
-          render={<Link search={{}} to="/" />}
-          variant="outline"
+          search={{}}
+          to="/"
         >
           <PlusIcon data-icon="inline-start" />
           <Trans>New chat</Trans>
-        </Button>
+        </Link>
       </PageSidebarTop>
       <nav
         aria-label={t`Recent chats`}

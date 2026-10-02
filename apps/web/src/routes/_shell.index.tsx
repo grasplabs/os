@@ -1,5 +1,5 @@
 import type { ChatSummary } from "@grasp-os/shared/chat";
-import { Button } from "@grasp-os/ui/components/button";
+import { Button, buttonVariants } from "@grasp-os/ui/components/button";
 import { Sheet, SheetContent, SheetTitle } from "@grasp-os/ui/components/sheet";
 import { Trans, useLingui } from "@lingui/react/macro";
 import {
@@ -314,17 +314,22 @@ const Chat = () => {
                   variant="outline"
                 >
                   <PanelRightIcon data-icon="inline-start" />
-                  <Trans>Side panel</Trans>
+                  {/* On a phone the icon alone, so where the chat is stays in view. */}
+                  <span className="max-sm:sr-only">
+                    <Trans>Side panel</Trans>
+                  </span>
                 </Button>
-                <Button
-                  nativeButton={false}
-                  render={<Link search={{}} to="/" />}
-                  size="sm"
-                  variant="outline"
+                <Link
+                  className={buttonVariants({ size: "sm", variant: "outline" })}
+                  search={{}}
+                  to="/"
                 >
                   <PlusIcon data-icon="inline-start" />
-                  <Trans>New chat</Trans>
-                </Button>
+                  {/* On a phone the icon alone, so where the chat is stays in view. */}
+                  <span className="max-sm:sr-only">
+                    <Trans>New chat</Trans>
+                  </span>
+                </Link>
               </>
             )}
           </>
