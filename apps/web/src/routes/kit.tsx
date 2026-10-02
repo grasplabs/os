@@ -135,8 +135,23 @@ import {
   TooltipTrigger,
 } from "@grasp-os/ui/components/tooltip";
 import { createFileRoute, notFound } from "@tanstack/react-router";
-import { BookOpenIcon, MessagesSquareIcon, SearchIcon } from "lucide-react";
+import {
+  BookOpenIcon,
+  FileTextIcon,
+  MessagesSquareIcon,
+  PlusIcon,
+  SearchIcon,
+} from "lucide-react";
+import { useState } from "react";
 
+import {
+  PageSidebar,
+  PageSidebarEntry,
+  PageSidebarProvider,
+  PageSidebarSection,
+  PageSidebarTop,
+  PageSidebarTrigger,
+} from "../frame/page-sidebar.tsx";
 import { GraspMark } from "../grasp-mark.tsx";
 
 const models = [
@@ -321,6 +336,51 @@ const Content = () => (
   </Card>
 );
 
+const kitDocuments = ["Onboarding guide", "Pricing", "Holidays"];
+
+/** The column beside a page's content, folding to a rail of its icons. */
+const PageColumn = () => {
+  const [open, setOpen] = useState(kitDocuments[0]);
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Page sidebar</CardTitle>
+        <CardDescription>
+          Folds to a rail and stays folded over a reload.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="flex h-64 overflow-hidden rounded-lg border">
+          <PageSidebarProvider name="kit">
+            <PageSidebar label="Documents">
+              <PageSidebarTop>
+                <PageSidebarEntry icon={<PlusIcon />} label="New document" />
+              </PageSidebarTop>
+              <PageSidebarSection label="Recent">
+                {kitDocuments.map((name) => (
+                  <PageSidebarEntry
+                    active={name === open}
+                    icon={<FileTextIcon />}
+                    key={name}
+                    label={name}
+                    onClick={() => {
+                      setOpen(name);
+                    }}
+                  />
+                ))}
+              </PageSidebarSection>
+            </PageSidebar>
+            <div className="flex flex-1 items-start gap-2 p-4">
+              <PageSidebarTrigger label="Documents" />
+              <p className="text-sm">{open}</p>
+            </div>
+          </PageSidebarProvider>
+        </div>
+      </CardContent>
+    </Card>
+  );
+};
+
 const Kit = () => (
   <Toaster>
     <TooltipProvider>
@@ -333,6 +393,8 @@ const Kit = () => (
         </div>
 
         <Frame />
+
+        <PageColumn />
 
         <Card>
           <CardHeader>

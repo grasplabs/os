@@ -88,3 +88,32 @@ test("serves the Grasp favicon the page names", async ({ page }) => {
   expect(icon.ok()).toBe(true);
   expect(icon.headers()["content-type"]).toContain("image/svg+xml");
 });
+
+test("a page sidebar folds from the keyboard and stays folded over a reload", async ({
+  page,
+}) => {
+  await page.goto("/kit");
+  const documents = page.getByRole("navigation", { name: "Documents" });
+  await expect(
+    documents.getByRole("button", { name: "Pricing" })
+  ).toContainText("Pricing");
+
+  await documents.getByRole("button", { name: "Fold the sidebar" }).focus();
+  await page.keyboard.press("Enter");
+  // Folded, each entry is its icon, named by its tooltip.
+  await expect(
+    documents.getByRole("button", { name: "Open the sidebar" })
+  ).toBeVisible();
+  await expect(documents.getByRole("button", { name: "Pricing" })).toHaveText(
+    ""
+  );
+
+  await page.reload();
+  await expect(
+    documents.getByRole("button", { name: "Open the sidebar" })
+  ).toBeVisible();
+  await documents.getByRole("button", { name: "Open the sidebar" }).click();
+  await expect(
+    documents.getByRole("button", { name: "Pricing" })
+  ).toContainText("Pricing");
+});
