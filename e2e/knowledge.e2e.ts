@@ -24,6 +24,9 @@ const fixture = (name: string): string =>
     )
   );
 
+/** How long a Knowledge page may take to read everything it shows. */
+const pageRead = { timeout: 15_000 };
+
 /** The history timeline's entry for `version`. */
 const versionRow = (page: Page, version: number) =>
   page
@@ -410,7 +413,9 @@ test("someone who may only read a collection is offered no upload, edit or resto
   await expect(page.getByRole("button", { name: "Edit" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /^Restore/u })).toHaveCount(0);
   await page.goto(`/knowledge/${collectionId}`);
-  await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+  // The page reads its navigation (memory, collections) beside the
+  // collection: more than one read, so a loaded runner waits longer.
+  await expect(page.getByRole("heading", { level: 1 })).toBeVisible(pageRead);
   await expect(page.getByRole("region", { name: "Upload" })).toHaveCount(0);
 
   // On a phone the navigation is a sheet, and choosing in it closes it.
