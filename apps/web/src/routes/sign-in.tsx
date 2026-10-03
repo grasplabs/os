@@ -75,12 +75,9 @@ const SignIn = () => {
           )}
         </div>
       </main>
-      <footer className="bg-background sticky bottom-0 grid h-18 flex-none grid-cols-[1fr_auto_1fr] items-center px-4 sm:px-10">
+      <footer className="bg-background sticky bottom-0 flex h-18 flex-none items-center justify-between px-4 sm:px-10">
         <GraspMark className="text-foreground size-5" />
-        <span />
-        <div className="flex items-center justify-end">
-          <LanguageButton />
-        </div>
+        <LanguageButton />
       </footer>
     </div>
   );

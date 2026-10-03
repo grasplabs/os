@@ -123,15 +123,15 @@ const UploadRow = ({
   const status = i18n._(statusLabels[upload.status]);
   const ready = upload.status === "ready" && upload.documentId !== null;
   return (
-    <li className="bg-card grid min-h-14 grid-cols-[2.5rem_minmax(0,1fr)_auto] items-center gap-x-3 rounded-lg border py-2 pr-2 pl-2.5 text-sm">
-      <span className="text-muted-foreground grid size-10 place-items-center">
+    <li className="bg-card flex min-h-14 items-center gap-x-3 rounded-lg border py-2 pr-2 pl-2.5 text-sm">
+      <span className="text-muted-foreground grid size-10 flex-none place-items-center">
         {upload.status === "failed" ? (
           <CircleAlertIcon className="text-status-attention size-5" />
         ) : (
           <FileTextIcon className="size-5" />
         )}
       </span>
-      <span className="grid min-w-0 gap-0.5">
+      <span className="grid min-w-0 flex-1 gap-0.5">
         <span className="truncate font-medium" title={upload.name}>
           {upload.name}
         </span>
@@ -196,7 +196,7 @@ const Sheets = ({ dragging }: { dragging: boolean }) => {
       <span
         className={
           dragging
-            ? `${sheet} -translate-x-5 -rotate-[22deg]`
+            ? `${sheet} -translate-x-5 -rotate-22`
             : `${sheet} -translate-x-2 -rotate-10 group-hover:-translate-x-3 group-hover:-rotate-15`
         }
       >
@@ -205,7 +205,7 @@ const Sheets = ({ dragging }: { dragging: boolean }) => {
       <span
         className={
           dragging
-            ? `${sheet} translate-x-5 rotate-[22deg]`
+            ? `${sheet} translate-x-5 rotate-22`
             : `${sheet} translate-x-2 rotate-10 group-hover:translate-x-3 group-hover:rotate-15`
         }
       >

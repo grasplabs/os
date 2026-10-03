@@ -380,7 +380,7 @@ export const ChatThread = ({
             if (message.role === "user") {
               return (
                 <li
-                  className="bg-secondary text-foreground ml-auto w-fit max-w-[95%] rounded-lg px-4 py-3 text-sm whitespace-pre-wrap"
+                  className="bg-secondary text-foreground ml-auto w-fit max-w-11/12 rounded-lg px-4 py-3 text-sm whitespace-pre-wrap"
                   key={message.id}
                 >
                   {message.text}

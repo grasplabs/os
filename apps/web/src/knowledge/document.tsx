@@ -10,6 +10,7 @@ import { Trans, useLingui } from "@lingui/react/macro";
 import { Link, useRouter } from "@tanstack/react-router";
 import { DownloadIcon, PencilIcon } from "lucide-react";
 import { useState } from "react";
+import type { ReactNode } from "react";
 
 import { ErrorText } from "../error-text.tsx";
 import { documentTypeLabel } from "../labels.ts";
@@ -197,6 +198,20 @@ const DocumentChip = ({
   </Link>
 );
 
+/** One of a document's properties: its name in a fixed column, then its value. */
+const Property = ({
+  label,
+  children,
+}: {
+  label: ReactNode;
+  children: ReactNode;
+}) => (
+  <div className="flex gap-4">
+    <dt className="text-muted-foreground w-32 flex-none py-0.5">{label}</dt>
+    <dd className="min-w-0 flex-1 py-0.5">{children}</dd>
+  </div>
+);
+
 /** The document's properties: where it is, its version and review, and what uses it. */
 const Properties = ({
   doc,
@@ -207,11 +222,8 @@ const Properties = ({
   collection: string;
   backlinks: Backlink[];
 }) => (
-  <dl className="grid grid-cols-[8rem_minmax(0,1fr)] gap-x-4 gap-y-2 text-sm">
-    <dt className="text-muted-foreground py-0.5">
-      <Trans>Collection</Trans>
-    </dt>
-    <dd className="py-0.5">
+  <dl className="flex flex-col gap-2 text-sm">
+    <Property label={<Trans>Collection</Trans>}>
       <Link
         className="hover:underline"
         params={{ collection: doc.collectionId }}
@@ -220,25 +232,19 @@ const Properties = ({
       >
         {collection}
       </Link>
-    </dd>
-    <dt className="text-muted-foreground py-0.5">
-      <Trans>Path</Trans>
-    </dt>
-    <dd className="py-0.5 break-all">{doc.path}</dd>
-    <dt className="text-muted-foreground py-0.5">
-      <Trans>Version</Trans>
-    </dt>
-    <dd className="py-0.5 tabular-nums">{doc.version.number}</dd>
-    <dt className="text-muted-foreground py-0.5">
-      <Trans>Review by</Trans>
-    </dt>
-    <dd className="py-0.5">{doc.reviewDate ?? "–"}</dd>
-    <dt className="text-muted-foreground py-0.5">
-      <Trans>Used by</Trans>
-    </dt>
-    <dd className="min-w-0">
+    </Property>
+    <Property label={<Trans>Path</Trans>}>
+      <span className="break-all">{doc.path}</span>
+    </Property>
+    <Property label={<Trans>Version</Trans>}>
+      <span className="tabular-nums">{doc.version.number}</span>
+    </Property>
+    <Property label={<Trans>Review by</Trans>}>
+      {doc.reviewDate ?? "–"}
+    </Property>
+    <Property label={<Trans>Used by</Trans>}>
       {backlinks.length === 0 ? (
-        <span className="text-muted-foreground py-0.5">–</span>
+        <span className="text-muted-foreground">–</span>
       ) : (
         <ul className="flex flex-wrap gap-1.5">
           {backlinks.map((backlink) => (
@@ -252,7 +258,7 @@ const Properties = ({
           ))}
         </ul>
       )}
-    </dd>
+    </Property>
   </dl>
 );
 
@@ -379,10 +385,10 @@ export const DocumentView = ({
             />
           )}
           {/* Too narrow for the side panel: the history follows the page. */}
-          <div className="min-[1536px]:hidden">{timeline}</div>
+          <div className="2xl:hidden">{timeline}</div>
         </div>
       </div>
-      <aside className="bg-sidebar hidden w-96 flex-none flex-col overflow-y-auto border-l min-[1536px]:flex">
+      <aside className="bg-sidebar hidden w-96 flex-none flex-col overflow-y-auto border-l 2xl:flex">
         <div className="flex flex-1 flex-col gap-4 px-5 pt-4 pb-6">
           {timeline}
         </div>

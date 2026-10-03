@@ -44,18 +44,15 @@ const Saved = ({
   });
   const who = version.author === me ? t`You` : version.author;
   return (
-    <li
-      aria-label={t`Version ${number}`}
-      className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-3"
-    >
-      <span className="text-muted-foreground text-xs leading-5">
+    <li aria-label={t`Version ${number}`} className="flex gap-3">
+      <span className="text-muted-foreground w-22 flex-none text-xs leading-5">
         <time dateTime={version.createdAt}>{when}</time>
       </span>
       <div
         className={
           shown
-            ? "border-foreground flex flex-col gap-0.5 border-l-2 pb-3 pl-3"
-            : "flex flex-col gap-0.5 border-l-2 pb-3 pl-3"
+            ? "border-foreground flex min-w-0 flex-1 flex-col gap-0.5 border-l-2 pb-3 pl-3"
+            : "flex min-w-0 flex-1 flex-col gap-0.5 border-l-2 pb-3 pl-3"
         }
       >
         <span className="flex items-center justify-between gap-2">
