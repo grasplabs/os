@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
 
+import linguiMacro from "@lingui/babel-plugin-lingui-macro";
 import { getConfig } from "@lingui/conf";
 import { lingui } from "@lingui/vite-plugin";
 import babel from "@rolldown/plugin-babel";
@@ -23,7 +24,10 @@ export default defineConfig({
       // Lingui's macros turn the English in the code into catalog lookups
       // first (Babel runs plugins before presets), so the React Compiler
       // sees the code that runs.
-      plugins: [["@lingui/babel-plugin-lingui-macro", { linguiConfig }]],
+      // The plugin itself, not its name: Babel would look a name up from
+      // the working directory, the repo root under `vp test`, where only
+      // this app has it installed.
+      plugins: [[linguiMacro, { linguiConfig }]],
       // Fail the build on anything the React Compiler can't compile,
       // instead of silently shipping it uncompiled.
       presets: [reactCompilerPreset({ panicThreshold: "all_errors" })],
