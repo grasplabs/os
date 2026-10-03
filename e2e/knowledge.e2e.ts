@@ -27,6 +27,15 @@ const fixture = (name: string): string =>
 /** How long a Knowledge page may take to read everything it shows. */
 const pageRead = { timeout: 15_000 };
 
+/**
+ * A document's details, opened from the foot of its page, where they fold
+ * on a window too narrow for the side (the tests' 1280px).
+ */
+const details = async (page: Page) => {
+  await page.getByRole("button", { name: "Details", exact: true }).click();
+  return page.getByRole("definition");
+};
+
 /** The history timeline's entry for `version`. */
 const versionRow = (page: Page, version: number) =>
   page
@@ -149,17 +158,16 @@ test("a person searches, edits a document, meets a newer version instead of over
     await expect(
       page.getByRole("heading", { level: 1, name: "Pay" }).first()
     ).toBeVisible();
-    await page
-      .getByRole("definition")
-      .getByRole("link", { name: "Leave", exact: true })
-      .click();
+    const payDetails = await details(page);
+    await payDetails.getByRole("link", { name: "Leave", exact: true }).click();
     await expect(
       page
         .getByRole("heading", { level: 1, name: "Leave", exact: true })
         .first()
     ).toBeVisible();
+    const leaveDetails = await details(page);
     await expect(
-      page.getByRole("definition").getByRole("link", { name: "Pay" })
+      leaveDetails.getByRole("link", { name: "Pay", exact: true })
     ).toBeVisible();
 
     // An edit is a new version, with what changed.
@@ -277,16 +285,20 @@ test("a person uploads a file and follows it through core failing for a moment u
   const uploads = page.getByRole("region", { name: "Upload" });
   const input = uploads.getByLabel("Upload a PDF, Word or Excel file");
 
-  // A file over the limit is refused with core's reason, before it's sent.
+  // A file over the limit is refused with core's reason, in its own row,
+  // before it's sent.
   await input.setInputFiles({
     name: "too-large.pdf",
     mimeType: "application/pdf",
     buffer: Buffer.alloc(uploadMaxBytes + 1),
   });
-  await expect(uploads.getByRole("alert")).toHaveText(
+  const tooLarge = uploads
+    .getByRole("listitem")
+    .filter({ hasText: "too-large.pdf" });
+  await expect(tooLarge.getByRole("alert")).toHaveText(
     uploadErrors.create("upload.too_large").message
   );
-  await expect(uploads.getByRole("listitem")).toHaveCount(0);
+  await expect(uploads.getByRole("listitem")).toHaveCount(1);
 
   // Core out of reach for its first two asks only costs those turns.
   dropping = 2;

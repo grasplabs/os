@@ -15,13 +15,16 @@ import {
 } from "@grasp-os/ui/components/empty";
 import { Trans, useLingui } from "@lingui/react/macro";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { FileTextIcon } from "lucide-react";
+import { FileTextIcon, FolderIcon } from "lucide-react";
 
 import type { Session } from "../core.ts";
+import { formatDate } from "../format.ts";
 import { CollectionMarkers } from "../knowledge/collection-markers.tsx";
 import { DocumentView } from "../knowledge/document.tsx";
 import { KnowledgeFrame } from "../knowledge/frame.tsx";
 import { loadKnowledgeNav } from "../knowledge/nav-data.ts";
+import { folderTree } from "../knowledge/tree.ts";
+import type { Folder } from "../knowledge/tree.ts";
 import { Uploads } from "../knowledge/uploads.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 
@@ -88,8 +91,16 @@ const loadDocument = async (
 };
 
 /** The collection's files, each a row that opens it. */
+/**
+ * The folders of `tree` that hold documents, the collection itself first,
+ * then each folder before the ones in it, in path order.
+ */
+const foldersOf = (tree: Folder): Folder[] => [
+  ...(tree.documents.length === 0 ? [] : [tree]),
+  ...tree.folders.flatMap((folder) => foldersOf(folder)),
+];
+
 const FileList = ({ documents }: { documents: DocumentSummary[] }) => {
-  const { i18n } = useLingui();
   if (documents.length === 0) {
     return (
       <Empty>
@@ -113,26 +124,36 @@ const FileList = ({ documents }: { documents: DocumentSummary[] }) => {
   return (
     <>
       <ul className="-mx-2 flex flex-col">
-        {documents.map((document) => (
-          <li key={document.id}>
-            <Link
-              className="hover:bg-muted flex items-center gap-3 rounded-lg px-2 py-2 text-sm"
-              from="/knowledge/$collection"
-              search={{ doc: document.id }}
-            >
-              <FileTextIcon
-                aria-hidden="true"
-                className="text-muted-foreground size-4 flex-none"
-              />
-              <span className="min-w-0 flex-1 truncate">{document.path}</span>
-              <span className="text-muted-foreground flex-none text-xs tabular-nums">
-                {new Date(document.updatedAt).toLocaleDateString(i18n.locale, {
-                  day: "numeric",
-                  month: "short",
-                  year: "numeric",
-                })}
-              </span>
-            </Link>
+        {foldersOf(folderTree(documents)).map((folder) => (
+          <li key={folder.path}>
+            {folder.path === "" ? null : (
+              <p className="text-muted-foreground flex items-center gap-2 px-2 pt-3 pb-1 text-xs font-medium">
+                <FolderIcon aria-hidden="true" className="size-3.5 flex-none" />
+                <span className="min-w-0 truncate">{folder.path}</span>
+              </p>
+            )}
+            <ul className="flex flex-col">
+              {folder.documents.map((document) => (
+                <li key={document.id}>
+                  <Link
+                    className="hover:bg-muted flex items-center gap-3 rounded-lg px-2 py-2 text-sm"
+                    from="/knowledge/$collection"
+                    search={{ doc: document.id }}
+                  >
+                    <FileTextIcon
+                      aria-hidden="true"
+                      className="text-muted-foreground size-4 flex-none"
+                    />
+                    <span className="min-w-0 flex-1 truncate">
+                      {document.path.split("/").at(-1)}
+                    </span>
+                    <span className="text-muted-foreground flex-none text-xs tabular-nums">
+                      {formatDate(document.updatedAt)}
+                    </span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
           </li>
         ))}
       </ul>
