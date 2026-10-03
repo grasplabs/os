@@ -373,6 +373,12 @@ export const ChatThread = ({
     }
   }
   const lastAnswer = messages.findLast(({ role }) => role === "assistant");
+  // "Ask again" asks the last question: only under the answer to it, never
+  // under an earlier one when a later question stopped unanswered.
+  const answersLast =
+    lastAnswer !== undefined &&
+    messages.findLastIndex(({ role }) => role === "user") <
+      messages.indexOf(lastAnswer);
   // Grasp is reading until the answer shows its first words or code.
   const reading =
     running &&
@@ -408,7 +414,9 @@ export const ChatThread = ({
                   <Reply
                     latest={partial === null && message === lastAnswer}
                     onRetry={
-                      !running && message === lastAnswer ? onRetry : undefined
+                      !running && message === lastAnswer && answersLast
+                        ? onRetry
+                        : undefined
                     }
                     reply={message}
                     results={results}

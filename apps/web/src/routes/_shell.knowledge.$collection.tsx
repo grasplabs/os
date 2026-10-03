@@ -187,6 +187,7 @@ const CollectionView = () => {
       : t`Collection`;
   const { collection: collectionId } = Route.useParams();
   const document = open?.state === "ready" ? open.data.doc : undefined;
+  const documentOpen = document !== undefined;
   return (
     <KnowledgeFrame
       at={{
@@ -216,46 +217,44 @@ const CollectionView = () => {
       ]}
       data={nav}
     >
-      {open === undefined || open.state !== "ready" ? (
-        <div className="min-w-0 flex-1 overflow-y-auto">
-          <div className="mx-auto flex w-full max-w-5xl flex-col gap-8 px-6 py-8 md:px-12">
-            {open === undefined ? null : <NotLoaded page={open} />}
-            <NotLoaded page={collection} />
-            {collection.state === "ready" ? (
-              <>
-                <header className="flex flex-col gap-2.5">
-                  <h1 className="text-2xl font-medium tracking-tight">
-                    {collection.data.collection.name}
-                  </h1>
-                  {collection.data.collection.description === "" ? null : (
-                    <p className="text-muted-foreground text-sm leading-relaxed">
-                      {collection.data.collection.description}
-                    </p>
-                  )}
-                  <CollectionMarkers collection={collection.data.collection} />
-                </header>
-                {writable ? (
-                  <Uploads
-                    // Another collection starts with no uploads to follow.
-                    key={collection.data.collection.id}
-                    collectionId={collection.data.collection.id}
-                    listed={new Set(paths.values())}
-                  />
-                ) : null}
-                <section
-                  aria-labelledby="files"
-                  className="flex flex-col gap-2"
-                >
-                  <h2 className="text-sm font-medium" id="files">
-                    <Trans>Files</Trans>
-                  </h2>
-                  <FileList documents={collection.data.documents} />
-                </section>
-              </>
-            ) : null}
-          </div>
+      {/* The collection stays mounted, hidden, while one of its documents
+          is open, so uploads on their way keep going and keep their rows. */}
+      <div className="min-w-0 flex-1 overflow-y-auto" hidden={documentOpen}>
+        <div className="mx-auto flex w-full max-w-5xl flex-col gap-8 px-6 py-8 md:px-12">
+          {open === undefined ? null : <NotLoaded page={open} />}
+          <NotLoaded page={collection} />
+          {collection.state === "ready" ? (
+            <>
+              <header className="flex flex-col gap-2.5">
+                <h1 className="text-2xl font-medium tracking-tight">
+                  {collection.data.collection.name}
+                </h1>
+                {collection.data.collection.description === "" ? null : (
+                  <p className="text-muted-foreground text-sm leading-relaxed">
+                    {collection.data.collection.description}
+                  </p>
+                )}
+                <CollectionMarkers collection={collection.data.collection} />
+              </header>
+              {writable ? (
+                <Uploads
+                  // Another collection starts with no uploads to follow.
+                  key={collection.data.collection.id}
+                  collectionId={collection.data.collection.id}
+                  listed={new Set(paths.values())}
+                />
+              ) : null}
+              <section aria-labelledby="files" className="flex flex-col gap-2">
+                <h2 className="text-sm font-medium" id="files">
+                  <Trans>Files</Trans>
+                </h2>
+                <FileList documents={collection.data.documents} />
+              </section>
+            </>
+          ) : null}
         </div>
-      ) : (
+      </div>
+      {open?.state === "ready" ? (
         <DocumentView
           // A new document starts with its editor closed.
           key={`${open.data.doc.id}@${open.data.doc.version.number}`}
@@ -267,7 +266,7 @@ const CollectionView = () => {
           versions={open.data.versions}
           writable={writable}
         />
-      )}
+      ) : null}
     </KnowledgeFrame>
   );
 };

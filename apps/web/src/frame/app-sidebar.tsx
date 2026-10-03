@@ -9,11 +9,12 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
+  useSidebar,
 } from "@grasp-os/ui/components/sidebar";
 import type { MessageDescriptor } from "@lingui/core";
 import { msg } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react/macro";
-import { Link, useMatchRoute } from "@tanstack/react-router";
+import { Link, useMatchRoute, useRouter } from "@tanstack/react-router";
 import {
   BookOpenIcon,
   BoxesIcon,
@@ -22,6 +23,7 @@ import {
   WorkflowIcon,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import { useEffect } from "react";
 
 import type { CoreConnection } from "../core-connection.ts";
 import { GraspMark } from "../grasp-mark.tsx";
@@ -55,6 +57,17 @@ export const AppSidebar = ({
 }) => {
   const { t, i18n } = useLingui();
   const matchRoute = useMatchRoute();
+  const router = useRouter();
+  const { setOpenMobile } = useSidebar();
+  // On a phone the sidebar is a sheet over the page: going anywhere from it
+  // closes it, so the page it went to is in view.
+  useEffect(
+    () =>
+      router.subscribe("onResolved", () => {
+        setOpenMobile(false);
+      }),
+    [router, setOpenMobile]
+  );
   return (
     <Sidebar collapsible="offcanvas" label={t`Sidebar`} variant="inset">
       <SidebarHeader>

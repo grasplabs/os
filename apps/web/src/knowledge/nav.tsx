@@ -337,6 +337,10 @@ const useListed = (
       extended: false,
     });
   }
+  // The pages as read, before the open document is added for display:
+  // "Show more" reads on from these, so it never skips past what lies
+  // between a page's end and an open document beyond it.
+  const paged = new Map(shown);
   const atListing =
     atCollection === undefined ? undefined : shown.get(atCollection);
   if (
@@ -356,7 +360,7 @@ const useListed = (
       const readMore = async (): Promise<void> => {
         keep(
           collection,
-          await readListing(core, collection, shown.get(collection)?.documents)
+          await readListing(core, collection, paged.get(collection)?.documents)
         );
       };
       void readMore();
