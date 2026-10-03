@@ -8,6 +8,7 @@ import {
 } from "@grasp-os/shared/uploads";
 import type { Upload, UploadStatus } from "@grasp-os/shared/uploads";
 import { buttonVariants } from "@grasp-os/ui/components/button";
+import { Spinner } from "@grasp-os/ui/components/spinner";
 import { i18n } from "@lingui/core";
 import type { MessageDescriptor } from "@lingui/core";
 import { msg } from "@lingui/core/macro";
@@ -25,7 +26,6 @@ import { readWithin } from "../core-connection.ts";
 import type { CoreConnection } from "../core-connection.ts";
 import { isTransient, wait } from "../core.ts";
 import { ErrorText } from "../error-text.tsx";
-import { useCoreAction } from "../use-core-action.ts";
 import { useCore } from "../use-core.ts";
 
 // Uploading a file into a collection, and following it: core answers at
@@ -221,6 +221,39 @@ const Sheets = ({ dragging }: { dragging: boolean }) => {
   );
 };
 
+/** A file on its way to core, or why it didn't get there. */
+interface Sending {
+  key: string;
+  name: string;
+  problem?: string;
+}
+
+/** A file being sent: its name, and that it is on its way, or why it failed. */
+const SendingRow = ({ name, problem }: Omit<Sending, "key">) => {
+  const { t } = useLingui();
+  return (
+    <li className="bg-card flex min-h-14 items-center gap-x-3 rounded-lg border py-2 pr-2 pl-2.5 text-sm">
+      <span className="text-muted-foreground grid size-10 flex-none place-items-center">
+        {problem === undefined ? (
+          <Spinner aria-hidden="true" className="size-5" />
+        ) : (
+          <CircleAlertIcon className="text-status-attention size-5" />
+        )}
+      </span>
+      <span className="grid min-w-0 flex-1 gap-0.5">
+        <span className="truncate font-medium" title={name}>
+          {name}
+        </span>
+        {problem === undefined ? (
+          <output className="text-muted-foreground text-xs">{t`Uploading…`}</output>
+        ) : (
+          <ErrorText>{problem}</ErrorText>
+        )}
+      </span>
+    </li>
+  );
+};
+
 /**
  * Uploading files into the collection `collectionId`, and their status;
  * `listed` holds the documents the file list shows.
@@ -235,7 +268,7 @@ export const Uploads = ({
   const router = useRouter();
   const inputId = useId();
   const core = useCore();
-  const { busy, failure, run } = useCoreAction();
+  const [sending, setSending] = useState<Sending[]>([]);
   const [followed, setFollowed] = useState<Followed[]>([]);
   const [dragging, setDragging] = useState(false);
   const { t } = useLingui();
@@ -255,23 +288,34 @@ export const Uploads = ({
     );
   };
   const upload = async (file: File): Promise<void> => {
-    const started = await run(async (session) => {
-      // Refused here, as core would, before reading and sending it all:
-      // the size the browser reports only saves the trip. Core checks the
-      // bytes that arrive.
-      if (file.size > uploadMaxBytes) {
-        throw uploadErrors.create("upload.too_large");
-      }
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      return await session.uploads.upload({
-        collectionId,
-        name: file.name,
-        bytes,
+    // Each file has its own row from the start, so several can be on their
+    // way at once, each saying how it went.
+    const key = crypto.randomUUID();
+    setSending((all) => [{ key, name: file.name }, ...all]);
+    let started: Upload;
+    try {
+      started = await core.withSession(async (session) => {
+        // Refused here, as core would, before reading and sending it all:
+        // the size the browser reports only saves the trip. Core checks the
+        // bytes that arrive.
+        if (file.size > uploadMaxBytes) {
+          throw uploadErrors.create("upload.too_large");
+        }
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        return await session.uploads.upload({
+          collectionId,
+          name: file.name,
+          bytes,
+        });
       });
-    });
-    if (started === undefined) {
+    } catch (error) {
+      const problem = failureText(error);
+      setSending((all) =>
+        all.map((entry) => (entry.key === key ? { ...entry, problem } : entry))
+      );
       return;
     }
+    setSending((all) => all.filter((entry) => entry.key !== key));
     setFollowed((all) => [{ upload: started }, ...all]);
     const end = await follow(
       core,
@@ -344,7 +388,6 @@ export const Uploads = ({
         <input
           accept={accept}
           className="sr-only"
-          disabled={busy}
           id={inputId}
           multiple
           onChange={(event) => {
@@ -358,9 +401,15 @@ export const Uploads = ({
           type="file"
         />
       </div>
-      <ErrorText>{failure}</ErrorText>
-      {followed.length === 0 ? null : (
+      {sending.length === 0 && followed.length === 0 ? null : (
         <ul className="flex flex-col gap-2">
+          {sending.map((entry) => (
+            <SendingRow
+              key={entry.key}
+              name={entry.name}
+              problem={entry.problem}
+            />
+          ))}
           {followed.map((entry) => (
             <UploadRow key={entry.upload.id} listed={listed} {...entry} />
           ))}

@@ -6,15 +6,16 @@ import {
   InputGroupAddon,
   InputGroupInput,
 } from "@grasp-os/ui/components/input-group";
+import { Spinner } from "@grasp-os/ui/components/spinner";
 import { useLingui } from "@lingui/react/macro";
-import { Link, useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import {
   ChevronDownIcon,
   LibraryIcon,
   NotebookPenIcon,
   SearchIcon,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { CoreConnection } from "../core-connection.ts";
 import {
@@ -201,7 +202,9 @@ const flip = (before: ReadonlySet<string>, key: string): Set<string> => {
 /** Search, in the navigation's top row: core's search, on the home page. */
 const SearchField = () => {
   const navigate = useNavigate();
-  const [typed, setTyped] = useState("");
+  // On the results, the box starts from what was searched.
+  const { q: searched } = useSearch({ strict: false });
+  const [typed, setTyped] = useState(searched ?? "");
   const { t } = useLingui();
   return (
     <search>
@@ -281,31 +284,43 @@ const useListed = (
     document: atDocument,
   } = at;
   const { collections } = data;
+  // The collections the listings were read for, and the ones read since:
+  // opening another collection reads only that one, so a listing the person
+  // extended with "Show more" keeps its pages until the page reads again.
+  const readFor = useRef(collections);
+  const read = useRef(new Set<string>());
   useEffect(() => {
     // Read again whenever the page read the collections again; nothing to
     // read while they failed.
-    let current = true;
+    if (collections.state !== "ready") {
+      return;
+    }
+    if (readFor.current !== collections) {
+      readFor.current = collections;
+      read.current = new Set();
+    }
+    const toRead = [...opened].filter(
+      (collection) =>
+        !read.current.has(collection) &&
+        (collection !== atCollection || atDocuments === undefined)
+    );
+    for (const collection of toRead) {
+      read.current.add(collection);
+    }
     const readOpened = async (): Promise<void> => {
-      if (collections.state !== "ready") {
-        return;
-      }
-      const toRead = [...opened].filter(
-        (collection) => collection !== atCollection || atDocuments === undefined
-      );
       const listings = await Promise.all(
         toRead.map(
           async (collection) =>
             [collection, await readListing(core, collection)] as const
         )
       );
-      if (current) {
+      // Kept unless the page has read its collections again meanwhile: then
+      // a newer read is on its way.
+      if (readFor.current === collections) {
         setListed((before) => new Map([...before, ...listings]));
       }
     };
     void readOpened();
-    return () => {
-      current = false;
-    };
   }, [opened, collections, core, atCollection, atDocuments]);
   // The open collection's first page as the page read it, unless the person
   // asked for more of it here; and the open document in it even past that
@@ -462,7 +477,12 @@ export const KnowledgeTree = ({
                   </div>
                   {expanded ? (
                     <div className="my-1 ml-4 flex flex-col gap-0.5 border-l pl-2">
-                      {listing === undefined ? null : (
+                      {listing === undefined ? (
+                        <Spinner
+                          aria-label={t`Loading…`}
+                          className="mx-2 my-1"
+                        />
+                      ) : (
                         <>
                           {listing.documents.length === 0 &&
                           listing.failure === undefined ? (

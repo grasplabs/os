@@ -405,7 +405,7 @@ export const ChatSidebar = ({
   const [folded, setFolded] = usePageSidebarFold("chat");
   if (folded) {
     return (
-      <PageSidebar folded label={t`Recent chats`}>
+      <PageSidebar folded label={t`Chats`}>
         <RailExpand
           label={t`Expand the chats`}
           onExpand={() => {
@@ -430,7 +430,7 @@ export const ChatSidebar = ({
     );
   }
   return (
-    <PageSidebar folded={false} label={t`Recent chats`}>
+    <PageSidebar folded={false} label={t`Chats`}>
       <ChatList
         activeId={activeId}
         chats={chats}

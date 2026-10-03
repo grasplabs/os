@@ -528,6 +528,7 @@ msgstr "Wijzigt de gegevens van de app"
 msgid "Chat"
 msgstr "Chat"
 
+#: src/chat/chat-list.tsx
 #: src/routes/_shell.index.tsx
 msgid "Chats"
 msgstr "Chats"
@@ -1133,6 +1134,7 @@ msgstr "Servercode wordt geladen…"
 #: src/activity/audit-log.tsx
 #: src/chat/side-panel.tsx
 #: src/chat/thread.tsx
+#: src/knowledge/nav.tsx
 msgid "Loading…"
 msgstr "Laden…"
 
@@ -2244,6 +2246,10 @@ msgstr "Uploaden"
 #: src/knowledge/uploads.tsx
 msgid "Upload a PDF, Word or Excel file"
 msgstr "Upload een PDF-, Word- of Excelbestand"
+
+#: src/knowledge/uploads.tsx
+msgid "Uploading…"
+msgstr "Wordt geüpload…"
 
 #: src/routes/sign-in.tsx
 msgid "Use your organization’s account to go on."

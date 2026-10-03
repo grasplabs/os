@@ -42,15 +42,21 @@ interface OpenDocument {
   backlinks: Backlink[];
 }
 
-/** The collection, if the person may read it, and its first page of files. */
+/**
+ * The collection, if the person may read it, and its first page of files.
+ * The collections come from the navigation's read (`known`), which the page
+ * waits for anyway; only when that failed are they read again here.
+ */
 const loadCollection = async (
   session: Session,
-  collectionId: string
+  collectionId: string,
+  known: Promise<Collection[] | undefined>
 ): Promise<CollectionPage> => {
-  const [collections, page] = await Promise.all([
-    session.knowledge.listCollections(),
+  const [listed, page] = await Promise.all([
+    known,
     session.knowledge.listDocuments(collectionId),
   ]);
+  const collections = listed ?? (await session.knowledge.listCollections());
   const collection = collections.find(({ id }) => id === collectionId);
   if (collection === undefined) {
     throw knowledgeErrors.create("knowledge.not_found");
@@ -266,10 +272,15 @@ export const Route = createFileRoute("/_shell/knowledge/$collection")({
     deps: { doc, version },
   }) => {
     const navLoad = loadKnowledgeNav(core, abortController.signal);
+    const known = (async () => {
+      const { collections } = await navLoad;
+      return collections.state === "ready" ? collections.data : undefined;
+    })();
     const [collection, open] = await Promise.all([
       loadFromCore(
         core,
-        async (session) => await loadCollection(session, params.collection)
+        async (session) =>
+          await loadCollection(session, params.collection, known)
       ),
       doc === undefined
         ? undefined

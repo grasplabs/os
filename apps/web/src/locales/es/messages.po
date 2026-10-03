@@ -528,6 +528,7 @@ msgstr "Cambia los datos de la aplicación"
 msgid "Chat"
 msgstr "Chat"
 
+#: src/chat/chat-list.tsx
 #: src/routes/_shell.index.tsx
 msgid "Chats"
 msgstr "Chats"
@@ -1133,6 +1134,7 @@ msgstr "Cargando el código del servidor…"
 #: src/activity/audit-log.tsx
 #: src/chat/side-panel.tsx
 #: src/chat/thread.tsx
+#: src/knowledge/nav.tsx
 msgid "Loading…"
 msgstr "Cargando…"
 
@@ -2244,6 +2246,10 @@ msgstr "Subir"
 #: src/knowledge/uploads.tsx
 msgid "Upload a PDF, Word or Excel file"
 msgstr "Sube un archivo PDF, Word o Excel"
+
+#: src/knowledge/uploads.tsx
+msgid "Uploading…"
+msgstr "Subiendo…"
 
 #: src/routes/sign-in.tsx
 msgid "Use your organization’s account to go on."

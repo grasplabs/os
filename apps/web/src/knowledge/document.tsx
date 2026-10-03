@@ -161,6 +161,9 @@ const Editor = ({
   );
 };
 
+/** How long an exported file stays readable for the browser's download. */
+const exportKeptMs = 40_000;
+
 /** Downloads the document's text, frontmatter and all, as Markdown. */
 const exportMarkdown = (doc: DocumentRead): void => {
   const name = doc.path.split("/").at(-1) ?? doc.title;
@@ -171,7 +174,11 @@ const exportMarkdown = (doc: DocumentRead): void => {
   link.href = url;
   link.download = name.endsWith(".md") ? name : `${name}.md`;
   link.click();
-  URL.revokeObjectURL(url);
+  // Some browsers read the file only after the click returns: it is let go
+  // once they surely have it, as FileSaver.js does.
+  setTimeout(() => {
+    URL.revokeObjectURL(url);
+  }, exportKeptMs);
 };
 
 /** A document another one links to, or that links to it, as a chip. */
