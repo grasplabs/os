@@ -593,19 +593,10 @@ function SidebarMenuBadge({
 function SidebarMenuSkeleton({
   className,
   showIcon = false,
-  width = "70%",
   ...props
 }: React.ComponentProps<"div"> & {
   showIcon?: boolean;
-  /** How wide the text placeholder is, so a list of them looks like text. */
-  width?: string;
 }) {
-  // A custom property, which React sets through the CSSOM: the CSP allows
-  // that, unlike a style attribute in markup.
-  const skeletonStyle: React.CSSProperties & { "--skeleton-width": string } = {
-    "--skeleton-width": width,
-  };
-
   return (
     <div
       data-slot="sidebar-menu-skeleton"
@@ -619,10 +610,11 @@ function SidebarMenuSkeleton({
           data-sidebar="menu-skeleton-icon"
         />
       )}
+      {/* Seven tenths wide, so a list of them looks like text. No width
+          prop: it would take a style attribute, which the kit doesn't use. */}
       <Skeleton
-        className="h-4 max-w-(--skeleton-width) flex-1"
+        className="h-4 max-w-7/10 flex-1"
         data-sidebar="menu-skeleton-text"
-        style={skeletonStyle}
       />
     </div>
   );
