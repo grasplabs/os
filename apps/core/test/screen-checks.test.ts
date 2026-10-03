@@ -228,10 +228,10 @@ describe("screen checks", { timeout: 60_000 }, () => {
       built.diagnostics.map((diagnostic) => summary(diagnostic))
     ).toStrictEqual([
       expect.stringContaining(
-        'screens/tickets.tsx:44:41 shadcn/no-restyle error: "rounded-full" is not allowed on <Button>: <Button> owns its shape. Use a variant: default, outline, secondary, ghost, destructive, link.'
+        'screens/tickets.tsx:44:41 shadcn/no-restyle error: "rounded-full" is not allowed on <Button>: <Button> owns its shape. Use a variant: default, outline, secondary, ghost, destructive, link, ask.'
       ),
       expect.stringContaining(
-        'screens/tickets.tsx:44:41 shadcn/no-restyle error: "px-8" is not allowed on <Button>: <Button> owns its spacing. Use a size (default, xs, sm, lg, icon, icon-xs, icon-sm, icon-lg)'
+        'screens/tickets.tsx:44:41 shadcn/no-restyle error: "px-8" is not allowed on <Button>: <Button> owns its spacing. Use a size (default, xs, sm, lg, xl, icon, icon-xs, icon-sm, icon-lg)'
       ),
     ]);
   });

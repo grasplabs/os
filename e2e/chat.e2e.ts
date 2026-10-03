@@ -111,10 +111,28 @@ test("a person asks in a new chat, follows the answer, renames it, and reads and
     "The model call failed.",
     { timeout: 30_000 }
   );
-  const chats = page.getByRole("navigation", { name: "Chats" });
+  const chats = page.getByRole("navigation", { name: "Recent chats" });
   await expect(chats.getByRole("link", { name: question })).toBeVisible();
 
-  await page.getByRole("button", { name: "Rename" }).click();
+  // Trying again asks the question again, and a draft started meanwhile
+  // stays in the box.
+  const box = page.getByLabel("Your question");
+  const draft = `And then ${tag}?`;
+  await box.fill(draft);
+  await messages.getByRole("button", { name: "Try again" }).click();
+  await expect(
+    messages.getByRole("listitem").filter({ hasText: question })
+  ).toHaveCount(2);
+  await expect(box).toHaveValue(draft);
+  await expect(messages.getByRole("alert")).toHaveText(
+    "The model call failed.",
+    { timeout: 30_000 }
+  );
+  await box.fill("");
+
+  // Renamed from the chat's menu in the list.
+  await chats.getByRole("button", { name: `More for ${question}` }).click();
+  await page.getByRole("menuitem", { name: "Rename" }).click();
   await page.getByLabel("Title").fill(title);
   await page.getByRole("button", { name: "Save" }).click();
   await expect(page.getByRole("heading", { level: 1 })).toHaveText(title);
@@ -242,7 +260,7 @@ test("a followed chat says core can't be reached when it stays out of reach", as
   );
   await expect(
     page
-      .getByRole("navigation", { name: "Chats" })
+      .getByRole("navigation", { name: "Recent chats" })
       .getByRole("link", { name: `Out of reach ${tag}.` })
   ).toBeVisible();
 
@@ -255,7 +273,7 @@ test("a followed chat says core can't be reached when it stays out of reach", as
   ).toBeVisible({ timeout: 15_000 });
 });
 
-test("the side panel opens over the chat on a narrow screen, and beside it on a wide one", async ({
+test("the side panel opens in a sheet over the chat on a narrow screen, and beside it on a wide one", async ({
   browser,
 }) => {
   const { user } = peopleIn("chat");
@@ -267,18 +285,14 @@ test("the side panel opens over the chat on a narrow screen, and beside it on a 
   await expect(page).toHaveURL(/[?&]chat=/u);
   const panel = page.getByRole("complementary", { name: "Side panel" });
 
-  // A phone: over the chat, filling the screen, and closed from itself.
+  // A phone: a sheet over the chat, closed from itself.
   await page.setViewportSize({ width: 375, height: 812 });
   await page.getByRole("button", { name: "Side panel" }).click();
-  await expect(panel).toBeVisible();
-  expect(await panel.boundingBox()).toMatchObject({
-    x: 0,
-    y: 0,
-    width: 375,
-    height: 812,
-  });
-  await panel.getByRole("button", { name: "Close" }).click();
+  const sheet = page.getByRole("dialog", { name: "Side panel" });
+  await expect(sheet).toBeVisible();
   await expect(panel).toHaveCount(0);
+  await sheet.getByRole("button", { name: "Close" }).click();
+  await expect(sheet).toHaveCount(0);
 
   // A wide screen: beside the chat, which keeps its room.
   await page.setViewportSize({ width: 1440, height: 900 });

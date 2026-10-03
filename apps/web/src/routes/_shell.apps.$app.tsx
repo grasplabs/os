@@ -15,6 +15,9 @@ import {
   TabsList,
   TabsTrigger,
 } from "@grasp-os/ui/components/tabs";
+import { i18n } from "@lingui/core";
+import { msg, ph } from "@lingui/core/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
 import {
   Await,
   createFileRoute,
@@ -24,9 +27,13 @@ import {
 import { useState } from "react";
 
 import type { Session } from "../core.ts";
+import { formatDateTime } from "../format.ts";
+import { SiteHeader } from "../frame/site-header.tsx";
+import { roleLabel } from "../labels.ts";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import type { Loaded } from "../load-from-core.tsx";
 import { ScreenFrame } from "../screens/screen-frame.tsx";
+import { runStatusLabel } from "../workflows/runs.tsx";
 
 // One App: its screens, running in their frames, its workflows with their
 // latest runs, and who can open it.
@@ -56,11 +63,6 @@ const loadApp = async (session: Session, app: string): Promise<AppPage> => {
   return { app: found, contents };
 };
 
-const dateTime = new Intl.DateTimeFormat(undefined, {
-  dateStyle: "medium",
-  timeStyle: "short",
-});
-
 const Screens = ({ app, contents }: { app: string; contents: AppContents }) => {
   const router = useRouter();
   const [first] = contents.screens;
@@ -71,14 +73,14 @@ const Screens = ({ app, contents }: { app: string; contents: AppContents }) => {
   if (contents.version === null) {
     return (
       <p className="text-muted-foreground text-sm">
-        This App has no version to run yet.
+        <Trans>This App has no version to run yet.</Trans>
       </p>
     );
   }
   if (selected === undefined) {
     return (
       <p className="text-muted-foreground text-sm">
-        This App&apos;s current version has no screens.
+        <Trans>This App&apos;s current version has no screens.</Trans>
       </p>
     );
   }
@@ -103,7 +105,7 @@ const Screens = ({ app, contents }: { app: string; contents: AppContents }) => {
           params={{ app, screen: selected }}
           to="/apps/$app/screens/$screen"
         >
-          Open full page
+          <Trans>Open full page</Trans>
         </Link>
       </div>
       <div className="flex min-h-96 flex-1 flex-col rounded-lg border">
@@ -125,24 +127,34 @@ const Screens = ({ app, contents }: { app: string; contents: AppContents }) => {
 
 const RunsTable = ({ runs }: { runs: WorkflowRun[] }) =>
   runs.length === 0 ? (
-    <p className="text-muted-foreground text-sm">No runs yet.</p>
+    <p className="text-muted-foreground text-sm">
+      <Trans>No runs yet.</Trans>
+    </p>
   ) : (
     <Table>
       <TableHeader>
         <TableRow>
-          <TableHead>Workflow</TableHead>
-          <TableHead>Status</TableHead>
-          <TableHead>Version</TableHead>
-          <TableHead>Started</TableHead>
+          <TableHead>
+            <Trans>Workflow</Trans>
+          </TableHead>
+          <TableHead>
+            <Trans>Status</Trans>
+          </TableHead>
+          <TableHead>
+            <Trans>Version</Trans>
+          </TableHead>
+          <TableHead>
+            <Trans>Started</Trans>
+          </TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {runs.map((run) => (
           <TableRow key={run.id}>
             <TableCell>{run.workflow}</TableCell>
-            <TableCell>{run.status}</TableCell>
+            <TableCell>{runStatusLabel(run.status)}</TableCell>
             <TableCell>{run.version}</TableCell>
-            <TableCell>{dateTime.format(new Date(run.createdAt))}</TableCell>
+            <TableCell>{formatDateTime(run.createdAt)}</TableCell>
           </TableRow>
         ))}
       </TableBody>
@@ -155,58 +167,72 @@ const Workflows = ({
 }: {
   contents: AppContents;
   runs: Runs;
-}) => (
-  <div className="flex flex-col gap-6">
-    {contents.workflows.length === 0 ? (
-      <p className="text-muted-foreground text-sm">
-        This App&apos;s current version has no workflows.
-      </p>
-    ) : (
-      <ul aria-label="Workflows" className="flex flex-col gap-1">
-        {contents.workflows.map((workflow) => (
-          <li key={workflow}>{workflow}</li>
-        ))}
-      </ul>
-    )}
-    <section className="flex flex-col gap-2">
-      <h2 className="font-medium">Runs</h2>
-      <Await
-        fallback={
-          <p className="text-muted-foreground text-sm">Loading runs…</p>
-        }
-        promise={runs}
-      >
-        {(loaded) =>
-          loaded.state === "ready" ? (
-            <RunsTable runs={loaded.data} />
-          ) : (
-            <NotLoaded page={loaded} />
-          )
-        }
-      </Await>
-    </section>
-  </div>
-);
+}) => {
+  const { t } = useLingui();
+  return (
+    <div className="flex flex-col gap-6">
+      {contents.workflows.length === 0 ? (
+        <p className="text-muted-foreground text-sm">
+          <Trans>This App&apos;s current version has no workflows.</Trans>
+        </p>
+      ) : (
+        <ul aria-label={t`Workflows`} className="flex flex-col gap-1">
+          {contents.workflows.map((workflow) => (
+            <li key={workflow}>{workflow}</li>
+          ))}
+        </ul>
+      )}
+      <section className="flex flex-col gap-2">
+        <h2 className="font-medium">
+          <Trans>Runs</Trans>
+        </h2>
+        <Await
+          fallback={
+            <p className="text-muted-foreground text-sm">
+              <Trans>Loading runs…</Trans>
+            </p>
+          }
+          promise={runs}
+        >
+          {(loaded) =>
+            loaded.state === "ready" ? (
+              <RunsTable runs={loaded.data} />
+            ) : (
+              <NotLoaded page={loaded} />
+            )
+          }
+        </Await>
+      </section>
+    </div>
+  );
+};
 
 const MembersTable = ({ members }: { members: AppMember[] }) =>
   members.length === 0 ? (
-    <p className="text-muted-foreground">It isn&apos;t shared with anyone.</p>
+    <p className="text-muted-foreground">
+      <Trans>It isn&apos;t shared with anyone.</Trans>
+    </p>
   ) : (
     <Table>
       <TableHeader>
         <TableRow>
-          <TableHead>Shared with</TableHead>
-          <TableHead>Role</TableHead>
+          <TableHead>
+            <Trans>Shared with</Trans>
+          </TableHead>
+          <TableHead>
+            <Trans>Role</Trans>
+          </TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {members.map((member) => (
           <TableRow key={`${member.type}:${member.id}`}>
             <TableCell>
-              {member.name ?? member.id}
-              {member.type === "team" ? " (team)" : ""}
+              {member.type === "team"
+                ? i18n._(msg`${ph({ team: member.name ?? member.id })} (team)`)
+                : (member.name ?? member.id)}
             </TableCell>
-            <TableCell>{member.role}</TableCell>
+            <TableCell>{roleLabel(member.role)}</TableCell>
           </TableRow>
         ))}
       </TableBody>
@@ -219,14 +245,21 @@ const MembersTable = ({ members }: { members: AppMember[] }) =>
  */
 const Members = ({ app, members }: { app: App; members: MemberList }) => {
   const { identity } = Route.useRouteContext();
+  const { t } = useLingui();
+  const { owner } = app;
   return (
     <div className="flex flex-col gap-2 text-sm">
       <p>
-        Created by{" "}
-        {app.owner === identity.userId ? "you" : `the member ${app.owner}`}.
+        {owner === identity.userId
+          ? t`Created by you.`
+          : t`Created by the member ${owner}.`}
       </p>
       <Await
-        fallback={<p className="text-muted-foreground">Loading members…</p>}
+        fallback={
+          <p className="text-muted-foreground">
+            <Trans>Loading members…</Trans>
+          </p>
+        }
         promise={members}
       >
         {(loaded) =>
@@ -251,6 +284,8 @@ const AppView = ({
   members: MemberList;
 }) => {
   const { app, contents } = page;
+  const { t } = useLingui();
+  const { version } = contents;
   return (
     <>
       <div className="flex flex-col gap-1">
@@ -259,16 +294,20 @@ const AppView = ({
           <p className="text-muted-foreground text-sm">{app.description}</p>
         )}
         <p className="text-muted-foreground text-sm">
-          {contents.version === null
-            ? "Not released"
-            : `Version ${contents.version}`}
+          {version === null ? t`Not released` : t`Version ${version}`}
         </p>
       </div>
       <Tabs className="min-h-0 flex-1" defaultValue="screens">
         <TabsList>
-          <TabsTrigger value="screens">Screens</TabsTrigger>
-          <TabsTrigger value="workflows">Workflows</TabsTrigger>
-          <TabsTrigger value="members">Members</TabsTrigger>
+          <TabsTrigger value="screens">
+            <Trans>Screens</Trans>
+          </TabsTrigger>
+          <TabsTrigger value="workflows">
+            <Trans>Workflows</Trans>
+          </TabsTrigger>
+          <TabsTrigger value="members">
+            <Trans>Members</Trans>
+          </TabsTrigger>
         </TabsList>
         <TabsContent className="flex flex-col" value="screens">
           <Screens app={app.id} contents={contents} />
@@ -286,22 +325,33 @@ const AppView = ({
 
 const AppPageView = () => {
   const { page, runs, members } = Route.useLoaderData();
+  const { t } = useLingui();
   return (
-    <main className="flex flex-1 flex-col gap-4 p-6">
-      {page.state === "ready" ? (
-        <AppView
-          key={page.data.app.id}
-          members={members}
-          page={page.data}
-          runs={runs}
-        />
-      ) : (
-        <>
-          <h1 className="text-2xl font-medium">App</h1>
-          <NotLoaded page={page} />
-        </>
-      )}
-    </main>
+    <>
+      <SiteHeader
+        crumbs={[
+          { label: t`Apps`, to: "/apps" },
+          { label: page.state === "ready" ? page.data.app.name : t`App` },
+        ]}
+      />
+      <div className="flex flex-1 flex-col gap-4 p-6">
+        {page.state === "ready" ? (
+          <AppView
+            key={page.data.app.id}
+            members={members}
+            page={page.data}
+            runs={runs}
+          />
+        ) : (
+          <>
+            <h1 className="text-2xl font-medium">
+              <Trans>App</Trans>
+            </h1>
+            <NotLoaded page={page} />
+          </>
+        )}
+      </div>
+    </>
   );
 };
 

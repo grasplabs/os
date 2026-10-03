@@ -173,12 +173,13 @@ test("a builder finds an App in the list, opens it and uses its screen with live
   await expect(page.getByText("Created by you.")).toBeVisible();
 });
 
-test("the nav shows admins their own sections, and nobody else", async ({
+test("the sidebar shows everyone the sections, and admins their own in the person menu", async ({
   browser,
 }) => {
   const adminOnly = ["Activity", "Models", "Members"];
   const everyone = ["Chat", "Knowledge", "Apps", "Workflows", "Connections"];
-  const navOf = async (person: Person) => {
+  const roleNames = { admin: "Admin", builder: "Builder", user: "User" };
+  const sidebarOf = async (person: Person) => {
     const page = await pageOf(browser, person);
     await page.goto("/");
     const links = page
@@ -189,17 +190,29 @@ test("the nav shows admins their own sections, and nobody else", async ({
     await expect(links.first()).toBeVisible();
     await expect(links.filter({ hasText: /^Notifications/u })).toBeVisible();
     const texts = await links.allTextContents();
-    // Without how many are unread.
-    return texts.map((text) => text.replace(/\d+ unread$/u, ""));
+    // The person menu, at the sidebar's foot, ends in their role.
+    await page
+      .getByRole("button", {
+        name: new RegExp(`${roleNames[person.role]}$`, "u"),
+      })
+      .click();
+    const items = page.getByRole("menuitem");
+    await expect(items.filter({ hasText: "Sign out" })).toBeVisible();
+    const menu = await items.allTextContents();
+    return {
+      // Without how many are unread.
+      nav: texts.map((text) => text.replace(/\d+ unread$/u, "")),
+      menu: menu.filter((text) => adminOnly.includes(text)),
+    };
   };
   expect({
-    admin: await navOf(admin),
-    builder: await navOf(builder),
-    user: await navOf(user),
+    admin: await sidebarOf(admin),
+    builder: await sidebarOf(builder),
+    user: await sidebarOf(user),
   }).toStrictEqual({
-    admin: [...everyone, ...adminOnly, "Notifications"],
-    builder: [...everyone, "Notifications"],
-    user: [...everyone, "Notifications"],
+    admin: { nav: [...everyone, "Notifications"], menu: adminOnly },
+    builder: { nav: [...everyone, "Notifications"], menu: [] },
+    user: { nav: [...everyone, "Notifications"], menu: [] },
   });
 });
 
@@ -230,7 +243,9 @@ test("signing in goes back to the page asked for, and only to a page of this sit
     // oxlint-disable-next-line no-await-in-loop -- one address at a time
     await page.goto(`/sign-in?returnTo=${encodeURIComponent(elsewhere)}`);
     // oxlint-disable-next-line no-await-in-loop -- one address at a time
-    await expect(page.getByRole("heading", { name: "Chat" })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "What should we look at today?" })
+    ).toBeVisible();
     expect(page.url()).toBe(`${origin}/`);
   }
 });

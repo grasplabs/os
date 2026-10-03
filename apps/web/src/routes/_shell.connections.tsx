@@ -1,4 +1,5 @@
 import { canBuild } from "@grasp-os/shared/roles";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { createFileRoute } from "@tanstack/react-router";
 
 import { connectionErrorMessage } from "../connection-errors.ts";
@@ -8,6 +9,7 @@ import type { HeldPermissions } from "../connections/connection-list.tsx";
 import type { Session } from "../core.ts";
 import { listedOrNone } from "../directory.ts";
 import { ErrorText } from "../error-text.tsx";
+import { SiteHeader } from "../frame/site-header.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import type { Loaded } from "../load-from-core.tsx";
 
@@ -42,15 +44,16 @@ const HeldNotLoaded = ({
 }: {
   held: Loaded<HeldPermissions> | undefined;
 }) => {
+  const { t } = useLingui();
   if (held === undefined || held.state === "ready") {
     return null;
   }
   const why =
     held.state === "offline"
-      ? "Grasp can't be reached right now. Try again in a moment."
+      ? t`Grasp can't be reached right now. Try again in a moment.`
       : held.message;
   return (
-    <ErrorText>{`Which Apps and agents hold permissions: ${why}`}</ErrorText>
+    <ErrorText>{t`Which Apps and agents hold permissions: ${why}`}</ErrorText>
   );
 };
 
@@ -58,6 +61,7 @@ const Connections = () => {
   const { catalog, connections, held } = Route.useLoaderData();
   const { identity } = Route.useRouteContext();
   const { connection, connectionError } = Route.useSearch();
+  const { t } = useLingui();
   const names = new Map(
     catalog.state === "ready"
       ? catalog.data.entries.map(({ source, id, name }) => [
@@ -82,55 +86,64 @@ const Connections = () => {
   const connected =
     connection !== undefined && listed.some(({ id }) => id === connection);
   return (
-    <main className="flex max-w-4xl flex-col gap-8 p-6">
-      <h1 className="text-2xl font-medium">Connections</h1>
-      {connected ? <output className="text-sm">Connected.</output> : null}
-      {connectionError === undefined ? null : (
-        <ErrorText>{connectionErrorMessage(connectionError)}</ErrorText>
-      )}
-      <HeldNotLoaded held={held} />
-      <section aria-labelledby="mine" className="flex flex-col gap-3">
-        <h2 className="text-lg font-medium" id="mine">
-          My connections
-        </h2>
-        <NotLoaded page={connections} />
-        {connections.state === "ready" ? (
-          <ConnectionList
-            connections={listed.filter(({ scope }) => scope === "personal")}
-            names={names}
-            offered={offered}
-            held={held}
-            identity={identity}
-            empty="You haven't connected an account of your own yet."
-          />
+    <>
+      <SiteHeader crumbs={[{ label: t`Connections` }]} />
+      <div className="flex max-w-4xl flex-col gap-8 p-6">
+        <h1 className="text-2xl font-medium">
+          <Trans>Connections</Trans>
+        </h1>
+        {connected ? (
+          <output className="text-sm">
+            <Trans>Connected.</Trans>
+          </output>
         ) : null}
-      </section>
-      <section aria-labelledby="shared" className="flex flex-col gap-3">
-        <h2 className="text-lg font-medium" id="shared">
-          Shared connections
-        </h2>
-        <NotLoaded page={connections} />
-        {connections.state === "ready" ? (
-          <ConnectionList
-            connections={listed.filter(({ scope }) => scope === "shared")}
-            names={names}
-            offered={offered}
-            held={held}
-            identity={identity}
-            empty="Your organization has no shared connections yet."
-          />
-        ) : null}
-      </section>
-      <section aria-labelledby="catalog" className="flex flex-col gap-3">
-        <h2 className="text-lg font-medium" id="catalog">
-          Connect
-        </h2>
-        <NotLoaded page={catalog} />
-        {catalog.state === "ready" ? (
-          <Catalog catalog={catalog.data} identity={identity} />
-        ) : null}
-      </section>
-    </main>
+        {connectionError === undefined ? null : (
+          <ErrorText>{connectionErrorMessage(connectionError)}</ErrorText>
+        )}
+        <HeldNotLoaded held={held} />
+        <section aria-labelledby="mine" className="flex flex-col gap-3">
+          <h2 className="text-lg font-medium" id="mine">
+            <Trans>My connections</Trans>
+          </h2>
+          <NotLoaded page={connections} />
+          {connections.state === "ready" ? (
+            <ConnectionList
+              connections={listed.filter(({ scope }) => scope === "personal")}
+              names={names}
+              offered={offered}
+              held={held}
+              identity={identity}
+              empty={t`You haven't connected an account of your own yet.`}
+            />
+          ) : null}
+        </section>
+        <section aria-labelledby="shared" className="flex flex-col gap-3">
+          <h2 className="text-lg font-medium" id="shared">
+            <Trans>Shared connections</Trans>
+          </h2>
+          <NotLoaded page={connections} />
+          {connections.state === "ready" ? (
+            <ConnectionList
+              connections={listed.filter(({ scope }) => scope === "shared")}
+              names={names}
+              offered={offered}
+              held={held}
+              identity={identity}
+              empty={t`Your organization has no shared connections yet.`}
+            />
+          ) : null}
+        </section>
+        <section aria-labelledby="catalog" className="flex flex-col gap-3">
+          <h2 className="text-lg font-medium" id="catalog">
+            <Trans>Connect</Trans>
+          </h2>
+          <NotLoaded page={catalog} />
+          {catalog.state === "ready" ? (
+            <Catalog catalog={catalog.data} identity={identity} />
+          ) : null}
+        </section>
+      </div>
+    </>
   );
 };
 

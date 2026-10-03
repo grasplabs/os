@@ -24,6 +24,8 @@ import {
 } from "@grasp-os/ui/components/dialog";
 import { Input } from "@grasp-os/ui/components/input";
 import { Switch } from "@grasp-os/ui/components/switch";
+import { plural } from "@lingui/core/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { useId, useState } from "react";
 import type { ReactNode } from "react";
 
@@ -77,6 +79,8 @@ const NativeConnect = ({
   admin: boolean;
 }) => {
   const { busy, failure, run } = useCoreAction();
+  const { t } = useLingui();
+  const { name } = entry;
   const start = async (scope: ConnectionScope): Promise<void> => {
     goTo(
       await run(
@@ -90,23 +94,23 @@ const NativeConnect = ({
       <div className="flex gap-2">
         <Button
           disabled={busy || !entry.offered}
-          aria-label={`Connect ${entry.name}`}
+          aria-label={t`Connect ${name}`}
           onClick={() => {
             void start("personal");
           }}
         >
-          Connect
+          <Trans>Connect</Trans>
         </Button>
         {admin ? (
           <Button
             variant="outline"
             disabled={busy || !entry.offered}
-            aria-label={`Connect ${entry.name} for everyone`}
+            aria-label={t`Connect ${name} for everyone`}
             onClick={() => {
               void start("shared");
             }}
           >
-            Connect for everyone
+            <Trans>Connect for everyone</Trans>
           </Button>
         ) : null}
       </div>
@@ -129,24 +133,30 @@ const ToolChoice = ({
   choice: AllowedTool | undefined;
   onAllow: (allow: boolean) => void;
   onRead: (read: boolean) => void;
-}) => (
-  <div className="flex items-center justify-between gap-4 text-sm">
-    <label className="flex items-center gap-2">
-      <Checkbox checked={choice !== undefined} onCheckedChange={onAllow} />
-      {tool.name}
-    </label>
-    {choice === undefined ? null : (
-      <div className="text-muted-foreground flex items-center gap-2">
-        <Checkbox
-          checked={choice.read}
-          aria-label={`${tool.name} is read-only`}
-          onCheckedChange={onRead}
-        />
-        <span aria-hidden="true">Read-only</span>
-      </div>
-    )}
-  </div>
-);
+}) => {
+  const { t } = useLingui();
+  const { name } = tool;
+  return (
+    <div className="flex items-center justify-between gap-4 text-sm">
+      <label className="flex items-center gap-2">
+        <Checkbox checked={choice !== undefined} onCheckedChange={onAllow} />
+        {tool.name}
+      </label>
+      {choice === undefined ? null : (
+        <div className="text-muted-foreground flex items-center gap-2">
+          <Checkbox
+            checked={choice.read}
+            aria-label={t`${name} is read-only`}
+            onCheckedChange={onRead}
+          />
+          <span aria-hidden="true">
+            <Trans>Read-only</Trans>
+          </span>
+        </div>
+      )}
+    </div>
+  );
+};
 
 /**
  * Connecting a Composio toolkit: the admin picks the tools to allow, says
@@ -161,6 +171,8 @@ const ComposioConnect = ({ entry }: { entry: Entry }) => {
   const [open, setOpen] = useState(false);
   const [tools, setTools] = useState<CatalogTool[]>();
   const [allowed, setAllowed] = useState<AllowedTool[]>([]);
+  const { t } = useLingui();
+  const { name } = entry;
   const loadTools = async (): Promise<void> => {
     const listed = await run(
       async (session) =>
@@ -195,37 +207,44 @@ const ComposioConnect = ({ entry }: { entry: Entry }) => {
     >
       <DialogTrigger
         render={
-          <Button
-            disabled={!entry.offered}
-            aria-label={`Connect ${entry.name}`}
-          />
+          <Button disabled={!entry.offered} aria-label={t`Connect ${name}`} />
         }
       >
-        Connect
+        <Trans>Connect</Trans>
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Connect {entry.name} through Composio</DialogTitle>
+          <DialogTitle>
+            <Trans>Connect {name} through Composio</Trans>
+          </DialogTitle>
+          {/* The consent stays as written: core keeps a hash of the exact
+              text consented to (connection-list.tsx shows it again). */}
           <DialogDescription>{composioConsentText}</DialogDescription>
         </DialogHeader>
         <fieldset className="flex max-h-80 flex-col gap-2 overflow-y-auto">
-          <legend className="mb-2 text-sm font-medium">Tools to allow</legend>
+          <legend className="mb-2 text-sm font-medium">
+            <Trans>Tools to allow</Trans>
+          </legend>
           <p className="text-muted-foreground text-sm">
-            Read-only is ticked where Composio says a tool only reads; Grasp
-            doesn&apos;t check that. A read-only tool runs without asking. A
-            call of any other tool from chat, or from a person using an App,
-            waits for that person to confirm it; a workflow&apos;s run makes it
-            as one of its steps. Mark a tool read-only only if it changes
-            nothing: marked wrongly, it changes things without asking.
+            <Trans>
+              Read-only is ticked where Composio says a tool only reads; Grasp
+              doesn&apos;t check that. A read-only tool runs without asking. A
+              call of any other tool from chat, or from a person using an App,
+              waits for that person to confirm it; a workflow&apos;s run makes
+              it as one of its steps. Mark a tool read-only only if it changes
+              nothing: marked wrongly, it changes things without asking.
+            </Trans>
           </p>
           {tools === undefined && busy ? (
-            <p className="text-muted-foreground text-sm">Loading its tools…</p>
+            <p className="text-muted-foreground text-sm">
+              <Trans>Loading its tools…</Trans>
+            </p>
           ) : null}
           {tools?.map((tool) => (
             <ToolChoice
               key={tool.name}
               tool={tool}
-              choice={allowed.find(({ name }) => name === tool.name)}
+              choice={allowed.find((choice) => choice.name === tool.name)}
               onAllow={(allow) => {
                 setAllowed((current) => withAllowed(current, tool, allow));
               }}
@@ -243,7 +262,7 @@ const ComposioConnect = ({ entry }: { entry: Entry }) => {
               void connect();
             }}
           >
-            Consent and connect
+            <Trans>Consent and connect</Trans>
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -254,6 +273,8 @@ const ComposioConnect = ({ entry }: { entry: Entry }) => {
 /** An admin's switch for whether people are offered `entry`. */
 const OfferSwitch = ({ entry, staff }: { entry: Entry; staff: boolean }) => {
   const { busy, failure, change } = useChange();
+  const { t } = useLingui();
+  const { name } = entry;
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center gap-2 text-sm">
@@ -261,7 +282,7 @@ const OfferSwitch = ({ entry, staff }: { entry: Entry; staff: boolean }) => {
           checked={entry.offered}
           // Staff are admins, but core leaves the choice to the client's.
           disabled={busy || staff}
-          aria-label={`Offer ${entry.name}`}
+          aria-label={t`Offer ${name}`}
           onCheckedChange={(offered) => {
             void change(async (session) => {
               await session.connections.setOffered(
@@ -272,7 +293,9 @@ const OfferSwitch = ({ entry, staff }: { entry: Entry; staff: boolean }) => {
             });
           }}
         />
-        <span aria-hidden="true">Offered</span>
+        <span aria-hidden="true">
+          <Trans>Offered</Trans>
+        </span>
       </div>
       <ErrorText>{failure}</ErrorText>
     </div>
@@ -288,9 +311,11 @@ const CatalogItem = ({
 }) => {
   const admin = isAdmin(identity.role);
   const provider = oauthProviderSchema.safeParse(entry.id);
+  const { t } = useLingui();
+  const { toolCount } = entry;
   let connect: ReactNode = (
     <p className="text-muted-foreground text-sm">
-      An admin connects this for everyone.
+      <Trans>An admin connects this for everyone.</Trans>
     </p>
   );
   if (identity.staff) {
@@ -308,10 +333,17 @@ const CatalogItem = ({
       <div className="flex flex-wrap items-center gap-2">
         <h3 className="font-medium">{entry.name}</h3>
         <SourceBadge source={entry.source} />
-        {entry.offered ? null : <Badge variant="outline">Not offered</Badge>}
+        {entry.offered ? null : (
+          <Badge variant="outline">
+            <Trans>Not offered</Trans>
+          </Badge>
+        )}
       </div>
       <p className="text-muted-foreground text-sm">
-        {[...entry.categories, `${entry.toolCount} tools`].join(" · ")}
+        {[
+          ...entry.categories,
+          t`${plural(toolCount, { one: "# tool", other: "# tools" })}`,
+        ].join(" · ")}
       </p>
       <div className="flex flex-wrap items-start gap-4">
         {connect}
@@ -332,10 +364,15 @@ export const Catalog = ({
   const searchId = useId();
   const matching = catalog.entries.filter((entry) => matches(entry, query));
   const shown = matching.slice(0, catalogShownMax);
+  const { t } = useLingui();
+  const count = shown.length;
+  const total = matching.length;
   return (
     <div className="flex flex-col gap-3">
       <div className="flex max-w-sm flex-col gap-1 text-sm">
-        <label htmlFor={searchId}>Search</label>
+        <label htmlFor={searchId}>
+          <Trans>Search</Trans>
+        </label>
         <Input
           id={searchId}
           type="search"
@@ -347,23 +384,29 @@ export const Catalog = ({
       </div>
       {identity.staff ? (
         <p className="text-muted-foreground text-sm">
-          Grasp staff can&apos;t connect accounts or change what is offered
-          here: that is for the organization&apos;s own people.
+          <Trans>
+            Grasp staff can&apos;t connect accounts or change what is offered
+            here: that is for the organization&apos;s own people.
+          </Trans>
         </p>
       ) : null}
       {catalog.composio === "unavailable" ? (
         <p className="text-muted-foreground text-sm">
-          Composio&apos;s toolkits can&apos;t be listed right now. Try again
-          shortly.
+          <Trans>
+            Composio&apos;s toolkits can&apos;t be listed right now. Try again
+            shortly.
+          </Trans>
         </p>
       ) : null}
       {matching.length > shown.length ? (
         <p className="text-muted-foreground text-sm">
-          {`Showing the first ${shown.length} of ${matching.length}. Refine your search to find others.`}
+          {t`Showing the first ${count} of ${total}. Refine your search to find others.`}
         </p>
       ) : null}
       {shown.length === 0 ? (
-        <p className="text-muted-foreground text-sm">Nothing matches.</p>
+        <p className="text-muted-foreground text-sm">
+          <Trans>Nothing matches.</Trans>
+        </p>
       ) : (
         <ul className="flex flex-col gap-3">
           {shown.map((entry) => (

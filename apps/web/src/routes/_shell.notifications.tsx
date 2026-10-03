@@ -5,15 +5,17 @@ import type {
 } from "@grasp-os/shared/notifications";
 import { Badge } from "@grasp-os/ui/components/badge";
 import { Button, buttonVariants } from "@grasp-os/ui/components/button";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 
 import type { Session } from "../core.ts";
 import { listedOrNone } from "../directory.ts";
 import { ErrorText } from "../error-text.tsx";
+import { formatDateTime } from "../format.ts";
+import { SiteHeader } from "../frame/site-header.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import { useCoreAction } from "../use-core-action.ts";
-import { dateTime } from "../workflows/runs.tsx";
 
 // What core told the person: the workflows that failed while acting for
 // them, each with a way to the workflow, and to a new chat that asks the
@@ -71,6 +73,7 @@ const AskToFix = ({ run, model }: { run: string; model: string }) => {
   const navigate = useNavigate();
   const { busy, failure, run: act } = useCoreAction();
   const [refused, setRefused] = useState<{ chat: string; reason: string }>();
+  const { t } = useLingui();
   const ask = async (): Promise<void> => {
     const started = await act(
       async (session) => await session.chats.fixRun(run, model)
@@ -85,6 +88,7 @@ const AskToFix = ({ run, model }: { run: string; model: string }) => {
     setRefused({ chat: started.chat.id, reason: started.reason });
   };
   if (refused !== undefined) {
+    const { reason } = refused;
     return (
       <div className="flex flex-col gap-1">
         <Link
@@ -92,9 +96,9 @@ const AskToFix = ({ run, model }: { run: string; model: string }) => {
           search={{ chat: refused.chat }}
           to="/"
         >
-          Open the chat
+          <Trans>Open the chat</Trans>
         </Link>
-        <ErrorText>{`The agent wasn't asked: ${refused.reason}`}</ErrorText>
+        <ErrorText>{t`The agent wasn't asked: ${reason}`}</ErrorText>
       </div>
     );
   }
@@ -107,7 +111,7 @@ const AskToFix = ({ run, model }: { run: string; model: string }) => {
         }}
         size="sm"
       >
-        Ask the agent to fix
+        <Trans>Ask the agent to fix</Trans>
       </Button>
       <ErrorText>{failure}</ErrorText>
     </div>
@@ -123,26 +127,39 @@ const FailedWorkflow = ({
   model: string | undefined;
 }) => {
   const { app, appName, workflow, run, failures, at, read } = notification;
+  const { t } = useLingui();
+  const date = formatDateTime(at);
+  const link = (
+    <Link
+      className="underline"
+      params={{ app, workflow }}
+      to="/workflows/$app/$workflow"
+    >
+      {workflow}
+    </Link>
+  );
   return (
     <li className="flex flex-wrap items-center gap-3 rounded-md border p-3">
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         <p className="flex items-center gap-2 text-sm">
-          {read ? null : <Badge>New</Badge>}
+          {read ? null : (
+            <Badge>
+              <Trans>New</Trans>
+            </Badge>
+          )}
           <span>
-            <Link
-              className="underline"
-              params={{ app, workflow }}
-              to="/workflows/$app/$workflow"
-            >
-              {workflow}
-            </Link>
-            {` in ${appName} failed`}
-            {failures > 1 ? ` ${failures} times` : ""}
+            {failures > 1 ? (
+              <Trans>
+                {link} in {appName} failed {failures} times
+              </Trans>
+            ) : (
+              <Trans>
+                {link} in {appName} failed
+              </Trans>
+            )}
           </span>
         </p>
-        <p className="text-muted-foreground text-xs">
-          {`Last on ${dateTime.format(new Date(at))}`}
-        </p>
+        <p className="text-muted-foreground text-xs">{t`Last on ${date}`}</p>
       </div>
       {model === undefined ? null : <AskToFix model={model} run={run} />}
     </li>
@@ -150,16 +167,22 @@ const FailedWorkflow = ({
 };
 
 const Notifications = () => {
+  const { t } = useLingui();
   const page = Route.useLoaderData();
   return (
-    <main className="flex max-w-3xl flex-col gap-4 p-6">
-      <h1 className="text-2xl font-medium">Notifications</h1>
-      {page.state === "ready" ? (
-        <NotificationList page={page.data} />
-      ) : (
-        <NotLoaded page={page} />
-      )}
-    </main>
+    <>
+      <SiteHeader crumbs={[{ label: t`Notifications` }]} />
+      <div className="flex max-w-3xl flex-col gap-4 p-6">
+        <h1 className="text-2xl font-medium">
+          <Trans>Notifications</Trans>
+        </h1>
+        {page.state === "ready" ? (
+          <NotificationList page={page.data} />
+        ) : (
+          <NotLoaded page={page} />
+        )}
+      </div>
+    </>
   );
 };
 
@@ -168,6 +191,7 @@ const NotificationList = ({ page }: { page: NotificationsPage }) => {
   const [shown, setShown] = useState(page.page.notifications);
   const [more, setMore] = useState(page.page.more);
   const { busy, failure, run } = useCoreAction();
+  const { t } = useLingui();
   const showOlder = async (): Promise<void> => {
     const last = shown.at(-1);
     if (last === undefined) {
@@ -184,14 +208,16 @@ const NotificationList = ({ page }: { page: NotificationsPage }) => {
   if (shown.length === 0) {
     return (
       <p className="text-muted-foreground text-sm">
-        Nothing yet. When a workflow fails while acting for you, you&apos;ll see
-        it here.
+        <Trans>
+          Nothing yet. When a workflow fails while acting for you, you&apos;ll
+          see it here.
+        </Trans>
       </p>
     );
   }
   return (
     <>
-      <ul aria-label="Notifications" className="flex flex-col gap-2">
+      <ul aria-label={t`Notifications`} className="flex flex-col gap-2">
         {shown.map((notification) => (
           <FailedWorkflow
             key={notification.id}
@@ -209,7 +235,7 @@ const NotificationList = ({ page }: { page: NotificationsPage }) => {
           }}
           variant="outline"
         >
-          Show older
+          <Trans>Show older</Trans>
         </Button>
       ) : null}
       <ErrorText>{failure}</ErrorText>

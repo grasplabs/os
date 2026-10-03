@@ -33,7 +33,11 @@ export default defineConfig({
   lint: {
     extends: [core, react, tanstack, vitest, shadcn],
     ignorePatterns: [...(core.ignorePatterns ?? []), ...generated],
-    jsPlugins: [...(shadcn.jsPlugins ?? []), ...(antiSlop.jsPlugins ?? [])],
+    jsPlugins: [
+      ...(shadcn.jsPlugins ?? []),
+      ...(antiSlop.jsPlugins ?? []),
+      "./scripts/lint/grasp-plugin.ts",
+    ],
     options: {
       typeAware: true,
       typeCheck: true,
@@ -81,6 +85,11 @@ export default defineConfig({
     },
     overrides: [
       {
+        // The frontend hides every scrollbar (apps/web/src/styles.css).
+        files: ["apps/web/src/**"],
+        rules: { "grasp/no-scrollbars": "error" },
+      },
+      {
         // Schema files start as comment-only placeholders until their first table.
         files: ["apps/*/src/db/**/schema.ts"],
         rules: { "unicorn/no-empty-file": "off" },
@@ -94,6 +103,9 @@ export default defineConfig({
           // Components are added with the shadcn CLI; keep its code style.
           "func-style": "off",
           "react/function-component-definition": "off",
+          // shadcn gives divs ARIA roles (group, list, link, status) for
+          // their layout; a semantic tag would bring its own styles.
+          "jsx-a11y/prefer-tag-over-role": "off",
         },
       },
     ],

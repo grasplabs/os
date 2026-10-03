@@ -29,11 +29,17 @@ import {
   TabsList,
   TabsTrigger,
 } from "@grasp-os/ui/components/tabs";
+import { i18n } from "@lingui/core";
+import type { MessageDescriptor } from "@lingui/core";
+import { msg, plural } from "@lingui/core/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 
 import type { Session } from "../core.ts";
+import { formatDateTime } from "../format.ts";
+import { SiteHeader } from "../frame/site-header.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
-import { dateTime, RunsTable, statusLabels } from "../workflows/runs.tsx";
+import { RunsTable, runStatusLabel } from "../workflows/runs.tsx";
 
 // Everything that runs on its own, in one place: every workflow of every
 // App the person can open, and, on the Runs tab, their runs, waiting ones
@@ -53,11 +59,11 @@ const isStatus = (value: unknown): value is RunFilterStatus =>
   runFilterStatuses.some((status) => status === value);
 
 /** What the Runs filter says each status is, in words. */
-const filterLabels: Readonly<Record<RunFilterStatus, string>> = {
-  waiting: "Waiting for a decision",
-  running: "Running",
-  failed: "Failed",
-  done: "Done",
+const filterLabels: Readonly<Record<RunFilterStatus, MessageDescriptor>> = {
+  waiting: msg`Waiting for a decision`,
+  running: msg`Running`,
+  failed: msg`Failed`,
+  done: msg`Done`,
 };
 
 /** The value of a filter that filters nothing. */
@@ -149,10 +155,14 @@ const filterOptions = async (
 };
 
 /** The last time a workflow ran, and how, in words. */
-const lastRunOf = ({ lastRun }: WorkflowSummary): string =>
-  lastRun === null
-    ? "Never"
-    : `${statusLabels[lastRun.status]}, ${dateTime.format(new Date(lastRun.createdAt))}`;
+const lastRunOf = ({ lastRun }: WorkflowSummary): string => {
+  if (lastRun === null) {
+    return i18n._(msg`Never`);
+  }
+  const status = runStatusLabel(lastRun.status);
+  const date = formatDateTime(lastRun.createdAt);
+  return i18n._(msg`${status}, ${date}`);
+};
 
 /** A count of a workflow's runs, linking to them on the Runs tab. */
 const RunCount = ({
@@ -164,13 +174,14 @@ const RunCount = ({
   workflow: WorkflowSummary;
   count: number;
   status: RunFilterStatus;
+  /** What the link opens, read out: the count and the workflow, in words. */
   label: string;
 }) =>
   count === 0 ? (
     <>0</>
   ) : (
     <Link
-      aria-label={`${count} ${label} of ${workflow.workflow}`}
+      aria-label={label}
       className="underline"
       search={{
         tab: "runs",
@@ -191,56 +202,62 @@ const WorkflowRow = ({
 }: {
   workflow: WorkflowSummary;
   me: string;
-}) => (
-  <TableRow>
-    <TableCell>
-      <div className="flex flex-wrap items-center gap-2">
+}) => {
+  const { t } = useLingui();
+  const name = workflow.workflow;
+  return (
+    <TableRow>
+      <TableCell>
+        <div className="flex flex-wrap items-center gap-2">
+          <Link
+            className="underline"
+            params={{ app: workflow.app, workflow: workflow.workflow }}
+            to="/workflows/$app/$workflow"
+          >
+            {workflow.workflow}
+          </Link>
+          {workflow.scheduleStopped ? (
+            <Badge variant="destructive">
+              <Trans>Schedule stopped</Trans>
+            </Badge>
+          ) : null}
+        </div>
+      </TableCell>
+      <TableCell>
         <Link
           className="underline"
-          params={{ app: workflow.app, workflow: workflow.workflow }}
-          to="/workflows/$app/$workflow"
+          params={{ app: workflow.app }}
+          to="/apps/$app"
         >
-          {workflow.workflow}
+          {workflow.appName}
         </Link>
-        {workflow.scheduleStopped ? (
-          <Badge variant="destructive">Schedule stopped</Badge>
-        ) : null}
-      </div>
-    </TableCell>
-    <TableCell>
-      <Link
-        className="underline"
-        params={{ app: workflow.app }}
-        to="/apps/$app"
-      >
-        {workflow.appName}
-      </Link>
-    </TableCell>
-    <TableCell>{workflow.version}</TableCell>
-    <TableCell>
-      {workflow.owner.userId === me
-        ? "You"
-        : (workflow.owner.name ?? workflow.owner.userId)}
-    </TableCell>
-    <TableCell>{lastRunOf(workflow)}</TableCell>
-    <TableCell>
-      <RunCount
-        count={workflow.waiting}
-        label="waiting runs"
-        status="waiting"
-        workflow={workflow}
-      />
-    </TableCell>
-    <TableCell>
-      <RunCount
-        count={workflow.failed}
-        label="failed runs"
-        status="failed"
-        workflow={workflow}
-      />
-    </TableCell>
-  </TableRow>
-);
+      </TableCell>
+      <TableCell>{workflow.version}</TableCell>
+      <TableCell>
+        {workflow.owner.userId === me
+          ? t`You`
+          : (workflow.owner.name ?? workflow.owner.userId)}
+      </TableCell>
+      <TableCell>{lastRunOf(workflow)}</TableCell>
+      <TableCell>
+        <RunCount
+          count={workflow.waiting}
+          label={t`${plural(workflow.waiting, { one: "# waiting run", other: "# waiting runs" })} of ${name}`}
+          status="waiting"
+          workflow={workflow}
+        />
+      </TableCell>
+      <TableCell>
+        <RunCount
+          count={workflow.failed}
+          label={t`${plural(workflow.failed, { one: "# failed run", other: "# failed runs" })} of ${name}`}
+          status="failed"
+          workflow={workflow}
+        />
+      </TableCell>
+    </TableRow>
+  );
+};
 
 const WorkflowsTable = ({
   rows,
@@ -252,7 +269,7 @@ const WorkflowsTable = ({
   if (rows.length === 0) {
     return (
       <p className="text-muted-foreground text-sm">
-        No App you can open has a workflow yet.
+        <Trans>No App you can open has a workflow yet.</Trans>
       </p>
     );
   }
@@ -260,13 +277,27 @@ const WorkflowsTable = ({
     <Table>
       <TableHeader>
         <TableRow>
-          <TableHead>Workflow</TableHead>
-          <TableHead>App</TableHead>
-          <TableHead>Version</TableHead>
-          <TableHead>Owner</TableHead>
-          <TableHead>Last run</TableHead>
-          <TableHead>Waiting</TableHead>
-          <TableHead>{`Failed (${failedRunDays} days)`}</TableHead>
+          <TableHead>
+            <Trans>Workflow</Trans>
+          </TableHead>
+          <TableHead>
+            <Trans>App</Trans>
+          </TableHead>
+          <TableHead>
+            <Trans>Version</Trans>
+          </TableHead>
+          <TableHead>
+            <Trans>Owner</Trans>
+          </TableHead>
+          <TableHead>
+            <Trans>Last run</Trans>
+          </TableHead>
+          <TableHead>
+            <Trans>Waiting</Trans>
+          </TableHead>
+          <TableHead>
+            <Trans>Failed ({failedRunDays} days)</Trans>
+          </TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -301,7 +332,8 @@ const Filter = ({
   onChange: (value: string | undefined) => void;
   disabled?: boolean;
 }) => {
-  const items = [{ value: all, label: "All" }, ...options];
+  const { t } = useLingui();
+  const items = [{ value: all, label: t`All` }, ...options];
   return (
     <Select
       disabled={disabled}
@@ -335,10 +367,11 @@ const RunFilters = ({ options }: { options: FilterOptions }) => {
   const filterBy = (change: Partial<WorkflowsSearch>): void => {
     void navigate({ search: (previous) => ({ ...previous, ...change }) });
   };
+  const { t } = useLingui();
   return (
     <div className="flex flex-wrap gap-2">
       <Filter
-        label="App"
+        label={t`App`}
         onChange={(app) => {
           // A workflow of another App finds nothing in this one.
           filterBy({ app, workflow: undefined });
@@ -349,7 +382,7 @@ const RunFilters = ({ options }: { options: FilterOptions }) => {
       <Filter
         // Nothing to pick from while the App's workflows can't be read.
         disabled={options.workflows === null}
-        label="Workflow"
+        label={t`Workflow`}
         onChange={(workflow) => {
           filterBy({ workflow });
         }}
@@ -360,19 +393,19 @@ const RunFilters = ({ options }: { options: FilterOptions }) => {
         value={search.workflow}
       />
       <Filter
-        label="Status"
+        label={t`Status`}
         onChange={(status) => {
           filterBy({ status: isStatus(status) ? status : undefined });
         }}
         options={runFilterStatuses.map((status) => ({
           value: status,
-          label: filterLabels[status],
+          label: i18n._(filterLabels[status]),
         }))}
         value={search.status}
       />
       {options.workflows === null ? (
         <p className="text-destructive self-center text-sm">
-          Couldn&apos;t load this App&apos;s workflows.
+          <Trans>Couldn&apos;t load this App&apos;s workflows.</Trans>
         </p>
       ) : null}
     </div>
@@ -380,62 +413,72 @@ const RunFilters = ({ options }: { options: FilterOptions }) => {
 };
 
 const Workflows = () => {
+  const { t } = useLingui();
   const page = Route.useLoaderData();
   const search = Route.useSearch();
   const { identity } = Route.useRouteContext();
   const navigate = useNavigate({ from: "/workflows/" });
   return (
-    <main className="flex flex-col gap-6 p-6">
-      <h1 className="text-2xl font-medium">Workflows</h1>
-      <Tabs
-        onValueChange={(tab: string) => {
-          void navigate({
-            // The filters are the Runs tab's: the list has none.
-            search: tab === "runs" ? { tab: "runs" } : {},
-          });
-        }}
-        value={search.tab ?? "workflows"}
-      >
-        <TabsList>
-          <TabsTrigger value="workflows">Workflows</TabsTrigger>
-          <TabsTrigger value="runs">Runs</TabsTrigger>
-        </TabsList>
-        <TabsContent value="workflows">
-          {page.tab === "workflows" ? (
-            <div className="flex flex-col gap-4">
-              <NotLoaded page={page.workflows} />
-              {page.workflows.state === "ready" ? (
-                <WorkflowsTable
-                  me={identity.userId}
-                  rows={page.workflows.data}
+    <>
+      <SiteHeader crumbs={[{ label: t`Workflows` }]} />
+      <div className="flex flex-col gap-6 p-6">
+        <h1 className="text-2xl font-medium">
+          <Trans>Workflows</Trans>
+        </h1>
+        <Tabs
+          onValueChange={(tab: string) => {
+            void navigate({
+              // The filters are the Runs tab's: the list has none.
+              search: tab === "runs" ? { tab: "runs" } : {},
+            });
+          }}
+          value={search.tab ?? "workflows"}
+        >
+          <TabsList>
+            <TabsTrigger value="workflows">
+              <Trans>Workflows</Trans>
+            </TabsTrigger>
+            <TabsTrigger value="runs">
+              <Trans>Runs</Trans>
+            </TabsTrigger>
+          </TabsList>
+          <TabsContent value="workflows">
+            {page.tab === "workflows" ? (
+              <div className="flex flex-col gap-4">
+                <NotLoaded page={page.workflows} />
+                {page.workflows.state === "ready" ? (
+                  <WorkflowsTable
+                    me={identity.userId}
+                    rows={page.workflows.data}
+                  />
+                ) : null}
+              </div>
+            ) : null}
+          </TabsContent>
+          <TabsContent value="runs">
+            {page.tab === "runs" ? (
+              <div className="flex flex-col gap-4">
+                <RunFilters
+                  options={
+                    page.filters.state === "ready"
+                      ? page.filters.data
+                      : { apps: [], workflows: [] }
+                  }
                 />
-              ) : null}
-            </div>
-          ) : null}
-        </TabsContent>
-        <TabsContent value="runs">
-          {page.tab === "runs" ? (
-            <div className="flex flex-col gap-4">
-              <RunFilters
-                options={
-                  page.filters.state === "ready"
-                    ? page.filters.data
-                    : { apps: [], workflows: [] }
-                }
-              />
-              <NotLoaded page={page.runs} />
-              {page.runs.state === "ready" ? (
-                <RunsTable
-                  me={identity.userId}
-                  more={page.runs.data.more}
-                  runs={page.runs.data.runs}
-                />
-              ) : null}
-            </div>
-          ) : null}
-        </TabsContent>
-      </Tabs>
-    </main>
+                <NotLoaded page={page.runs} />
+                {page.runs.state === "ready" ? (
+                  <RunsTable
+                    me={identity.userId}
+                    more={page.runs.data.more}
+                    runs={page.runs.data.runs}
+                  />
+                ) : null}
+              </div>
+            ) : null}
+          </TabsContent>
+        </Tabs>
+      </div>
+    </>
   );
 };
 

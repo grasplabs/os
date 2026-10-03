@@ -19,6 +19,9 @@ import {
   TableHeader,
   TableRow,
 } from "@grasp-os/ui/components/table";
+import { i18n } from "@lingui/core";
+import { msg, ph } from "@lingui/core/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { Link, useRouter } from "@tanstack/react-router";
 import { useState } from "react";
 
@@ -33,6 +36,7 @@ import {
 } from "../directory.ts";
 import type { Directory } from "../directory.ts";
 import { ErrorText } from "../error-text.tsx";
+import { formatList } from "../format.ts";
 import { useCoreAction } from "../use-core-action.ts";
 
 // Pending approvals: the permissions Apps and agents asked for, which an
@@ -103,7 +107,7 @@ export const readPendingRequests = async (
 const subjectOf = ({ subject }: Permission, directory: Directory): string =>
   subject.type === "app"
     ? appName(directory, subject.appId)
-    : `Agent ${subject.agentId}`;
+    : i18n._(msg`Agent ${ph({ agent: subject.agentId })}`);
 
 /**
  * The exports of another App a request's actions cover, as they are now:
@@ -114,14 +118,14 @@ const coveredExports = (
   exported: AppExports | undefined
 ): string => {
   if (exported === undefined) {
-    return "couldn't be read";
+    return i18n._(msg`couldn't be read`);
   }
   const covered = Object.entries(exported).flatMap(([name, { access }]) =>
     actions.includes(name) || actions.includes(access)
       ? [`${name} (${access})`]
       : []
   );
-  return covered.length === 0 ? "none now" : covered.join(", ");
+  return covered.length === 0 ? i18n._(msg`none now`) : formatList(covered);
 };
 
 /** What it asks for, by ID: connections and collections have no names here. */
@@ -131,25 +135,36 @@ const objectOf = (
   exports: PendingRequests["exports"]
 ): string => {
   if (object.type === "connection") {
-    const within = object.resource === undefined ? "" : `, ${object.resource}`;
-    return `Connection ${object.connectionId}${within}`;
+    const { connectionId, resource } = object;
+    return resource === undefined
+      ? i18n._(msg`Connection ${connectionId}`)
+      : i18n._(msg`Connection ${connectionId}, ${resource}`);
   }
   if (object.type === "collection") {
-    return `Collection ${object.collectionId}`;
+    const { collectionId } = object;
+    return i18n._(msg`Collection ${collectionId}`);
   }
   if (object.type === "app") {
-    return `Exports of ${appName(directory, object.appId)}: ${coveredExports(actions, exports.get(object.appId))}`;
+    const app = appName(directory, object.appId);
+    const covered = coveredExports(actions, exports.get(object.appId));
+    return i18n._(msg`Exports of ${app}: ${covered}`);
   }
   if (object.type === "platform" && actions.includes("guests")) {
     // Consent in plain words: who reaches what, and at whose cost.
-    return "Guest chats. This App can invite people who aren't members to a short chat with a model through a link, and read back what they write. Guests reach nothing else; their chats spend the model budget of whoever invites them";
+    return i18n._(
+      msg`Guest chats. This App can invite people who aren't members to a short chat with a model through a link, and read back what they write. Guests reach nothing else; their chats spend the model budget of whoever invites them`
+    );
   }
   if (object.type === "platform") {
     // Consent in plain words: what the App reads is published company-wide
     // on purpose (counts only, never a run), and it may show it to anyone.
-    return "Platform statistics. This App can read run and signal counts for every App, and may show them to anyone who uses it";
+    return i18n._(
+      msg`Platform statistics. This App can read run and signal counts for every App, and may show them to anyone who uses it`
+    );
   }
-  return `Workflow ${object.workflowId} of ${appName(directory, object.appId)}`;
+  const { workflowId } = object;
+  const app = appName(directory, object.appId);
+  return i18n._(msg`Workflow ${workflowId} of ${app}`);
 };
 
 /**
@@ -165,22 +180,23 @@ const RecordTypeClaims = ({
   directory: Directory;
 }) => {
   const { recordTypes } = request;
+  const { t } = useLingui();
   if (recordTypes === undefined) {
     return null;
   }
+  const claimed = formatList(recordTypes.claims);
   return (
     <>
       {recordTypes.claims.length === 0 ? null : (
         <span className="text-muted-foreground block text-xs">
-          Would keep {recordTypes.claims.join(", ")} records here
+          <Trans>Would keep {claimed} records here</Trans>
         </span>
       )}
       {recordTypes.taken.map(({ type, owner }) => (
         <span key={type} className="text-destructive block text-xs">
           {owner === null
-            ? `Another App already keeps ${type} records here`
-            : `${appName(directory, owner)} already keeps ${type} records here`}
-          : this App&apos;s won&apos;t apply.
+            ? t`Another App already keeps ${type} records here: this App's won't apply.`
+            : t`${ph({ app: appName(directory, owner) })} already keeps ${type} records here: this App's won't apply.`}
         </span>
       ))}
     </>
@@ -211,10 +227,10 @@ const reviewedVersionText = (
     return "–";
   }
   if (!directory.apps.has(subject.appId)) {
-    return "Unknown";
+    return i18n._(msg`Unknown`);
   }
   const version = reviewedVersion(request, directory);
-  return version === null ? "None current" : String(version);
+  return version === null ? i18n._(msg`None current`) : String(version);
 };
 
 /**
@@ -230,13 +246,16 @@ const askedAgain = (
     return undefined;
   }
   const version = reviewedVersion(request, directory);
-  const after =
-    version === null ? "" : ` after version ${version} was made current`;
-  return `Asked again${after} (previously granted by ${personName(directory, grantedBy)} on ${formatTime(grantedAt)})`;
+  const person = personName(directory, grantedBy);
+  const date = formatTime(grantedAt);
+  return version === null
+    ? i18n._(msg`Asked again (previously granted by ${person} on ${date})`)
+    : i18n._(
+        msg`Asked again after version ${version} was made current (previously granted by ${person} on ${date})`
+      );
 };
 
-const versionChanged =
-  "Another version of this App was made current since this list was read. The list now shows it: review that version, then approve again.";
+const versionChanged = msg`Another version of this App was made current since this list was read. The list now shows it: review that version, then approve again.`;
 
 /**
  * Grants `request` for `version`, the one the admin reviewed. Core refuses
@@ -252,7 +271,7 @@ const grantReviewed = async (
     return await permissions.grant(request.id, { version });
   } catch (error) {
     if (appErrors.codeOf(error) === "app.conflict") {
-      throw new Error(versionChanged, { cause: error });
+      throw new Error(i18n._(versionChanged), { cause: error });
     }
     throw error;
   }
@@ -280,6 +299,7 @@ const RequestActions = ({
   const router = useRouter();
   const { busy, failure, run } = useCoreAction();
   const [confirming, setConfirming] = useState(false);
+  const { t } = useLingui();
   const decide = async (
     change: (permissions: Session["permissions"]) => Promise<unknown>,
     message: string
@@ -305,16 +325,16 @@ const RequestActions = ({
       <div className="flex gap-2">
         <Button
           disabled={busy}
-          aria-label={`Approve ${who}`}
+          aria-label={t`Approve ${who}`}
           onClick={() => {
             void decide(
               async (permissions) =>
                 await grantReviewed(permissions, request, version),
-              `Approved: ${who}.`
+              t`Approved: ${who}.`
             );
           }}
         >
-          Approve
+          <Trans>Approve</Trans>
         </Button>
         <Dialog open={confirming} onOpenChange={setConfirming}>
           <DialogTrigger
@@ -322,17 +342,21 @@ const RequestActions = ({
               <Button
                 variant="destructive"
                 disabled={busy}
-                aria-label={`Reject ${who}`}
+                aria-label={t`Reject ${who}`}
               />
             }
           >
-            Reject
+            <Trans>Reject</Trans>
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Reject this request?</DialogTitle>
+              <DialogTitle>
+                <Trans>Reject this request?</Trans>
+              </DialogTitle>
               <DialogDescription>
-                {who} can&apos;t be granted later: it has to ask again.
+                <Trans>
+                  {who} can&apos;t be granted later: it has to ask again.
+                </Trans>
               </DialogDescription>
             </DialogHeader>
             <DialogFooter showCloseButton>
@@ -342,11 +366,11 @@ const RequestActions = ({
                 onClick={() => {
                   void decide(
                     async (permissions) => await permissions.revoke(request.id),
-                    `Rejected: ${who}.`
+                    t`Rejected: ${who}.`
                   );
                 }}
               >
-                Reject
+                <Trans>Reject</Trans>
               </Button>
             </DialogFooter>
           </DialogContent>
@@ -367,6 +391,7 @@ export const PendingApprovals = ({
   decides: boolean;
 }) => {
   const [decided, setDecided] = useState<Decided>();
+  const { t } = useLingui();
   return (
     <div className="flex flex-col gap-3">
       {decided === undefined ? null : (
@@ -377,30 +402,48 @@ export const PendingApprovals = ({
             search={{ target: decided.permission }}
             to="/activity"
           >
-            See it in the log
+            <Trans>See it in the log</Trans>
           </Link>
         </output>
       )}
       {decides ? null : (
         <p className="text-muted-foreground text-sm">
-          Only the organization&apos;s own admins decide permissions.
+          <Trans>
+            Only the organization&apos;s own admins decide permissions.
+          </Trans>
         </p>
       )}
       {requests.length === 0 ? (
         <p className="text-muted-foreground text-sm">
-          Nothing is waiting for approval.
+          <Trans>Nothing is waiting for approval.</Trans>
         </p>
       ) : (
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>For</TableHead>
-              <TableHead>Asks for</TableHead>
-              <TableHead>Actions</TableHead>
-              <TableHead>Version to review</TableHead>
-              <TableHead>Asked by</TableHead>
-              <TableHead>Asked</TableHead>
-              {decides ? <TableHead>Decision</TableHead> : null}
+              <TableHead>
+                <Trans>For</Trans>
+              </TableHead>
+              <TableHead>
+                <Trans>Asks for</Trans>
+              </TableHead>
+              <TableHead>
+                <Trans>Actions</Trans>
+              </TableHead>
+              <TableHead>
+                <Trans>Version to review</Trans>
+              </TableHead>
+              <TableHead>
+                <Trans>Asked by</Trans>
+              </TableHead>
+              <TableHead>
+                <Trans>Asked</Trans>
+              </TableHead>
+              {decides ? (
+                <TableHead>
+                  <Trans>Decision</Trans>
+                </TableHead>
+              ) : null}
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -408,17 +451,19 @@ export const PendingApprovals = ({
               const subject = subjectOf(request, directory);
               const object = objectOf(request, directory, exports);
               const again = askedAgain(request, directory);
+              const { binding } = request;
+              const actions = formatList(request.actions);
               return (
                 <TableRow key={request.id}>
                   <TableCell>{subject}</TableCell>
                   <TableCell>
                     {object}
                     <span className="text-muted-foreground block text-xs">
-                      as {request.binding}
+                      <Trans>as {binding}</Trans>
                     </span>
                     <RecordTypeClaims request={request} directory={directory} />
                   </TableCell>
-                  <TableCell>{request.actions.join(", ")}</TableCell>
+                  <TableCell>{formatList(request.actions)}</TableCell>
                   <TableCell>
                     {reviewedVersionText(request, directory)}
                   </TableCell>
@@ -426,7 +471,7 @@ export const PendingApprovals = ({
                     {personName(directory, request.requestedBy)}
                     {request.requestedVia === null ? null : (
                       <span className="text-muted-foreground block text-xs">
-                        asked for by the agent, in their chat
+                        <Trans>asked for by the agent, in their chat</Trans>
                       </span>
                     )}
                     {again === undefined ? null : (
@@ -441,7 +486,7 @@ export const PendingApprovals = ({
                       <RequestActions
                         request={request}
                         version={reviewedVersion(request, directory)}
-                        who={`${subject}: ${request.actions.join(", ")} on ${object}`}
+                        who={t`${subject}: ${actions} on ${object}`}
                         onDecided={setDecided}
                       />
                     </TableCell>

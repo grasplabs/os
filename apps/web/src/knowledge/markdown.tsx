@@ -7,6 +7,7 @@ import {
   TableHeader,
   TableRow,
 } from "@grasp-os/ui/components/table";
+import { Trans } from "@lingui/react/macro";
 import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import Markdown from "react-markdown";
@@ -34,6 +35,14 @@ import type { ResolveLink } from "./wiki-links.ts";
  */
 export const bodyOf = (text: string): string =>
   splitFrontmatterBlock(text)?.body ?? text;
+
+/** `body` without a first `# heading` that only repeats `title`. */
+const withoutTitle = (body: string, title: string | undefined): string => {
+  const [first = "", ...rest] = body.split("\n");
+  return title !== undefined && first.trim() === `# ${title}`
+    ? rest.join("\n").trim()
+    : body;
+};
 
 /** A resolved `[[link]]`'s address (`documentHref`), or one written so. */
 const documentLink = /^\?doc=[^&#]+$/u;
@@ -147,14 +156,19 @@ export const PlainMarkdown = ({ text }: { text: string }) => (
 export const DocumentMarkdown = ({
   text,
   resolve,
+  title,
 }: {
   text: string;
   resolve: ResolveLink;
+  /** The title the page already shows: a first heading saying it again is left out. */
+  title?: string;
 }) => {
-  const body = bodyOf(text).trim();
+  const body = withoutTitle(bodyOf(text).trim(), title);
   if (body === "") {
     return (
-      <p className="text-muted-foreground text-sm">This document is empty.</p>
+      <p className="text-muted-foreground text-sm">
+        <Trans>This document is empty.</Trans>
+      </p>
     );
   }
   return (

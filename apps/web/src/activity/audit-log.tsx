@@ -30,6 +30,10 @@ import {
   TableHeader,
   TableRow,
 } from "@grasp-os/ui/components/table";
+import { i18n } from "@lingui/core";
+import type { MessageDescriptor } from "@lingui/core";
+import { msg } from "@lingui/core/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { z } from "zod";
@@ -150,22 +154,23 @@ export const readLog = async (
   return { page, directory };
 };
 
-const typeLabels: Record<AuditEventType, string> = {
-  read: "Read",
-  action: "Action",
-  decision: "Decision",
-  permission: "Permission",
-  model_call: "Model call",
-  config: "Configuration",
-  platform_update: "Platform update",
+const typeLabels: Record<AuditEventType, MessageDescriptor> = {
+  read: msg`Read`,
+  action: msg`Action`,
+  decision: msg`Decision`,
+  permission: msg`Permission`,
+  model_call: msg`Model call`,
+  config: msg`Configuration`,
+  platform_update: msg`Platform update`,
 };
 
 const anyType = "any";
 
-const typeItems = [
-  { label: "Any type", value: anyType },
+/** The types to filter by, in the page's language. */
+const typeItems = (): { label: string; value: string }[] => [
+  { label: i18n._(msg`Any type`), value: anyType },
   ...auditEventTypeSchema.options.map((type) => ({
-    label: typeLabels[type],
+    label: i18n._(typeLabels[type]),
     value: type,
   })),
 ];
@@ -199,10 +204,12 @@ const Field = ({
  */
 export const LogFilters = ({ search }: { search: LogSearch }) => {
   const navigate = useNavigate();
+  const { t } = useLingui();
   const [type, setType] = useState<string>(search.type ?? anyType);
+  const types = typeItems();
   return (
     <form
-      aria-label="Filters"
+      aria-label={t`Filters`}
       className="flex flex-wrap items-end gap-3"
       onSubmit={(event) => {
         event.preventDefault();
@@ -214,19 +221,21 @@ export const LogFilters = ({ search }: { search: LogSearch }) => {
       }}
     >
       <div className="flex flex-col gap-1 text-sm">
-        <span aria-hidden>Type</span>
+        <span aria-hidden>
+          <Trans>Type</Trans>
+        </span>
         <Select
-          items={typeItems}
+          items={types}
           value={type}
           onValueChange={(value: string | null) => {
             setType(value ?? anyType);
           }}
         >
-          <SelectTrigger aria-label="Type">
+          <SelectTrigger aria-label={t`Type`}>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            {typeItems.map((item) => (
+            {types.map((item) => (
               <SelectItem key={item.value} value={item.value}>
                 {item.label}
               </SelectItem>
@@ -234,14 +243,21 @@ export const LogFilters = ({ search }: { search: LogSearch }) => {
           </SelectContent>
         </Select>
       </div>
-      <Field defaultValue={search.action} label="Action" name="action" />
-      <Field defaultValue={search.actor} label="Actor ID" name="actor" />
-      <Field defaultValue={search.target} label="Target ID" name="target" />
-      <Field defaultValue={search.from} label="From" name="from" type="date" />
-      <Field defaultValue={search.to} label="To" name="to" type="date" />
-      <Button type="submit">Filter</Button>
+      <Field defaultValue={search.action} label={t`Action`} name="action" />
+      <Field defaultValue={search.actor} label={t`Actor ID`} name="actor" />
+      <Field defaultValue={search.target} label={t`Target ID`} name="target" />
+      <Field
+        defaultValue={search.from}
+        label={t`From`}
+        name="from"
+        type="date"
+      />
+      <Field defaultValue={search.to} label={t`To`} name="to" type="date" />
+      <Button type="submit">
+        <Trans>Filter</Trans>
+      </Button>
       <Link className="text-sm underline" search={{}} to="/activity">
-        Clear
+        <Trans>Clear</Trans>
       </Link>
     </form>
   );
@@ -273,13 +289,13 @@ export const LogExport = ({ search }: { search: LogSearch }) => (
       className={buttonVariants({ variant: "outline" })}
       href={exportHref(search, "csv")}
     >
-      Export CSV
+      <Trans>Export CSV</Trans>
     </a>
     <a
       className={buttonVariants({ variant: "outline" })}
       href={exportHref(search, "json")}
     >
-      Export JSON
+      <Trans>Export JSON</Trans>
     </a>
   </div>
 );
@@ -293,14 +309,14 @@ const actorOf = (
     return { label: personName(directory, actor.userId), id: actor.userId };
   }
   if (actor.type === "staff") {
-    return {
-      label: `${personName(directory, actor.userId)} (Grasp staff)`,
-      id: actor.userId,
-    };
+    const name = personName(directory, actor.userId);
+    return { label: i18n._(msg`${name} (Grasp staff)`), id: actor.userId };
   }
   if (actor.type === "agent") {
+    const { agentId } = actor;
+    const person = personName(directory, actor.onBehalfOf);
     return {
-      label: `Agent ${actor.agentId} for ${personName(directory, actor.onBehalfOf)}`,
+      label: i18n._(msg`Agent ${agentId} for ${person}`),
       id: actor.agentId,
     };
   }
@@ -311,17 +327,22 @@ const actorOf = (
     };
   }
   if (actor.type === "workflow") {
+    const app = appName(directory, actor.appId);
+    const { workflowId } = actor;
     return {
-      label: `${appName(directory, actor.appId)}: run of ${actor.workflowId}`,
+      label: i18n._(msg`${app}: run of ${workflowId}`),
       id: actor.runId,
     };
   }
   if (actor.type === "guest") {
+    const app = appName(directory, actor.appId);
+    const person = personName(directory, actor.invitedBy);
     return {
-      label: `Guest of ${appName(directory, actor.appId)}, invited for ${personName(directory, actor.invitedBy)}`,
+      label: i18n._(msg`Guest of ${app}, invited for ${person}`),
       id: actor.chatId,
     };
   }
+  // The platform itself: a name, the same in every language.
   return { label: "Grasp" };
 };
 
@@ -342,16 +363,18 @@ const RecordRow = ({
   directory: Directory;
 }) => {
   const [open, setOpen] = useState(false);
+  const { t } = useLingui();
   const { event } = record;
+  const { seq } = record;
   const actor = event === null ? undefined : actorOf(event.actor, directory);
   const detailsId = `audit-${record.seq}`;
   return (
     <>
       <TableRow>
         <TableCell>{formatTime(record.receivedAt)}</TableCell>
-        <TableCell>{event?.action ?? "Unreadable event"}</TableCell>
+        <TableCell>{event?.action ?? t`Unreadable event`}</TableCell>
         <TableCell>
-          {record.type === null ? "–" : typeLabels[record.type]}
+          {record.type === null ? "–" : i18n._(typeLabels[record.type])}
         </TableCell>
         <TableCell>
           {actor?.id === undefined ? (
@@ -381,7 +404,9 @@ const RecordRow = ({
         </TableCell>
         <TableCell>
           {record.verified ? null : (
-            <Badge variant="destructive">Not verified</Badge>
+            <Badge variant="destructive">
+              <Trans>Not verified</Trans>
+            </Badge>
           )}
         </TableCell>
         <TableCell>
@@ -390,12 +415,12 @@ const RecordRow = ({
             size="sm"
             aria-controls={open ? detailsId : undefined}
             aria-expanded={open}
-            aria-label={`Details of event ${record.seq}`}
+            aria-label={t`Details of event ${seq}`}
             onClick={() => {
               setOpen(!open);
             }}
           >
-            {open ? "Hide" : "Details"}
+            {open ? t`Hide` : t`Details`}
           </Button>
         </TableCell>
       </TableRow>
@@ -404,19 +429,25 @@ const RecordRow = ({
           <TableCell colSpan={7}>
             <dl className="flex flex-col gap-1 text-sm">
               <div className="flex gap-2">
-                <dt className="text-muted-foreground">Position</dt>
+                <dt className="text-muted-foreground">
+                  <Trans>Position</Trans>
+                </dt>
                 <dd>{record.seq}</dd>
               </div>
               <div className="flex gap-2">
-                <dt className="text-muted-foreground">Verified</dt>
+                <dt className="text-muted-foreground">
+                  <Trans>Verified</Trans>
+                </dt>
                 <dd>
                   {record.verified
-                    ? "Yes: its hash matches, and it links to the event before it."
-                    : "No: its hash or its link to the event before it doesn't match."}
+                    ? t`Yes: its hash matches, and it links to the event before it.`
+                    : t`No: its hash or its link to the event before it doesn't match.`}
                 </dd>
               </div>
               <div className="flex gap-2">
-                <dt className="text-muted-foreground">Hash</dt>
+                <dt className="text-muted-foreground">
+                  <Trans>Hash</Trans>
+                </dt>
                 <dd className="font-mono break-all">{record.hash}</dd>
               </div>
             </dl>
@@ -450,6 +481,7 @@ export const LogRecords = ({
   const [older, setOlder] = useState<AuditRecord[]>([]);
   const [next, setNext] = useState(first.next);
   const { busy, failure, run } = useCoreAction();
+  const { t } = useLingui();
   const records = [...first.records, ...older];
   const loadOlder = async (before: number): Promise<void> => {
     const page = await run(
@@ -466,23 +498,37 @@ export const LogRecords = ({
       {records.length === 0 ? (
         <p className="text-muted-foreground text-sm">
           {next === null
-            ? "No events match."
-            : "No events match in the latest stretch of the log."}
+            ? t`No events match.`
+            : t`No events match in the latest stretch of the log.`}
         </p>
       ) : (
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Time</TableHead>
-              <TableHead>Action</TableHead>
-              <TableHead>Type</TableHead>
-              <TableHead>Actor</TableHead>
-              <TableHead>Target</TableHead>
               <TableHead>
-                <span className="sr-only">Verified</span>
+                <Trans>Time</Trans>
               </TableHead>
               <TableHead>
-                <span className="sr-only">Details</span>
+                <Trans>Action</Trans>
+              </TableHead>
+              <TableHead>
+                <Trans>Type</Trans>
+              </TableHead>
+              <TableHead>
+                <Trans>Actor</Trans>
+              </TableHead>
+              <TableHead>
+                <Trans>Target</Trans>
+              </TableHead>
+              <TableHead>
+                <span className="sr-only">
+                  <Trans>Verified</Trans>
+                </span>
+              </TableHead>
+              <TableHead>
+                <span className="sr-only">
+                  <Trans>Details</Trans>
+                </span>
               </TableHead>
             </TableRow>
           </TableHeader>
@@ -506,7 +552,7 @@ export const LogRecords = ({
             void loadOlder(next);
           }}
         >
-          {busy ? "Loading…" : "Load older"}
+          {busy ? t`Loading…` : t`Load older`}
         </Button>
       )}
       <ErrorText>{failure}</ErrorText>

@@ -43,6 +43,22 @@ const expectKitRendered = async (page: Page): Promise<void> => {
 
   await page.getByRole("button", { name: "Show toast" }).click();
   await expect(page.getByText("Your changes are saved.")).toBeVisible();
+
+  await expect(page.getByRole("button", { name: "Chat" })).toBeVisible();
+  await expect(page.getByText("A title is needed.")).toBeVisible();
+
+  await page.getByRole("button", { name: "Open sheet" }).click();
+  const sheet = page.getByRole("dialog", { name: "Sheet" });
+  await expect(sheet).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(sheet).toBeHidden();
+
+  await page.getByRole("button", { name: "Open popover" }).click();
+  await expect(page.getByText("Anchored to its button.")).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  await page.getByRole("button", { name: "Show details" }).click();
+  await expect(page.getByText("The details.")).toBeVisible();
 };
 
 test("renders the UI kit in light mode", async ({ page }) => {
@@ -62,4 +78,41 @@ test("renders the UI kit in dark mode", async ({ page }) => {
   // And starts dark when the system already is.
   await expectKitRendered(page);
   expect(await bodyBackground(page)).not.toBe(light);
+});
+
+test("serves the Grasp favicon the page names", async ({ page }) => {
+  await page.goto("/kit");
+  const href = await page.locator('link[rel="icon"]').getAttribute("href");
+  expect(href).toBe("/favicon.svg");
+  const icon = await page.request.get("/favicon.svg");
+  expect(icon.ok()).toBe(true);
+  expect(icon.headers()["content-type"]).toContain("image/svg+xml");
+});
+
+test("a page sidebar folds from the keyboard and stays folded over a reload", async ({
+  page,
+}) => {
+  await page.goto("/kit");
+  const documents = page.getByRole("complementary", { name: "Documents" });
+  await expect(
+    documents.getByRole("button", { name: "Pricing" })
+  ).toContainText("Pricing");
+
+  await documents.getByRole("button", { name: "Fold the documents" }).focus();
+  await page.keyboard.press("Enter");
+  // Folded, each entry is its icon, named by its tooltip.
+  const expand = documents.getByRole("button", {
+    name: "Expand the documents",
+  });
+  await expect(expand).toBeVisible();
+  await expect(documents.getByRole("button", { name: "Pricing" })).toHaveText(
+    ""
+  );
+
+  await page.reload();
+  await expect(expand).toBeVisible();
+  await expand.click();
+  await expect(
+    documents.getByRole("button", { name: "Pricing" })
+  ).toContainText("Pricing");
 });

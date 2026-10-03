@@ -1,3 +1,5 @@
 @import "@grasp-os/ui/styles.css";
+/* The theme's sans, bundled so it is served from this origin. */
+@import "@fontsource-variable/geist";
 
 @source "../";

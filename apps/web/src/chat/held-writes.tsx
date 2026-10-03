@@ -5,18 +5,14 @@ import type {
 import { failureText } from "@grasp-os/shared/errors";
 import { Badge } from "@grasp-os/ui/components/badge";
 import { Button } from "@grasp-os/ui/components/button";
-import {
-  Card,
-  CardContent,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from "@grasp-os/ui/components/card";
+import { Plural, Trans, useLingui } from "@lingui/react/macro";
+import { ClockIcon } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 
 import type { CoreConnection } from "../core-connection.ts";
 import type { Session } from "../core.ts";
 import { ErrorText } from "../error-text.tsx";
+import { formatDateTime } from "../format.ts";
 import { useCoreAction } from "../use-core-action.ts";
 import { useCore } from "../use-core.ts";
 
@@ -100,6 +96,9 @@ const TextValue = ({
   const lines = value.split("\n");
   const start = startOf(value);
   const long = isCutShort(value);
+  const { t } = useLingui();
+  const count = lines.length;
+  const characters = value.length;
   return (
     <dd className="flex flex-col items-start gap-1">
       <span className="break-words whitespace-pre-wrap">
@@ -118,8 +117,8 @@ const TextValue = ({
           variant="outline"
         >
           {all
-            ? "Show less"
-            : `Show all ${lines.length} lines (${value.length} characters)`}
+            ? t`Show less`
+            : t`Show all ${count} lines (${characters} characters)`}
         </Button>
       ) : null}
     </dd>
@@ -191,6 +190,7 @@ const ExactInput = ({
 }) => {
   const [open, setOpen] = useState(!shown);
   const id = useId();
+  const { t } = useLingui();
   return (
     <div className="flex flex-col items-start gap-2">
       <Button
@@ -205,7 +205,9 @@ const ExactInput = ({
         size="sm"
         variant="ghost"
       >
-        {open ? "Hide" : "Show"} exactly what will be sent
+        {open
+          ? t`Hide exactly what will be sent`
+          : t`Show exactly what will be sent`}
       </Button>
       {open ? (
         <pre
@@ -227,6 +229,7 @@ const HeldWrite = ({
   onDecided: () => void;
 }) => {
   const { busy, failure, run } = useCoreAction();
+  const { t } = useLingui();
   // Read again however it went: a failed decision may have changed
   // something too (the action gone already, say).
   const decide = async (
@@ -252,93 +255,165 @@ const HeldWrite = ({
   const unseenId = useId();
   const title = description?.title ?? action.action;
   const connection = action.connectionName ?? action.connectionId;
-  const what = `${title} on ${connection}`;
+  const what = t`${title} on ${connection}`;
+  const { resource } = action;
+  const tool = action.action;
+  const asked = formatDateTime(action.requestedAt);
+  let where = connection;
+  if (resource !== null && description !== undefined) {
+    where = t`${connection}, ${resource} (${tool})`;
+  } else if (resource !== null) {
+    where = t`${connection}, ${resource}`;
+  } else if (description !== undefined) {
+    where = t`${connection} (${tool})`;
+  }
   return (
-    <Card size="sm">
-      <CardHeader>
-        <CardTitle>Waiting for you: {title}</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="flex flex-col gap-2">
-          <p className="text-muted-foreground text-sm">
-            On {connection}
-            {action.resource === null ? "" : `, ${action.resource}`}
-            {description === undefined ? "" : ` (${action.action})`}
-          </p>
-          <p className="text-muted-foreground text-sm">
-            Asked for{" "}
-            <time dateTime={action.requestedAt}>
-              {new Date(action.requestedAt).toLocaleString()}
-            </time>
-          </p>
-          {action.restricted ? (
-            <Badge variant="destructive">
-              This chat read restricted data: this may send it out
-            </Badge>
-          ) : null}
-          {description === undefined ? null : (
-            <Described
-              description={description}
-              onShowAll={(input) => {
-                setSeen((shown) => [...shown, input]);
-              }}
-            />
-          )}
-          {description?.complete === false ? (
-            <p className="text-sm" role="note">
+    <article
+      aria-label={what}
+      className="bg-card flex w-full flex-col gap-4 rounded-xl border p-4 text-sm"
+    >
+      <h3 className="flex items-start gap-2 font-medium">
+        <ClockIcon
+          aria-hidden="true"
+          className="text-status-attention mt-0.5 size-4 flex-none"
+        />
+        <span>
+          <Trans>Waiting for you: {title}</Trans>
+        </span>
+      </h3>
+      <div className="flex flex-col gap-2">
+        <p className="text-muted-foreground">
+          <Trans>On {where}</Trans>
+        </p>
+        <p className="text-muted-foreground">
+          <Trans>
+            Asked for <time dateTime={action.requestedAt}>{asked}</time>
+          </Trans>
+        </p>
+        {action.restricted ? (
+          <Badge variant="destructive">
+            <Trans>This chat read restricted data: this may send it out</Trans>
+          </Badge>
+        ) : null}
+        {description === undefined ? null : (
+          <Described
+            description={description}
+            onShowAll={(input) => {
+              setSeen((shown) => [...shown, input]);
+            }}
+          />
+        )}
+        {description?.complete === false ? (
+          <p role="note">
+            <Trans>
               More will be sent than is shown above. Read exactly what will be
               sent before you confirm.
-            </p>
-          ) : null}
-          <ExactInput
-            input={action.input}
-            onOpen={() => {
-              setInputSeen(true);
-            }}
-            shown={complete}
-          />
-          {unseen ? (
-            <p className="text-muted-foreground text-sm" id={unseenId}>
+            </Trans>
+          </p>
+        ) : null}
+        <ExactInput
+          input={action.input}
+          onOpen={() => {
+            setInputSeen(true);
+          }}
+          shown={complete}
+        />
+        {unseen ? (
+          <p className="text-muted-foreground" id={unseenId}>
+            <Trans>
               Part of what will be sent is cut short above. Show it all, or
               exactly what will be sent, to confirm.
-            </p>
-          ) : null}
-          <ErrorText>{failure}</ErrorText>
-        </div>
-      </CardContent>
-      <CardFooter>
-        <div className="flex gap-2">
-          <Button
-            aria-describedby={unseen ? unseenId : undefined}
-            aria-label={`Confirm ${what}`}
-            disabled={busy || unseen}
-            onClick={() => {
-              void decide(
-                async (session) =>
-                  await session.pendingActions.confirm(
-                    action.id,
-                    action.inputHash
-                  )
+            </Trans>
+          </p>
+        ) : null}
+        <ErrorText>{failure}</ErrorText>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Button
+          aria-describedby={unseen ? unseenId : undefined}
+          aria-label={t`Confirm ${what}`}
+          disabled={busy || unseen}
+          onClick={() => {
+            void decide(
+              async (session) =>
+                await session.pendingActions.confirm(
+                  action.id,
+                  action.inputHash
+                )
+            );
+          }}
+        >
+          <Trans>Confirm</Trans>
+        </Button>
+        <Button
+          aria-label={t`Reject ${what}`}
+          disabled={busy}
+          onClick={() => {
+            void decide(async (session) => {
+              await session.pendingActions.decline(action.id);
+            });
+          }}
+          variant="outline"
+        >
+          <Trans>Reject</Trans>
+        </Button>
+      </div>
+    </article>
+  );
+};
+
+/**
+ * Rejects every write the chat holds at once. Confirming stays one at a
+ * time: each is confirmed only once what it sends has been shown.
+ */
+const RejectAll = ({
+  actions,
+  onDecided,
+}: {
+  actions: readonly PendingAction[];
+  onDecided: () => void;
+}) => {
+  const { busy, failure, run } = useCoreAction();
+  const count = actions.length;
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+      <p className="text-muted-foreground">
+        <Plural
+          one="# change waits for you to confirm or reject it."
+          other="# changes wait for you to confirm or reject them."
+          value={count}
+        />
+      </p>
+      <Button
+        disabled={busy}
+        onClick={() => {
+          void (async () => {
+            await run(async (session) => {
+              // Every rejection settles before the list is read again, so
+              // none still running is shown as waiting; then the first
+              // refusal says why.
+              const outcomes = await Promise.allSettled(
+                actions.map(async ({ id }) => {
+                  await session.pendingActions.decline(id);
+                })
               );
-            }}
-          >
-            Confirm
-          </Button>
-          <Button
-            aria-label={`Reject ${what}`}
-            disabled={busy}
-            onClick={() => {
-              void decide(async (session) => {
-                await session.pendingActions.decline(action.id);
-              });
-            }}
-            variant="outline"
-          >
-            Reject
-          </Button>
-        </div>
-      </CardFooter>
-    </Card>
+              const refused = outcomes.find(
+                (outcome) => outcome.status === "rejected"
+              );
+              if (refused !== undefined) {
+                throw refused.reason;
+              }
+            });
+            onDecided();
+          })();
+        }}
+        size="sm"
+        variant="outline"
+      >
+        <Trans>Reject all</Trans>
+      </Button>
+      <ErrorText>{failure}</ErrorText>
+    </div>
   );
 };
 
@@ -357,6 +432,7 @@ export const HeldWrites = ({
   const [held, setHeld] = useState<Held>({ state: "loading" });
   const core = useCore();
   const [reads, setReads] = useState(0);
+  const { t } = useLingui();
   useEffect(() => {
     let current = true;
     const read = async (): Promise<void> => {
@@ -378,8 +454,17 @@ export const HeldWrites = ({
   if (held.state === "loading" || held.actions.length === 0) {
     return null;
   }
+  const count = held.actions.length;
   return (
-    <section aria-label="Waiting for you" className="flex flex-col gap-2">
+    <section aria-label={t`Waiting for you`} className="flex flex-col gap-2">
+      {count > 1 ? (
+        <RejectAll
+          actions={held.actions}
+          onDecided={() => {
+            setReads(reads + 1);
+          }}
+        />
+      ) : null}
       {held.actions.map((action) => (
         <HeldWrite
           action={action}

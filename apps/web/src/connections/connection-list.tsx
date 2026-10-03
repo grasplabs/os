@@ -16,9 +16,14 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@grasp-os/ui/components/dialog";
+import { i18n } from "@lingui/core";
+import type { MessageDescriptor } from "@lingui/core";
+import { msg, ph } from "@lingui/core/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { useState } from "react";
 
 import { ErrorText } from "../error-text.tsx";
+import { formatDate, formatList } from "../format.ts";
 import type { Loaded } from "../load-from-core.tsx";
 import { useCoreAction } from "../use-core-action.ts";
 import { goTo, returnTo } from "./catalog.tsx";
@@ -38,19 +43,19 @@ export interface HeldPermissions {
   appNames: ReadonlyMap<string, string>;
 }
 
-const statusText: Record<ListedConnection["status"], string> = {
-  active: "Active",
-  needs_reauth: "Needs connecting again",
-  disconnected: "Disconnected",
+const statusText: Record<ListedConnection["status"], MessageDescriptor> = {
+  active: msg`Active`,
+  needs_reauth: msg`Needs connecting again`,
+  disconnected: msg`Disconnected`,
 };
 
-const scopeText: Record<ListedConnection["scope"], string> = {
-  personal: "Personal: only you can use it",
-  shared: "Shared: your organization uses it through permissions",
+const scopeText: Record<ListedConnection["scope"], MessageDescriptor> = {
+  personal: msg`Personal: only you can use it`,
+  shared: msg`Shared: your organization uses it through permissions`,
 };
 
 /** An ISO 8601 time as a date for people. */
-const dateOf = (iso: string): string => new Date(iso).toLocaleDateString();
+const dateOf = (iso: string): string => formatDate(iso);
 
 /** Who holds a permission, for people: the App's name, or the agent. */
 const holderOf = (
@@ -58,8 +63,10 @@ const holderOf = (
   appNames: ReadonlyMap<string, string>
 ): string =>
   subject.type === "app"
-    ? `App ${appNames.get(subject.appId) ?? subject.appId}`
-    : `Agent ${subject.agentId}`;
+    ? i18n._(
+        msg`App ${ph({ app: appNames.get(subject.appId) ?? subject.appId })}`
+      )
+    : i18n._(msg`Agent ${ph({ agent: subject.agentId })}`);
 
 const HolderItem = ({
   permission,
@@ -71,23 +78,23 @@ const HolderItem = ({
   mayRevoke: boolean;
 }) => {
   const { busy, failure, change } = useChange();
+  const { t } = useLingui();
   const { object } = permission;
   const resource =
     object.type === "connection" && object.resource !== undefined
       ? object.resource
-      : "the whole connection";
+      : t`the whole connection`;
+  const actions = formatList(permission.actions);
   return (
     <li className="flex flex-col gap-1">
       <div className="flex items-center justify-between gap-2">
-        <span>
-          {holder}: {permission.actions.join(", ")} on {resource}
-        </span>
+        <span>{t`${holder}: ${actions} on ${resource}`}</span>
         {mayRevoke ? (
           <Button
             variant="outline"
             size="sm"
             disabled={busy}
-            aria-label={`Revoke ${holder}'s permission`}
+            aria-label={t`Revoke ${holder}'s permission`}
             onClick={() => {
               void change(
                 async (session) =>
@@ -95,7 +102,7 @@ const HolderItem = ({
               );
             }}
           >
-            Revoke
+            <Trans>Revoke</Trans>
           </Button>
         ) : null}
       </div>
@@ -125,9 +132,13 @@ const Holders = ({
   );
   return (
     <div className="flex flex-col gap-1 text-sm">
-      <h4 className="font-medium">Apps and agents with a permission</h4>
+      <h4 className="font-medium">
+        <Trans>Apps and agents with a permission</Trans>
+      </h4>
       {holding.length === 0 ? (
-        <p className="text-muted-foreground">None.</p>
+        <p className="text-muted-foreground">
+          <Trans>None.</Trans>
+        </p>
       ) : (
         <ul className="flex flex-col gap-1">
           {holding.map((permission) => (
@@ -150,28 +161,34 @@ const Holders = ({
  * log keeps the SHA-256 of the exact text they were shown
  * (`connection.consent`).
  */
-const ConsentRecord = ({ connection }: { connection: ListedConnection }) => (
-  <div className="flex flex-col gap-1 text-sm">
-    <h4 className="font-medium">Consent</h4>
-    <p>
-      {connection.connectedByName ?? "An admin"} consented to this before
-      connecting it:
-    </p>
-    <blockquote className="text-muted-foreground border-l-2 pl-3">
-      {composioConsentText}
-    </blockquote>
-    <p className="text-muted-foreground">
-      This is the consent as Grasp words it now. The audit log keeps a hash of
-      the exact text they were shown.
-    </p>
-    <p>
-      Tools allowed:{" "}
-      {connection.tools === undefined || connection.tools.length === 0
-        ? "none recorded"
-        : connection.tools.join(", ")}
-    </p>
-  </div>
-);
+const ConsentRecord = ({ connection }: { connection: ListedConnection }) => {
+  const { t } = useLingui();
+  const who = connection.connectedByName ?? t`An admin`;
+  return (
+    <div className="flex flex-col gap-1 text-sm">
+      <h4 className="font-medium">
+        <Trans>Consent</Trans>
+      </h4>
+      <p>
+        <Trans>{who} consented to this before connecting it:</Trans>
+      </p>
+      <blockquote className="text-muted-foreground border-l-2 pl-3">
+        {composioConsentText}
+      </blockquote>
+      <p className="text-muted-foreground">
+        <Trans>
+          This is the consent as Grasp words it now. The audit log keeps a hash
+          of the exact text they were shown.
+        </Trans>
+      </p>
+      <p>
+        {connection.tools === undefined || connection.tools.length === 0
+          ? t`Tools allowed: none recorded`
+          : t`Tools allowed: ${ph({ tools: formatList(connection.tools) })}`}
+      </p>
+    </div>
+  );
+};
 
 const Detail = ({ term, children }: { term: string; children: string }) => (
   <div className="flex gap-2">
@@ -196,6 +213,7 @@ const Reconnect = ({
   label: string;
 }) => {
   const { busy, failure, run } = useCoreAction();
+  const { t } = useLingui();
   const start = async (): Promise<void> => {
     goTo(
       await run(
@@ -211,18 +229,20 @@ const Reconnect = ({
   return (
     <div className="flex flex-col gap-1">
       <p className="text-muted-foreground text-sm">
-        Its access ran out. Reconnect it with the same account: Apps and agents
-        keep their permissions for it.
+        <Trans>
+          Its access ran out. Reconnect it with the same account: Apps and
+          agents keep their permissions for it.
+        </Trans>
       </p>
       <Button
         className="self-start"
         disabled={busy}
-        aria-label={`Reconnect ${label}`}
+        aria-label={t`Reconnect ${label}`}
         onClick={() => {
           void start();
         }}
       >
-        Reconnect
+        <Trans>Reconnect</Trans>
       </Button>
       <ErrorText>{failure}</ErrorText>
     </div>
@@ -242,14 +262,20 @@ const ranOutText = (
   staff: boolean
 ): string => {
   if (!known) {
-    return "Its access ran out, and it can't be reconnected here.";
+    return i18n._(msg`Its access ran out, and it can't be reconnected here.`);
   }
   if (!offered) {
-    return "Its access ran out. An admin must offer this connector again before it can be reconnected.";
+    return i18n._(
+      msg`Its access ran out. An admin must offer this connector again before it can be reconnected.`
+    );
   }
   return staff
-    ? "Its access ran out. Grasp staff can't reconnect it: an admin of the organization can."
-    : "Its access ran out. An admin of your organization can reconnect it.";
+    ? i18n._(
+        msg`Its access ran out. Grasp staff can't reconnect it: an admin of the organization can.`
+      )
+    : i18n._(
+        msg`Its access ran out. An admin of your organization can reconnect it.`
+      );
 };
 
 const ConnectionItem = ({
@@ -268,6 +294,7 @@ const ConnectionItem = ({
 }) => {
   const { busy, failure, change } = useChange();
   const [confirming, setConfirming] = useState(false);
+  const { t } = useLingui();
   const admin = isAdmin(identity.role);
   // Only the owner sees a personal connection here, and admins disconnect
   // shared ones: connect checks both.
@@ -281,14 +308,12 @@ const ConnectionItem = ({
     offered &&
     mayDisconnect &&
     !identity.staff;
-  const label =
-    connection.accountName === null
-      ? name
-      : `${name} (${connection.accountName})`;
+  const { accountName } = connection;
+  const label = accountName === null ? name : `${name} (${accountName})`;
   const connectedBy =
     connection.connectedBy === identity.userId
-      ? "You"
-      : (connection.connectedByName ?? "Someone no longer here");
+      ? t`You`
+      : (connection.connectedByName ?? t`Someone no longer here`);
   return (
     <li className="flex flex-col gap-3 rounded-lg border p-4">
       <div className="flex flex-wrap items-center gap-2">
@@ -296,13 +321,15 @@ const ConnectionItem = ({
         <SourceBadge source={connection.source} />
       </div>
       <dl className="flex flex-col gap-1 text-sm">
-        <Detail term="Status">{statusText[connection.status]}</Detail>
-        <Detail term="Scope">{scopeText[connection.scope]}</Detail>
-        <Detail term="Account">
-          {connection.accountName ?? "Not named by the provider"}
+        <Detail term={t`Status`}>
+          {i18n._(statusText[connection.status])}
         </Detail>
-        <Detail term="Connected by">{connectedBy}</Detail>
-        <Detail term="Connected on">{dateOf(connection.createdAt)}</Detail>
+        <Detail term={t`Scope`}>{i18n._(scopeText[connection.scope])}</Detail>
+        <Detail term={t`Account`}>
+          {accountName ?? t`Not named by the provider`}
+        </Detail>
+        <Detail term={t`Connected by`}>{connectedBy}</Detail>
+        <Detail term={t`Connected on`}>{dateOf(connection.createdAt)}</Detail>
       </dl>
       {connection.status === "needs_reauth" && reconnectable ? (
         <Reconnect
@@ -338,19 +365,23 @@ const ConnectionItem = ({
                 className="self-start"
                 variant="destructive"
                 disabled={busy}
-                aria-label={`Disconnect ${label}`}
+                aria-label={t`Disconnect ${label}`}
               />
             }
           >
-            Disconnect
+            <Trans>Disconnect</Trans>
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Disconnect {label}?</DialogTitle>
+              <DialogTitle>
+                <Trans>Disconnect {label}?</Trans>
+              </DialogTitle>
               <DialogDescription>
-                Its tokens are deleted, every App and agent loses it, and
-                actions waiting on it are dropped. Connect it again to use it
-                again.
+                <Trans>
+                  Its tokens are deleted, every App and agent loses it, and
+                  actions waiting on it are dropped. Connect it again to use it
+                  again.
+                </Trans>
               </DialogDescription>
             </DialogHeader>
             <DialogFooter showCloseButton>
@@ -365,7 +396,7 @@ const ConnectionItem = ({
                   );
                 }}
               >
-                Disconnect
+                <Trans>Disconnect</Trans>
               </Button>
             </DialogFooter>
           </DialogContent>

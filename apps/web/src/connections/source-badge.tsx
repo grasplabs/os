@@ -1,5 +1,6 @@
 import type { CatalogSource } from "@grasp-os/shared/connect";
 import { Badge } from "@grasp-os/ui/components/badge";
+import { Trans } from "@lingui/react/macro";
 
 /**
  * Who holds a connection's tokens: our own connector (Native), or Composio's
@@ -8,7 +9,11 @@ import { Badge } from "@grasp-os/ui/components/badge";
  */
 export const SourceBadge = ({ source }: { source: CatalogSource }) =>
   source === "native" ? (
-    <Badge variant="secondary">Native</Badge>
+    <Badge variant="secondary">
+      <Trans>Native</Trans>
+    </Badge>
   ) : (
-    <Badge variant="outline">Via Composio</Badge>
+    <Badge variant="outline">
+      <Trans>Via Composio</Trans>
+    </Badge>
   );

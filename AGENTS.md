@@ -83,6 +83,17 @@ Work is planned in Linear (team Grasp OS), not in this repo.
 - All React is compiled by the React Compiler, and the build fails on anything it can't compile. Don't write `useMemo`, `useCallback` or `memo` by hand; if the compiler rejects a component, fix the component.
 - UI uses `@grasp-os/ui` components and theme tokens: no raw colours, arbitrary values or inline styles. `@shadcn/lint` names the component, variant or token to use instead.
 
+## Translations
+
+The frontend (`apps/web`) speaks English, German, Dutch, Spanish and French through Lingui. English is written in the code; `vp run -r i18n:extract` collects it into `apps/web/src/locales/<locale>/messages.po`, and CI fails when a catalog isn't up to date. `locales.test.ts` fails when a language lacks a message or a translation drops a placeholder.
+
+- JSX text in `<Trans>`; attributes and strings in a component with `t` from `useLingui()` (both from `@lingui/react/macro`). Outside components, `msg` from `@lingui/core/macro`, read with `i18n._()` from `@lingui/core` when rendering, never at module load.
+- Whole sentences only, never glued fragments. Counts go through `plural`. Name placeholders after what they hold: a local `const date = …` gives translators `{date}`, not `{0}`.
+- Lists through `formatList` (`apps/web/src/format.ts`), not `join(", ")` inside a message.
+- Not translated: product and company names, people's names, what someone typed, core's own error messages, and text whose exact words are recorded (the Composio consent).
+- `@grasp-os/ui` stays free of Lingui (App screens and the console share it): its few words are English props a page passes translated.
+- Every new message needs all four translations in the same pull request.
+
 ## Testing
 
 Test what the code does, at real boundaries, never how it does it.

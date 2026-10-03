@@ -1,4 +1,6 @@
 @import "@grasp-os/ui/styles.css";
+/* The theme's sans, bundled so it is served from this origin (the CSP's default-src). */
+@import "@fontsource-variable/geist";
 
 @source "../";
 
@@ -13,4 +15,266 @@
 
 .base-ui-disable-scrollbar::-webkit-scrollbar {
   display: none;
+}
+
+/*
+ * No scrollbars anywhere in the product. Every area still scrolls with the
+ * wheel, touchpad, touch or keyboard; only the bar is gone. The
+ * grasp/no-scrollbars lint rule keeps code from bringing one back. App
+ * screens keep theirs: this sheet isn't the kit's.
+ */
+@layer base {
+  * {
+    scrollbar-width: none;
+  }
+
+  *::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* The frame's sizes: the app's sidebar and the bar above each page. */
+@layer base {
+  [data-slot="sidebar-wrapper"] {
+    --sidebar-width: calc(var(--spacing) * 60);
+    --header-height: calc(var(--spacing) * 12);
+  }
+}
+
+/*
+ * The dot figures (buddy/grasp-buddy.tsx): ink dots, and warmth where there
+ * is activity, the one place with hues besides status.
+ */
+:root {
+  --brain-ink: var(--foreground);
+  --brain-heat: oklch(0.63 0.2 35);
+  --brain-glow: oklch(0.86 0.13 82);
+}
+
+@media screen {
+  .dark {
+    --brain-heat: oklch(0.68 0.19 38);
+    --brain-glow: oklch(0.88 0.12 85);
+  }
+}
+
+/*
+ * From the prototype (packages/grasp/src/index.css), the chat's own motion.
+ */
+/* Grasp's eyes beside each answer in the chat (chat/grasp-eyes.tsx): the Home buddy's
+   eyes on a dark tile. data-eyes says what Grasp is doing and picks how the eyes move; data-live
+   marks the newest answer, the only one whose eyes move at all. Sizes are shares of the tile. */
+@utility eyes {
+  position: relative;
+  display: block;
+  flex: none;
+  overflow: hidden;
+  border-radius: 30%;
+  background: var(--primary);
+  box-shadow: inset 0 1px 0
+    color-mix(in oklch, var(--primary-foreground) 18%, transparent);
+}
+@utility eyes-pair {
+  position: absolute;
+  inset: 0;
+  transition: transform 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  [data-live][data-eyes="reading"] & {
+    animation: eyes-scan 1.6s ease-in-out infinite;
+  }
+  [data-live][data-eyes="thinking"] & {
+    animation: eyes-ponder 2.8s ease-in-out infinite;
+  }
+  [data-live][data-eyes="writing"] & {
+    animation: eyes-follow 1.2s ease-in-out infinite;
+  }
+  [data-live][data-eyes="working"] & {
+    animation: eyes-busy 0.7s ease-in-out infinite;
+  }
+  [data-live][data-eyes="asking"] & {
+    animation: eyes-down 2s ease-in-out infinite;
+  }
+  [data-eyes="error"] & {
+    transform: translateY(12%);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    animation: none !important;
+  }
+}
+@utility eyes-eye {
+  position: absolute;
+  top: 31%;
+  width: 16%;
+  height: 38%;
+  border-radius: 999px;
+  background: var(--primary-foreground);
+  transform-origin: 50% 55%;
+  transition: transform 160ms ease-out;
+  [data-live][data-eyes="idle"] & {
+    animation:
+      eyes-done 700ms ease-out,
+      eyes-blink 5s 2s infinite;
+  }
+  [data-live][data-eyes="thinking"] & {
+    animation: eyes-blink 3.2s 1s infinite;
+  }
+  [data-eyes="working"] & {
+    transform: scaleY(0.62);
+  }
+  [data-eyes="error"] & {
+    transform: scaleY(0.28);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    animation: none !important;
+  }
+}
+@utility eyes-eye-left {
+  left: 29%;
+}
+@utility eyes-eye-right {
+  left: 55%;
+}
+/* Reading the workspace: side to side. */
+@keyframes eyes-scan {
+  0%,
+  100% {
+    transform: translate(-16%, 4%);
+  }
+  50% {
+    transform: translate(16%, 4%);
+  }
+}
+/* Thinking: up, drifting. */
+@keyframes eyes-ponder {
+  0%,
+  100% {
+    transform: translate(-9%, -15%);
+  }
+  50% {
+    transform: translate(10%, -12%);
+  }
+}
+/* Writing: along the line, and back to the start of the next. */
+@keyframes eyes-follow {
+  0% {
+    transform: translate(-14%, 8%);
+  }
+  85% {
+    transform: translate(14%, 8%);
+  }
+  100% {
+    transform: translate(-14%, 8%);
+  }
+}
+/* Drawing or building: a quick, busy shuffle. */
+@keyframes eyes-busy {
+  0%,
+  100% {
+    transform: translateX(-7%);
+  }
+  50% {
+    transform: translateX(7%);
+  }
+}
+/* Waiting on questions: down at them. */
+@keyframes eyes-down {
+  0%,
+  100% {
+    transform: translateY(12%);
+  }
+  50% {
+    transform: translateY(20%);
+  }
+}
+/* Done: a double blink. */
+@keyframes eyes-done {
+  0%,
+  60%,
+  100% {
+    transform: scaleY(1);
+  }
+  30%,
+  80% {
+    transform: scaleY(0.12);
+  }
+}
+@keyframes eyes-blink {
+  0%,
+  93%,
+  100% {
+    transform: scaleY(1);
+  }
+  96% {
+    transform: scaleY(0.1);
+  }
+}
+
+/*
+ * Grasp's line while it reads, before the answer starts: a light that runs
+ * through the words (the prototype's Shimmer, without a script).
+ */
+@keyframes shimmer-run {
+  from {
+    background-position: 100% center;
+  }
+  to {
+    background-position: 0% center;
+  }
+}
+@utility shimmer-text {
+  background-image:
+    linear-gradient(
+      90deg,
+      transparent calc(50% - 2.5rem),
+      var(--color-background),
+      transparent calc(50% + 2.5rem)
+    ),
+    linear-gradient(
+      var(--color-muted-foreground),
+      var(--color-muted-foreground)
+    );
+  background-size:
+    250% 100%,
+    auto;
+  background-repeat: no-repeat, padding-box;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer-run 2s linear infinite;
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+  }
+}
+
+/* A document added to the chat: a thin line fills once under it. */
+@keyframes upload-fill {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+@utility animate-upload-fill {
+  transform-origin: left;
+  animation: upload-fill 700ms cubic-bezier(0.2, 0.7, 0.2, 1) forwards;
+}
+
+/* A document Grasp is reading: a soft light sweeps across it until the answer starts. */
+@keyframes read-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+@utility animate-read-sweep {
+  animation: read-sweep 1.6s ease-in-out infinite;
+}
+@utility read-light {
+  background-image: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in oklch, var(--foreground) 8%, transparent),
+    transparent
+  );
 }

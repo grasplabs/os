@@ -2,6 +2,8 @@ import type { App, FileDiff, VersionReview } from "@grasp-os/shared/apps";
 import type { ChatDraft } from "@grasp-os/shared/chat";
 import { screenPath } from "@grasp-os/shared/screens";
 import type { TriggerDeclaration } from "@grasp-os/shared/workflows";
+import { i18n } from "@lingui/core";
+import { msg, plural } from "@lingui/core/macro";
 
 // What the side panel's "Being built" section decides (builds.tsx): pure
 // logic, so tested on its own.
@@ -44,10 +46,10 @@ export const serverFileLabels = ({
 }: ServerFile): ServerFileLabels => ({
   summary:
     after === undefined
-      ? `${path}, which would no longer run`
-      : `${path}, as it would run`,
-  before: "Runs now",
-  after: "Would run after approval",
+      ? i18n._(msg`${path}, which would no longer run`)
+      : i18n._(msg`${path}, as it would run`),
+  before: i18n._(msg`Runs now`),
+  after: i18n._(msg`Would run after approval`),
 });
 
 /** Something read from core: loaded, or why not; undefined while it loads. */
@@ -107,26 +109,30 @@ export const pendingToShow = (
 /** What makes a workflow run on its own, in a reviewer's words. */
 export const triggerText = (trigger: TriggerDeclaration): string => {
   if (trigger.type === "manual") {
-    return "when someone starts it";
+    return i18n._(msg`when someone starts it`);
   }
   if (trigger.type === "schedule") {
-    const zone = trigger.timeZone === undefined ? "" : `, ${trigger.timeZone}`;
-    return `on a schedule (its parameter ${trigger.param}${zone})`;
+    const { param, timeZone } = trigger;
+    return timeZone === undefined
+      ? i18n._(msg`on a schedule (its parameter ${param})`)
+      : i18n._(msg`on a schedule (its parameter ${param}, ${timeZone})`);
   }
   if (trigger.type === "event") {
+    const { event } = trigger;
     // No filter, or an empty one: every such event.
     const filtered =
       trigger.filter !== undefined && Object.keys(trigger.filter).length > 0;
     return filtered
-      ? `on the event ${trigger.event}, filtered`
-      : `on every ${trigger.event} event`;
+      ? i18n._(msg`on the event ${event}, filtered`)
+      : i18n._(msg`on every ${event} event`);
   }
-  return `on mail to ${trigger.address}@`;
+  const { address } = trigger;
+  return i18n._(msg`on mail to ${address}@`);
 };
 
 /** How many times, as the panel says it: nothing for once. */
 const timesText = (count: number): string =>
-  count === 1 ? "once" : `${count} times`;
+  i18n._(msg`${plural(count, { one: "once", other: "# times" })}`);
 
 /**
  * A workflow's trigger change, as the panel says it, from how many of
@@ -141,21 +147,28 @@ export const triggerChangeText = ({
 }: TriggerChange): string => {
   const how = triggerText(trigger);
   if (countBefore === 0) {
+    const times = timesText(countAfter);
     return countAfter === 1
-      ? `Now runs ${how}`
-      : `Now runs ${how}, ${timesText(countAfter)}`;
+      ? i18n._(msg`Now runs ${how}`)
+      : i18n._(msg`Now runs ${how}, ${times}`);
   }
   if (countAfter === 0) {
-    return `No longer runs ${how}`;
+    return i18n._(msg`No longer runs ${how}`);
   }
-  const more = countAfter > countBefore;
-  return `Runs ${how} ${count} ${more ? "more" : "fewer"} ${count === 1 ? "time" : "times"} (${timesText(countAfter)} now)`;
+  const now = timesText(countAfter);
+  return countAfter > countBefore
+    ? i18n._(
+        msg`Runs ${how} ${plural(count, { one: "# more time", other: "# more times" })} (${now} now)`
+      )
+    : i18n._(
+        msg`Runs ${how} ${plural(count, { one: "# fewer time", other: "# fewer times" })} (${now} now)`
+      );
 };
 
 /** What an export lets another App do, in a reviewer's words. */
 const accessWords = {
-  read: "reads the App's data",
-  write: "changes the App's data",
+  read: msg`reads the App's data`,
+  write: msg`changes the App's data`,
 } as const;
 
 /**
@@ -170,29 +183,43 @@ export const exportChangeText = ({
   accessBefore,
 }: ExportChange): { text: string; widens: boolean } => {
   if (change === "added") {
-    const does = access === null ? "" : `, which ${accessWords[access]}`;
+    const does = access === null ? undefined : i18n._(accessWords[access]);
     return {
-      text: `Other Apps may now call ${name}${does}`,
+      text:
+        does === undefined
+          ? i18n._(msg`Other Apps may now call ${name}`)
+          : i18n._(msg`Other Apps may now call ${name}, which ${does}`),
       widens: access === "write",
     };
   }
   if (change === "removed") {
-    return { text: `Other Apps may no longer call ${name}`, widens: false };
+    return {
+      text: i18n._(msg`Other Apps may no longer call ${name}`),
+      widens: false,
+    };
   }
   if (accessBefore === "read" && access === "write") {
     return {
-      text: `${name} now changes the App's data (read → write)`,
+      text: i18n._(msg`${name} now changes the App's data (read → write)`),
       widens: true,
     };
   }
   if (accessBefore === "write" && access === "read") {
     return {
-      text: `${name} no longer changes the App's data (write → read)`,
+      text: i18n._(
+        msg`${name} no longer changes the App's data (write → read)`
+      ),
       widens: false,
     };
   }
-  const does = access === null ? "" : `: it ${accessWords[access]}`;
-  return { text: `${name} changed${does}`, widens: false };
+  const does = access === null ? undefined : i18n._(accessWords[access]);
+  return {
+    text:
+      does === undefined
+        ? i18n._(msg`${name} changed`)
+        : i18n._(msg`${name} changed: it ${does}`),
+    widens: false,
+  };
 };
 
 /**

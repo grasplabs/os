@@ -33,14 +33,20 @@ import {
   TabsList,
   TabsTrigger,
 } from "@grasp-os/ui/components/tabs";
+import { i18n } from "@lingui/core";
+import type { MessageDescriptor } from "@lingui/core";
+import { msg, plural, ph } from "@lingui/core/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { ErrorText } from "../error-text.tsx";
+import { formatDateTime } from "../format.ts";
+import { SiteHeader } from "../frame/site-header.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import type { Loaded } from "../load-from-core.tsx";
 import { useCoreAction } from "../use-core-action.ts";
-import { dateTime, RunsTable } from "../workflows/runs.tsx";
+import { RunsTable } from "../workflows/runs.tsx";
 
 // One workflow: its steps in plain words, read from its code; its
 // parameters as a form, for the App's builders; a Test that dry-runs it
@@ -49,26 +55,33 @@ import { dateTime, RunsTable } from "../workflows/runs.tsx";
 // core says the person may do.
 
 /** What a step does besides plain code, in words. */
-const kindLabels: Readonly<Record<StepOutline["kind"], string | undefined>> = {
+const kindLabels: Readonly<
+  Record<StepOutline["kind"], MessageDescriptor | undefined>
+> = {
   exact: undefined,
-  ai: "AI",
-  decision: "Decision",
-  wait: "Waits",
+  ai: msg`AI`,
+  decision: msg`Decision`,
+  wait: msg`Waits`,
 };
 
 const StepItem = ({ step }: { step: StepOutline }) => {
-  const kind = kindLabels[step.kind];
+  const { t } = useLingui();
+  const kindLabel = kindLabels[step.kind];
+  const kind = kindLabel === undefined ? undefined : i18n._(kindLabel);
+  const { name, key } = step;
   return (
     <li className="flex flex-col gap-1">
       <span className="flex flex-wrap items-center gap-2">
         <span className="font-medium">{step.description}</span>
         {kind === undefined ? null : <Badge variant="secondary">{kind}</Badge>}
         {step.sideEffect ? (
-          <Badge variant="outline">Changes something</Badge>
+          <Badge variant="outline">
+            <Trans>Changes something</Trans>
+          </Badge>
         ) : null}
       </span>
       <span className="text-muted-foreground text-xs">
-        {step.key === undefined ? step.name : `${step.name}, per ${step.key}`}
+        {key === undefined ? name : t`${name}, per ${key}`}
       </span>
     </li>
   );
@@ -79,55 +92,66 @@ const keyOf = (node: OutlineNode): string =>
   node.type === "step" ? node.name : `${node.type}:${node.line}`;
 
 /** Steps, and the branches and loops around them, in the order they run. */
-const Outline = ({ nodes }: { nodes: OutlineNode[] }) => (
-  <ol className="flex list-decimal flex-col gap-3 pl-6">
-    {nodes.map((node) => {
-      if (node.type === "step") {
-        return <StepItem key={keyOf(node)} step={node} />;
-      }
-      if (node.type === "loop") {
+const Outline = ({ nodes }: { nodes: OutlineNode[] }) => {
+  const { t } = useLingui();
+  return (
+    <ol className="flex list-decimal flex-col gap-3 pl-6">
+      {nodes.map((node) => {
+        if (node.type === "step") {
+          return <StepItem key={keyOf(node)} step={node} />;
+        }
+        if (node.type === "loop") {
+          return (
+            <li className="flex flex-col gap-2" key={keyOf(node)}>
+              <span>
+                {node.header === ""
+                  ? t`Repeats, once per item:`
+                  : t`Repeats, ${ph({ items: node.header })}:`}
+              </span>
+              <Outline nodes={node.steps} />
+            </li>
+          );
+        }
         return (
           <li className="flex flex-col gap-2" key={keyOf(node)}>
+            {/* Core leaves the condition out for those who don't build. */}
             <span>
-              {node.header === ""
-                ? "Repeats, once per item:"
-                : `Repeats, ${node.header}:`}
+              {node.condition === ""
+                ? t`Only when a condition holds:`
+                : t`If ${ph({ condition: node.condition })}:`}
             </span>
             <Outline nodes={node.steps} />
+            {node.otherwise.length === 0 ? null : (
+              <>
+                <span>
+                  <Trans>Otherwise:</Trans>
+                </span>
+                <Outline nodes={node.otherwise} />
+              </>
+            )}
           </li>
         );
-      }
-      return (
-        <li className="flex flex-col gap-2" key={keyOf(node)}>
-          {/* Core leaves the condition out for those who don't build. */}
-          <span>
-            {node.condition === ""
-              ? "Only when a condition holds:"
-              : `If ${node.condition}:`}
-          </span>
-          <Outline nodes={node.steps} />
-          {node.otherwise.length === 0 ? null : (
-            <>
-              <span>Otherwise:</span>
-              <Outline nodes={node.otherwise} />
-            </>
-          )}
-        </li>
-      );
-    })}
-  </ol>
-);
+      })}
+    </ol>
+  );
+};
 
 const Steps = ({ steps }: { steps: WorkflowDetail["steps"] }) => {
+  const { t } = useLingui();
   if (!steps.ok) {
+    const { message } = steps;
     return (
       <p className="text-muted-foreground text-sm">
-        {`The steps can't be read from this workflow's code: ${steps.message}`}
+        {t`The steps can't be read from this workflow's code: ${message}`}
       </p>
     );
   }
   if (steps.outline.steps.length === 0) {
-    return <p className="text-muted-foreground text-sm">It has no steps.</p>;
+    return (
+      <p className="text-muted-foreground text-sm">
+        <Trans>It has no steps.</Trans>
+      </p>
+    );
   }
   return <Outline nodes={steps.outline.steps} />;
 };
@@ -178,20 +202,22 @@ const inputError = (param: WorkflowParam, text: string): string | undefined => {
   if (param.kind === "money") {
     const amount = amountPattern.exec(typed);
     if (amount === null) {
-      return "Enter an amount, such as 12.50.";
+      return i18n._(msg`Enter an amount, such as 12.50.`);
     }
     const digits = fractionDigits(param.currency);
     const decimals = amount.groups?.fraction?.length ?? 0;
     if (decimals > digits) {
-      const currency = param.currency ?? "this currency";
+      const currency = param.currency ?? i18n._(msg`this currency`);
       return digits === 0
-        ? `An amount in ${currency} has no decimals.`
-        : `An amount in ${currency} has at most ${digits} decimals.`;
+        ? i18n._(msg`An amount in ${currency} has no decimals.`)
+        : i18n._(
+            msg`An amount in ${currency} has at most ${plural(digits, { one: "# decimal", other: "# decimals" })}.`
+          );
     }
     return undefined;
   }
   if (param.kind === "number" && Number.isNaN(Number(typed))) {
-    return "Enter a number.";
+    return i18n._(msg`Enter a number.`);
   }
   return undefined;
 };
@@ -211,6 +237,7 @@ const ParamField = ({
   onSaved: (param: WorkflowParam) => void;
 }) => {
   const { busy, failure, run } = useCoreAction();
+  const { t } = useLingui();
   const stored = param.value ?? param.default;
   const current = shownValue(param, stored);
   const [draft, setDraft] = useState(current);
@@ -219,6 +246,10 @@ const ParamField = ({
   const labelId = `${id}-label`;
   const errorId = `${id}-error`;
   const invalid = inputError(param, draft);
+  const fallback =
+    param.currency === undefined
+      ? shownValue(param, param.default)
+      : `${shownValue(param, param.default)} ${param.currency}`;
   const save = async (): Promise<void> => {
     setSaved(false);
     const updated = await run(
@@ -249,7 +280,9 @@ const ParamField = ({
           {param.label}
         </label>
         {param.sensitive ? (
-          <Badge variant="destructive">Sensitive</Badge>
+          <Badge variant="destructive">
+            <Trans>Sensitive</Trans>
+          </Badge>
         ) : null}
       </span>
       <div className="flex gap-2">
@@ -276,7 +309,7 @@ const ParamField = ({
             }
             type="submit"
           >
-            Save
+            <Trans>Save</Trans>
           </Button>
         ) : null}
       </div>
@@ -286,9 +319,13 @@ const ParamField = ({
         </p>
       )}
       <span className="text-muted-foreground text-xs">
-        {`Default: ${shownValue(param, param.default)}${param.currency === undefined ? "" : ` ${param.currency}`}`}
+        {t`Default: ${fallback}`}
       </span>
-      {saved ? <output className="text-sm">Saved.</output> : null}
+      {saved ? (
+        <output className="text-sm">
+          <Trans>Saved.</Trans>
+        </output>
+      ) : null}
       <ErrorText>{failure}</ErrorText>
     </form>
   );
@@ -310,17 +347,20 @@ const Parameters = ({
   const [saved, setSaved] = useState<ReadonlyMap<string, WorkflowParam>>(
     new Map()
   );
+  const { t } = useLingui();
   if (params.length === 0) {
     return (
-      <p className="text-muted-foreground text-sm">It has no parameters.</p>
+      <p className="text-muted-foreground text-sm">
+        <Trans>It has no parameters.</Trans>
+      </p>
     );
   }
   return (
     <div className="flex max-w-xl flex-col gap-4">
       <p className="text-muted-foreground text-sm">
         {editable
-          ? "A change applies to runs that start after it: runs already going keep the values they started with. Each change is recorded, without its value."
-          : "Grasp staff can read parameters, not change them."}
+          ? t`A change applies to runs that start after it: runs already going keep the values they started with. Each change is recorded, without its value.`
+          : t`Grasp staff can read parameters, not change them.`}
       </p>
       {params.map((loaded) => (
         <ParamField
@@ -343,6 +383,7 @@ const TestButton = ({ app, workflow }: { app: string; workflow: string }) => {
   const { busy, failure, run } = useCoreAction();
   const [open, setOpen] = useState(false);
   const [tested, setTested] = useState<WorkflowDryRun>();
+  const { t } = useLingui();
   const test = async (): Promise<void> => {
     setOpen(true);
     setTested(undefined);
@@ -360,18 +401,24 @@ const TestButton = ({ app, workflow }: { app: string; workflow: string }) => {
         }}
         variant="outline"
       >
-        {busy ? "Testing…" : "Test"}
+        {busy ? t`Testing…` : t`Test`}
       </Button>
       <Dialog onOpenChange={setOpen} open={open}>
         <DialogContent className="max-h-svh overflow-y-auto sm:max-w-3xl">
           <DialogHeader>
-            <DialogTitle>{`Test of ${workflow}`}</DialogTitle>
+            <DialogTitle>{t`Test of ${workflow}`}</DialogTitle>
             <DialogDescription>
-              Runs the workflow&apos;s own test cases with the values set now.
-              Nothing is changed: what it would change is listed instead.
+              <Trans>
+                Runs the workflow&apos;s own test cases with the values set now.
+                Nothing is changed: what it would change is listed instead.
+              </Trans>
             </DialogDescription>
           </DialogHeader>
-          {busy ? <p className="text-sm">Testing…</p> : null}
+          {busy ? (
+            <p className="text-sm">
+              <Trans>Testing…</Trans>
+            </p>
+          ) : null}
           <ErrorText>{failure}</ErrorText>
           {tested === undefined ? null : <DryRunReports tested={tested} />}
         </DialogContent>
@@ -380,22 +427,31 @@ const TestButton = ({ app, workflow }: { app: string; workflow: string }) => {
   );
 };
 
-const DryRunReports = ({ tested }: { tested: WorkflowDryRun }) => (
-  <div className="flex flex-col gap-4">
-    <p className="text-muted-foreground text-sm">{`Version ${tested.version}`}</p>
-    {tested.runs.map((dryRun, index) => (
-      // Tests may share a name; their order is the tests' own.
-      <section className="flex flex-col gap-2" key={`${index}:${dryRun.name}`}>
-        <h3 className="font-medium">
-          {`${dryRun.name}: ${dryRun.status === "completed" ? "completed" : "failed"}`}
-        </h3>
-        <pre className="bg-muted overflow-x-auto rounded-md p-3 text-xs whitespace-pre-wrap">
-          {dryRun.report}
-        </pre>
-      </section>
-    ))}
-  </div>
-);
+const DryRunReports = ({ tested }: { tested: WorkflowDryRun }) => {
+  const { t } = useLingui();
+  const { version } = tested;
+  return (
+    <div className="flex flex-col gap-4">
+      <p className="text-muted-foreground text-sm">{t`Version ${version}`}</p>
+      {tested.runs.map((dryRun, index) => (
+        // Tests may share a name; their order is the tests' own.
+        <section
+          className="flex flex-col gap-2"
+          key={`${index}:${dryRun.name}`}
+        >
+          <h3 className="font-medium">
+            {dryRun.status === "completed"
+              ? t`${ph({ run: dryRun.name })}: completed`
+              : t`${ph({ run: dryRun.name })}: failed`}
+          </h3>
+          <pre className="bg-muted overflow-x-auto rounded-md p-3 text-xs whitespace-pre-wrap">
+            {dryRun.report}
+          </pre>
+        </section>
+      ))}
+    </div>
+  );
+};
 
 const Versions = ({ versions }: { versions: Loaded<AppVersion[]> }) => {
   if (versions.state !== "ready") {
@@ -405,9 +461,15 @@ const Versions = ({ versions }: { versions: Loaded<AppVersion[]> }) => {
     <Table>
       <TableHeader>
         <TableRow>
-          <TableHead>Version</TableHead>
-          <TableHead>What changed</TableHead>
-          <TableHead>Committed</TableHead>
+          <TableHead>
+            <Trans>Version</Trans>
+          </TableHead>
+          <TableHead>
+            <Trans>What changed</Trans>
+          </TableHead>
+          <TableHead>
+            <Trans>Committed</Trans>
+          </TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -415,9 +477,7 @@ const Versions = ({ versions }: { versions: Loaded<AppVersion[]> }) => {
           <TableRow key={version.version}>
             <TableCell>{version.version}</TableCell>
             <TableCell>{version.message}</TableCell>
-            <TableCell>
-              {dateTime.format(new Date(version.createdAt))}
-            </TableCell>
+            <TableCell>{formatDateTime(version.createdAt)}</TableCell>
           </TableRow>
         ))}
       </TableBody>
@@ -436,10 +496,9 @@ const WorkflowView = ({
 }) => {
   const { identity } = Route.useRouteContext();
   const { summary, steps, params, setsParams } = detail;
-  const owner =
-    summary.owner.userId === identity.userId
-      ? "you"
-      : (summary.owner.name ?? summary.owner.userId);
+  const { t } = useLingui();
+  const { version } = summary;
+  const owner = summary.owner.name ?? summary.owner.userId;
   return (
     <>
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -453,11 +512,13 @@ const WorkflowView = ({
             >
               {summary.appName}
             </Link>
-            {`, version ${summary.version}, owned by ${owner}`}
+            {summary.owner.userId === identity.userId
+              ? t`, version ${version}, owned by you`
+              : t`, version ${version}, owned by ${owner}`}
           </p>
           {summary.scheduleStopped ? (
             <p className="text-destructive text-sm">
-              {`Its schedule stopped: its run failed to start ${maxFailedStarts} times in a row. It starts again when its schedule is set under Parameters, or when a new version of the App is made current.`}
+              {t`Its schedule stopped: its run failed to start ${maxFailedStarts} times in a row. It starts again when its schedule is set under Parameters, or when a new version of the App is made current.`}
             </p>
           ) : null}
         </div>
@@ -467,11 +528,17 @@ const WorkflowView = ({
       </div>
       <Tabs defaultValue="steps">
         <TabsList>
-          <TabsTrigger value="steps">Steps</TabsTrigger>
+          <TabsTrigger value="steps">
+            <Trans>Steps</Trans>
+          </TabsTrigger>
           {params === null ? null : (
-            <TabsTrigger value="parameters">Parameters</TabsTrigger>
+            <TabsTrigger value="parameters">
+              <Trans>Parameters</Trans>
+            </TabsTrigger>
           )}
-          <TabsTrigger value="history">History</TabsTrigger>
+          <TabsTrigger value="history">
+            <Trans>History</Trans>
+          </TabsTrigger>
         </TabsList>
         <TabsContent value="steps">
           <Steps steps={steps} />
@@ -491,7 +558,7 @@ const WorkflowView = ({
           <div className="flex flex-col gap-6">
             <section aria-labelledby="runs" className="flex flex-col gap-2">
               <h2 className="font-medium" id="runs">
-                Runs
+                <Trans>Runs</Trans>
               </h2>
               {runs.state === "ready" ? (
                 <RunsTable
@@ -510,7 +577,7 @@ const WorkflowView = ({
                 className="flex flex-col gap-2"
               >
                 <h2 className="font-medium" id="versions">
-                  Versions of the App
+                  <Trans>Versions of the App</Trans>
                 </h2>
                 <Versions versions={versions} />
               </section>
@@ -525,26 +592,32 @@ const WorkflowView = ({
 const WorkflowPage = () => {
   const { detail, runs, versions } = Route.useLoaderData();
   const { app, workflow } = Route.useParams();
+  const { t } = useLingui();
   return (
-    <main className="flex max-w-6xl flex-col gap-6 p-6">
-      <Link className="text-sm underline" to="/workflows">
-        Workflows
-      </Link>
-      {detail.state === "ready" ? (
-        <WorkflowView
-          // Another workflow starts with its own forms and test.
-          key={`${app}/${workflow}`}
-          detail={detail.data}
-          runs={runs}
-          versions={versions}
-        />
-      ) : (
-        <>
-          <h1 className="text-2xl font-medium">{workflow}</h1>
-          <NotLoaded page={detail} />
-        </>
-      )}
-    </main>
+    <>
+      <SiteHeader
+        crumbs={[
+          { label: t`Workflows`, to: "/workflows" },
+          { label: workflow },
+        ]}
+      />
+      <div className="flex max-w-6xl flex-col gap-6 p-6">
+        {detail.state === "ready" ? (
+          <WorkflowView
+            // Another workflow starts with its own forms and test.
+            key={`${app}/${workflow}`}
+            detail={detail.data}
+            runs={runs}
+            versions={versions}
+          />
+        ) : (
+          <>
+            <h1 className="text-2xl font-medium">{workflow}</h1>
+            <NotLoaded page={detail} />
+          </>
+        )}
+      </div>
+    </>
   );
 };
 
