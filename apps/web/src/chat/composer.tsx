@@ -32,6 +32,14 @@ import { ErrorText } from "../error-text.tsx";
 // providers are set here.
 
 /** How a model is named in the box: the last part of its ID. */
+
+/**
+ * The longest question core takes (`questionSchema` in
+ * apps/core/src/workspace.ts): the box stops there, so a longer one never
+ * makes the round trip only to fail.
+ */
+const maxQuestionLength = 100_000;
+
 export const modelName = (model: string): string =>
   model.split("/").at(-1) ?? model;
 
@@ -129,6 +137,7 @@ export const Composer = ({
         <InputGroupTextarea
           aria-label={t`Your question`}
           className="field-sizing-content max-h-48 min-h-16"
+          maxLength={maxQuestionLength}
           name="message"
           onChange={(event) => {
             onText(event.target.value);

@@ -182,10 +182,13 @@ const RenameDialog = ({
 /** Deletes a chat, once the person confirms. */
 const DeleteDialog = ({
   chat,
+  active,
   open,
   onOpenChange,
 }: {
   chat: ChatSummary;
+  /** Whether it is the open chat: then the page leaves it for a new one. */
+  active: boolean;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) => {
@@ -200,7 +203,9 @@ const DeleteDialog = ({
     });
     if (removed === true) {
       onOpenChange(false);
-      await navigate({ to: "/", search: {} });
+      if (active) {
+        await navigate({ to: "/", search: {} });
+      }
       await router.invalidate();
     }
   };
@@ -308,7 +313,12 @@ const ChatItem = ({
         <RenameDialog chat={chat} onOpenChange={setRenaming} open={renaming} />
       ) : null}
       {deleting ? (
-        <DeleteDialog chat={chat} onOpenChange={setDeleting} open={deleting} />
+        <DeleteDialog
+          active={active}
+          chat={chat}
+          onOpenChange={setDeleting}
+          open={deleting}
+        />
       ) : null}
     </li>
   );

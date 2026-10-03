@@ -273,7 +273,7 @@ test("a followed chat says core can't be reached when it stays out of reach", as
   ).toBeVisible({ timeout: 15_000 });
 });
 
-test("the side panel opens over the chat on a narrow screen, and beside it on a wide one", async ({
+test("the side panel opens in a sheet over the chat on a narrow screen, and beside it on a wide one", async ({
   browser,
 }) => {
   const { user } = peopleIn("chat");
@@ -285,18 +285,14 @@ test("the side panel opens over the chat on a narrow screen, and beside it on a 
   await expect(page).toHaveURL(/[?&]chat=/u);
   const panel = page.getByRole("complementary", { name: "Side panel" });
 
-  // A phone: over the chat, filling the screen, and closed from itself.
+  // A phone: a sheet over the chat, closed from itself.
   await page.setViewportSize({ width: 375, height: 812 });
   await page.getByRole("button", { name: "Side panel" }).click();
-  await expect(panel).toBeVisible();
-  expect(await panel.boundingBox()).toMatchObject({
-    x: 0,
-    y: 0,
-    width: 375,
-    height: 812,
-  });
-  await panel.getByRole("button", { name: "Close" }).click();
+  const sheet = page.getByRole("dialog", { name: "Side panel" });
+  await expect(sheet).toBeVisible();
   await expect(panel).toHaveCount(0);
+  await sheet.getByRole("button", { name: "Close" }).click();
+  await expect(sheet).toHaveCount(0);
 
   // A wide screen: beside the chat, which keeps its room.
   await page.setViewportSize({ width: 1440, height: 900 });

@@ -1131,6 +1131,8 @@ msgid "Loading the server code…"
 msgstr "Chargement du code serveur…"
 
 #: src/activity/audit-log.tsx
+#: src/chat/side-panel.tsx
+#: src/chat/thread.tsx
 msgid "Loading…"
 msgstr "Chargement…"
 
@@ -1432,6 +1434,7 @@ msgstr "Seules les personnes concernées par cette décision peuvent y répondre
 msgid "Only when a condition holds:"
 msgstr "Seulement si une condition est remplie :"
 
+#: src/chat/builds.tsx
 #: src/knowledge/nav.tsx
 #: src/knowledge/uploads.tsx
 msgid "Open {name}"
@@ -2208,6 +2211,7 @@ msgstr "Outils à autoriser"
 
 #: src/chat/thread.tsx
 #: src/route-error.tsx
+#: src/routes/_shell.index.tsx
 #: src/routes/_shell.tsx
 #: src/screens/screen-frame.tsx
 msgid "Try again"

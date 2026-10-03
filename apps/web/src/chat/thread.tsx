@@ -1,6 +1,7 @@
 import type { ChatCode, ChatMessage, ChatPartial } from "@grasp-os/shared/chat";
 import { Badge } from "@grasp-os/ui/components/badge";
 import { Button } from "@grasp-os/ui/components/button";
+import { Spinner } from "@grasp-os/ui/components/spinner";
 import {
   Tooltip,
   TooltipContent,
@@ -172,8 +173,13 @@ const CopyAnswer = ({ text }: { text: string }) => {
     };
   }, [copied]);
   const copy = async (): Promise<void> => {
-    await navigator.clipboard.writeText(text);
-    setCopied(true);
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+    } catch {
+      // The browser refused the clipboard (no permission): nothing copied,
+      // so the button doesn't say it was.
+    }
   };
   return (
     <AnswerAction
@@ -284,7 +290,8 @@ const Reading = () => {
   return (
     <div className="flex items-start gap-3">
       <GraspEyes live state="reading" />
-      <p className="shimmer-text text-sm">{t`Reading the workspace`}</p>
+      {/* A live status, so a screen reader hears that Grasp is working. */}
+      <output className="shimmer-text text-sm">{t`Reading the workspace`}</output>
     </div>
   );
 };
@@ -339,12 +346,15 @@ const useFollow = (): {
 
 /** The chat's messages, and the response being written, oldest first. */
 export const ChatThread = ({
+  loaded,
   messages,
   partial,
   running,
   onRetry,
   children,
 }: {
+  /** Whether core has sent the chat yet: until then, it is loading. */
+  loaded: boolean;
   messages: readonly ChatMessage[];
   partial: ChatPartial | null;
   /** Whether the agent is working on the chat now. */
@@ -376,6 +386,11 @@ export const ChatThread = ({
           className="mx-auto flex w-full max-w-3xl flex-col gap-8 px-4 py-8 md:px-6"
           ref={content}
         >
+          {loaded ? null : (
+            <li className="flex justify-center py-8">
+              <Spinner aria-label={t`Loading…`} />
+            </li>
+          )}
           {messages.map((message) => {
             if (message.role === "user") {
               return (

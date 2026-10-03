@@ -4,7 +4,7 @@ import type { ChatDraft } from "@grasp-os/shared/chat";
 import { failureText } from "@grasp-os/shared/errors";
 import { roleErrors } from "@grasp-os/shared/roles";
 import { Badge } from "@grasp-os/ui/components/badge";
-import { Button } from "@grasp-os/ui/components/button";
+import { Button, buttonVariants } from "@grasp-os/ui/components/button";
 import {
   Card,
   CardContent,
@@ -15,7 +15,8 @@ import {
 import { i18n } from "@lingui/core";
 import { msg, ph } from "@lingui/core/macro";
 import { Plural, Trans, useLingui } from "@lingui/react/macro";
-import { EyeIcon, HammerIcon } from "lucide-react";
+import { Link } from "@tanstack/react-router";
+import { ArrowUpRightIcon, EyeIcon, HammerIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import type { CoreConnection } from "../core-connection.ts";
@@ -770,18 +771,31 @@ export const ChatBuilds = ({
                   />
                 </span>
               </div>
-              {draft === previewed ? null : (
-                <Button
-                  onClick={() => {
-                    setPreviewing(draft.app);
-                  }}
-                  size="sm"
-                  variant="outline"
+              <div className="flex flex-none items-center gap-1">
+                {draft === previewed ? null : (
+                  <Button
+                    onClick={() => {
+                      setPreviewing(draft.app);
+                    }}
+                    size="sm"
+                    variant="outline"
+                  >
+                    <EyeIcon data-icon="inline-start" />
+                    <Trans>Preview</Trans>
+                  </Button>
+                )}
+                <Link
+                  aria-label={t`Open ${ph({ name: app })}`}
+                  className={buttonVariants({
+                    size: "icon-sm",
+                    variant: "ghost",
+                  })}
+                  params={{ app: draft.app }}
+                  to="/apps/$app"
                 >
-                  <EyeIcon data-icon="inline-start" />
-                  <Trans>Preview</Trans>
-                </Button>
-              )}
+                  <ArrowUpRightIcon />
+                </Link>
+              </div>
             </div>
             {draft === previewed ? (
               <DraftPreview

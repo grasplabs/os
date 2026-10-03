@@ -8,8 +8,8 @@ import {
   useNavigate,
   useRouter,
 } from "@tanstack/react-router";
-import { PanelLeftIcon, PanelRightIcon, PlusIcon, XIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { PanelLeftIcon, PanelRightIcon, PlusIcon } from "lucide-react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 
 import { GraspBuddy } from "../buddy/grasp-buddy.tsx";
 import { ChatList, ChatSidebar } from "../chat/chat-list.tsx";
@@ -167,6 +167,19 @@ const NewChat = ({ models }: { models: string[] }) => {
   );
 };
 
+/** From this width (Tailwind's lg) the side panel sits beside the chat. */
+const wideQuery = "(min-width: 64rem)";
+
+const onWide = (onChange: () => void): (() => void) => {
+  const query = matchMedia(wideQuery);
+  query.addEventListener("change", onChange);
+  return () => {
+    query.removeEventListener("change", onChange);
+  };
+};
+
+const isWide = (): boolean => matchMedia(wideQuery).matches;
+
 /** One chat, followed as it streams, with the side panel beside it. */
 const OpenChat = ({
   chat,
@@ -199,11 +212,16 @@ const OpenChat = ({
     [core, chat.id]
   );
   const lastQuestion = view.messages.findLast(({ role }) => role === "user");
+  const wide = useSyncExternalStore(onWide, isWide);
+  const sidePanel = (
+    <SidePanel chatId={chat.id} drafts={view.drafts} running={view.running} />
+  );
   return (
     <div className="flex min-h-0 min-w-0 flex-1">
       <section aria-label={chat.title} className="flex min-w-0 flex-1 flex-col">
         <h1 className="sr-only">{chat.title}</h1>
         <ChatThread
+          loaded={view.loaded}
           messages={view.messages}
           onRetry={() => {
             if (lastQuestion?.role === "user") {
@@ -217,6 +235,22 @@ const OpenChat = ({
             <div className="flex flex-col gap-2">
               <ErrorText>{failure}</ErrorText>
               <ErrorText>{view.stopped ?? undefined}</ErrorText>
+              {/* A question stopped before the agent answered (a deploy, say)
+                  is asked again from here: it may be the chat's first. */}
+              {view.stopped !== null &&
+              !view.running &&
+              lastQuestion?.role === "user" ? (
+                <Button
+                  className="self-start"
+                  onClick={() => {
+                    void ask(lastQuestion.text);
+                  }}
+                  size="sm"
+                  variant="outline"
+                >
+                  <Trans>Try again</Trans>
+                </Button>
+              ) : null}
             </div>
           )}
           <HeldWrites chatId={chat.id} version={view.held} />
@@ -232,36 +266,28 @@ const OpenChat = ({
           </p>
         </div>
       </section>
-      {/* Over the chat, as a drawer, on narrow screens; beside it on wide ones. */}
-      {panel ? (
+      {/* Beside the chat on a wide window, as wide as a page sidebar; over it,
+          in a sheet, on a narrower one. */}
+      {wide && panel ? (
         <aside
           aria-label={t`Side panel`}
-          className="bg-background fixed inset-0 z-50 flex flex-col overflow-y-auto lg:static lg:z-auto lg:w-96 lg:shrink-0 lg:border-l"
+          className="bg-background flex w-72 flex-none flex-col overflow-y-auto border-l p-4"
         >
-          <div className="flex flex-none items-center gap-1.5 border-b p-3 lg:hidden">
-            <h2 className="flex-1 text-sm font-medium">
-              <Trans>Side panel</Trans>
-            </h2>
-            <Button
-              aria-label={t`Close`}
-              onClick={() => {
-                onPanel(false);
-              }}
-              size="icon-sm"
-              variant="ghost"
-            >
-              <XIcon />
-            </Button>
-          </div>
-          <div className="flex flex-1 flex-col p-4">
-            <SidePanel
-              chatId={chat.id}
-              drafts={view.drafts}
-              running={view.running}
-            />
-          </div>
+          {sidePanel}
         </aside>
       ) : null}
+      {wide ? null : (
+        <Sheet onOpenChange={onPanel} open={panel}>
+          <SheetContent closeLabel={t`Close`} side="right">
+            <SheetTitle className="sr-only">
+              <Trans>Side panel</Trans>
+            </SheetTitle>
+            <div className="flex flex-1 flex-col overflow-y-auto p-4">
+              {sidePanel}
+            </div>
+          </SheetContent>
+        </Sheet>
+      )}
     </div>
   );
 };

@@ -1131,6 +1131,8 @@ msgid "Loading the server code…"
 msgstr "Servercode wird geladen…"
 
 #: src/activity/audit-log.tsx
+#: src/chat/side-panel.tsx
+#: src/chat/thread.tsx
 msgid "Loading…"
 msgstr "Wird geladen…"
 
@@ -1432,6 +1434,7 @@ msgstr "Nur die Personen, an die sich diese Entscheidung richtet, können sie be
 msgid "Only when a condition holds:"
 msgstr "Nur wenn eine Bedingung erfüllt ist:"
 
+#: src/chat/builds.tsx
 #: src/knowledge/nav.tsx
 #: src/knowledge/uploads.tsx
 msgid "Open {name}"
@@ -2208,6 +2211,7 @@ msgstr "Zu erlaubende Werkzeuge"
 
 #: src/chat/thread.tsx
 #: src/route-error.tsx
+#: src/routes/_shell.index.tsx
 #: src/routes/_shell.tsx
 #: src/screens/screen-frame.tsx
 msgid "Try again"
