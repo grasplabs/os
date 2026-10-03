@@ -12,6 +12,7 @@ import { useEffect, useId, useState } from "react";
 import type { CoreConnection } from "../core-connection.ts";
 import type { Session } from "../core.ts";
 import { ErrorText } from "../error-text.tsx";
+import { formatDateTime } from "../format.ts";
 import { useCoreAction } from "../use-core-action.ts";
 import { useCore } from "../use-core.ts";
 
@@ -257,6 +258,7 @@ const HeldWrite = ({
   const what = t`${title} on ${connection}`;
   const { resource } = action;
   const tool = action.action;
+  const asked = formatDateTime(action.requestedAt);
   let where = connection;
   if (resource !== null && description !== undefined) {
     where = t`${connection}, ${resource} (${tool})`;
@@ -285,10 +287,7 @@ const HeldWrite = ({
         </p>
         <p className="text-muted-foreground">
           <Trans>
-            Asked for{" "}
-            <time dateTime={action.requestedAt}>
-              {new Date(action.requestedAt).toLocaleString()}
-            </time>
+            Asked for <time dateTime={action.requestedAt}>{asked}</time>
           </Trans>
         </p>
         {action.restricted ? (

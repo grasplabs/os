@@ -16,7 +16,7 @@ import {
   TabsTrigger,
 } from "@grasp-os/ui/components/tabs";
 import { i18n } from "@lingui/core";
-import { msg } from "@lingui/core/macro";
+import { msg, ph } from "@lingui/core/macro";
 import { Trans, useLingui } from "@lingui/react/macro";
 import {
   Await,
@@ -27,6 +27,7 @@ import {
 import { useState } from "react";
 
 import type { Session } from "../core.ts";
+import { formatDateTime } from "../format.ts";
 import { SiteHeader } from "../frame/site-header.tsx";
 import { roleLabel } from "../labels.ts";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
@@ -61,11 +62,6 @@ const loadApp = async (session: Session, app: string): Promise<AppPage> => {
   ]);
   return { app: found, contents };
 };
-
-const dateTime = new Intl.DateTimeFormat(undefined, {
-  dateStyle: "medium",
-  timeStyle: "short",
-});
 
 const Screens = ({ app, contents }: { app: string; contents: AppContents }) => {
   const router = useRouter();
@@ -158,7 +154,7 @@ const RunsTable = ({ runs }: { runs: WorkflowRun[] }) =>
             <TableCell>{run.workflow}</TableCell>
             <TableCell>{runStatusLabel(run.status)}</TableCell>
             <TableCell>{run.version}</TableCell>
-            <TableCell>{dateTime.format(new Date(run.createdAt))}</TableCell>
+            <TableCell>{formatDateTime(run.createdAt)}</TableCell>
           </TableRow>
         ))}
       </TableBody>
@@ -233,7 +229,7 @@ const MembersTable = ({ members }: { members: AppMember[] }) =>
           <TableRow key={`${member.type}:${member.id}`}>
             <TableCell>
               {member.type === "team"
-                ? i18n._(msg`${member.name ?? member.id} (team)`)
+                ? i18n._(msg`${ph({ team: member.name ?? member.id })} (team)`)
                 : (member.name ?? member.id)}
             </TableCell>
             <TableCell>{roleLabel(member.role)}</TableCell>

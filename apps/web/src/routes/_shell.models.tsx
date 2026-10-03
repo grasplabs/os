@@ -22,6 +22,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 
 import { ErrorText } from "../error-text.tsx";
+import { formatList } from "../format.ts";
 import { SiteHeader } from "../frame/site-header.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 
@@ -40,7 +41,7 @@ const dollars = new Intl.NumberFormat("en-US", {
 
 /** A list of IDs for a sentence, or `none`. */
 const listed = (ids: readonly string[]): string =>
-  ids.length === 0 ? i18n._(msg`none`) : ids.join(", ");
+  ids.length === 0 ? i18n._(msg`none`) : formatList(ids);
 
 const Section = ({
   id,

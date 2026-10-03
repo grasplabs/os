@@ -21,6 +21,7 @@ import { loadCoreStatus, readWithin } from "../core-connection.ts";
 import type { CoreConnection } from "../core-connection.ts";
 import { CoreTimeoutError } from "../core.ts";
 import { ErrorText } from "../error-text.tsx";
+import { formatDateTime } from "../format.ts";
 import { signInErrorSearch } from "../sign-in-errors.ts";
 import { SignInOptions } from "../sign-in-options.tsx";
 import { useCoreAction } from "../use-core-action.ts";
@@ -66,11 +67,6 @@ const loadDecision = async (
   }
 };
 
-const dateTime = new Intl.DateTimeFormat(undefined, {
-  dateStyle: "medium",
-  timeStyle: "short",
-});
-
 /** How a decision that is no longer open ended. */
 const outcomeOf = (decision: DecisionView): string => {
   const { decided } = decision;
@@ -84,7 +80,7 @@ const outcomeOf = (decision: DecisionView): string => {
     return i18n._(msg`Nobody answered in time, so this decision has closed.`);
   }
   const { name } = decided.by;
-  const date = dateTime.format(new Date(decided.at));
+  const date = formatDateTime(decided.at);
   return decision.status === "approved"
     ? i18n._(msg`Approved by ${name} on ${date}.`)
     : i18n._(msg`Rejected by ${name} on ${date}.`);
@@ -97,7 +93,7 @@ const Answer = ({ decision }: { decision: DecisionView }) => {
   const { t } = useLingui();
   const app = current.app.name;
   const { workflow } = current;
-  const until = dateTime.format(new Date(current.expiresAt));
+  const until = formatDateTime(current.expiresAt);
   const answer = async (approved: boolean): Promise<void> => {
     const note = comment.trim();
     const answered = await run(

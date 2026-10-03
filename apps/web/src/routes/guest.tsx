@@ -17,6 +17,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 
 import { ErrorText } from "../error-text.tsx";
+import { formatDateTime } from "../format.ts";
 import { guestCall, linkSecret } from "../guest/api.ts";
 
 // Where a guest link leads (`/guest#<secret>`): someone who isn't a member,
@@ -30,11 +31,6 @@ type Page =
   | { state: "loading"; secret: string }
   | { state: "refused"; secret: string; message: string }
   | { state: "ready"; secret: string; view: GuestView };
-
-const dateTime = new Intl.DateTimeFormat(undefined, {
-  dateStyle: "medium",
-  timeStyle: "short",
-});
 
 /** What the chat says once it can take no more. */
 const endedText = (view: GuestView): string | undefined => {
@@ -101,7 +97,7 @@ const Chat = ({ secret, first }: { secret: string; first: GuestView }) => {
   const open = view.status === "open";
   const { t } = useLingui();
   const { name } = view;
-  const until = dateTime.format(new Date(view.expiresAt));
+  const until = formatDateTime(view.expiresAt);
 
   const call = async (
     request: { action: "send"; text: string } | { action: "finish" }

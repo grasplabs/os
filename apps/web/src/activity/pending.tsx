@@ -20,7 +20,7 @@ import {
   TableRow,
 } from "@grasp-os/ui/components/table";
 import { i18n } from "@lingui/core";
-import { msg } from "@lingui/core/macro";
+import { msg, ph } from "@lingui/core/macro";
 import { Trans, useLingui } from "@lingui/react/macro";
 import { Link, useRouter } from "@tanstack/react-router";
 import { useState } from "react";
@@ -36,6 +36,7 @@ import {
 } from "../directory.ts";
 import type { Directory } from "../directory.ts";
 import { ErrorText } from "../error-text.tsx";
+import { formatList } from "../format.ts";
 import { useCoreAction } from "../use-core-action.ts";
 
 // Pending approvals: the permissions Apps and agents asked for, which an
@@ -106,7 +107,7 @@ export const readPendingRequests = async (
 const subjectOf = ({ subject }: Permission, directory: Directory): string =>
   subject.type === "app"
     ? appName(directory, subject.appId)
-    : i18n._(msg`Agent ${subject.agentId}`);
+    : i18n._(msg`Agent ${ph({ agent: subject.agentId })}`);
 
 /**
  * The exports of another App a request's actions cover, as they are now:
@@ -124,7 +125,7 @@ const coveredExports = (
       ? [`${name} (${access})`]
       : []
   );
-  return covered.length === 0 ? i18n._(msg`none now`) : covered.join(", ");
+  return covered.length === 0 ? i18n._(msg`none now`) : formatList(covered);
 };
 
 /** What it asks for, by ID: connections and collections have no names here. */
@@ -183,7 +184,7 @@ const RecordTypeClaims = ({
   if (recordTypes === undefined) {
     return null;
   }
-  const claimed = recordTypes.claims.join(", ");
+  const claimed = formatList(recordTypes.claims);
   return (
     <>
       {recordTypes.claims.length === 0 ? null : (
@@ -195,7 +196,7 @@ const RecordTypeClaims = ({
         <span key={type} className="text-destructive block text-xs">
           {owner === null
             ? t`Another App already keeps ${type} records here: this App's won't apply.`
-            : t`${appName(directory, owner)} already keeps ${type} records here: this App's won't apply.`}
+            : t`${ph({ app: appName(directory, owner) })} already keeps ${type} records here: this App's won't apply.`}
         </span>
       ))}
     </>
@@ -451,7 +452,7 @@ export const PendingApprovals = ({
               const object = objectOf(request, directory, exports);
               const again = askedAgain(request, directory);
               const { binding } = request;
-              const actions = request.actions.join(", ");
+              const actions = formatList(request.actions);
               return (
                 <TableRow key={request.id}>
                   <TableCell>{subject}</TableCell>
@@ -462,7 +463,7 @@ export const PendingApprovals = ({
                     </span>
                     <RecordTypeClaims request={request} directory={directory} />
                   </TableCell>
-                  <TableCell>{request.actions.join(", ")}</TableCell>
+                  <TableCell>{formatList(request.actions)}</TableCell>
                   <TableCell>
                     {reviewedVersionText(request, directory)}
                   </TableCell>

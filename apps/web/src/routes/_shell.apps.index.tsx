@@ -15,6 +15,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 
 import { timeoutMs, withTimeout } from "../core.ts";
 import type { Session } from "../core.ts";
+import { formatList } from "../format.ts";
 import { SiteHeader } from "../frame/site-header.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 
@@ -78,7 +79,7 @@ const versionOf = ({ version }: AppContents): string =>
 
 /** Names as a list for a table cell, or a dash for none. */
 const listed = (names: string[]): string =>
-  names.length === 0 ? "–" : names.join(", ");
+  names.length === 0 ? "–" : formatList(names);
 
 const AppsTable = ({ apps }: { apps: ListedApp[] }) => {
   if (apps.length === 0) {

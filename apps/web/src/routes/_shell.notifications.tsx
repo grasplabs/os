@@ -12,10 +12,10 @@ import { useState } from "react";
 import type { Session } from "../core.ts";
 import { listedOrNone } from "../directory.ts";
 import { ErrorText } from "../error-text.tsx";
+import { formatDateTime } from "../format.ts";
 import { SiteHeader } from "../frame/site-header.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import { useCoreAction } from "../use-core-action.ts";
-import { dateTime } from "../workflows/runs.tsx";
 
 // What core told the person: the workflows that failed while acting for
 // them, each with a way to the workflow, and to a new chat that asks the
@@ -128,7 +128,7 @@ const FailedWorkflow = ({
 }) => {
   const { app, appName, workflow, run, failures, at, read } = notification;
   const { t } = useLingui();
-  const date = dateTime.format(new Date(at));
+  const date = formatDateTime(at);
   const link = (
     <Link
       className="underline"

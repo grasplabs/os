@@ -36,9 +36,10 @@ import { Trans, useLingui } from "@lingui/react/macro";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 
 import type { Session } from "../core.ts";
+import { formatDateTime } from "../format.ts";
 import { SiteHeader } from "../frame/site-header.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
-import { dateTime, RunsTable, runStatusLabel } from "../workflows/runs.tsx";
+import { RunsTable, runStatusLabel } from "../workflows/runs.tsx";
 
 // Everything that runs on its own, in one place: every workflow of every
 // App the person can open, and, on the Runs tab, their runs, waiting ones
@@ -159,7 +160,7 @@ const lastRunOf = ({ lastRun }: WorkflowSummary): string => {
     return i18n._(msg`Never`);
   }
   const status = runStatusLabel(lastRun.status);
-  const date = dateTime.format(new Date(lastRun.createdAt));
+  const date = formatDateTime(lastRun.createdAt);
   return i18n._(msg`${status}, ${date}`);
 };
 

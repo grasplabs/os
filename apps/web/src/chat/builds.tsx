@@ -13,7 +13,7 @@ import {
   CardTitle,
 } from "@grasp-os/ui/components/card";
 import { i18n } from "@lingui/core";
-import { msg } from "@lingui/core/macro";
+import { msg, ph } from "@lingui/core/macro";
 import { Plural, Trans, useLingui } from "@lingui/react/macro";
 import { EyeIcon, HammerIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -340,7 +340,7 @@ const ReviewDetails = ({
                 )}
                 {workflow.shared.length === 0 ? null : (
                   <span className="text-muted-foreground">
-                    {t`Code it may use changed: ${formatList(workflow.shared)}`}
+                    {t`Code it may use changed: ${ph({ code: formatList(workflow.shared) })}`}
                   </span>
                 )}
                 {workflow.steps === null ? (
@@ -361,7 +361,7 @@ const ReviewDetails = ({
                       ) : null}
                       {step.calls.length === 0 ? null : (
                         <Badge variant="outline">
-                          {t`Calls ${formatList(step.calls)}: may change things`}
+                          {t`Calls ${ph({ tools: formatList(step.calls) })}: may change things`}
                         </Badge>
                       )}
                       {step.sharedCode ? (
@@ -427,7 +427,7 @@ const ReviewDetails = ({
           <ul className="flex flex-col gap-1">
             {review.grants.map(({ permission, askedAgain }) => {
               const { binding } = permission;
-              const actions = permission.actions.join(", ");
+              const actions = formatList(permission.actions);
               const object = permission.object.type;
               return (
                 <li key={permission.id}>
@@ -455,7 +455,7 @@ const ReviewDetails = ({
           <ul className="flex flex-col gap-1">
             {review.permissions.map((permission) => {
               const { binding } = permission;
-              const actions = permission.actions.join(", ");
+              const actions = formatList(permission.actions);
               const object = permission.object.type;
               return (
                 <li key={permission.id}>

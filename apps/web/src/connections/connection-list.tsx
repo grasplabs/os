@@ -18,11 +18,12 @@ import {
 } from "@grasp-os/ui/components/dialog";
 import { i18n } from "@lingui/core";
 import type { MessageDescriptor } from "@lingui/core";
-import { msg } from "@lingui/core/macro";
+import { msg, ph } from "@lingui/core/macro";
 import { Trans, useLingui } from "@lingui/react/macro";
 import { useState } from "react";
 
 import { ErrorText } from "../error-text.tsx";
+import { formatDate, formatList } from "../format.ts";
 import type { Loaded } from "../load-from-core.tsx";
 import { useCoreAction } from "../use-core-action.ts";
 import { goTo, returnTo } from "./catalog.tsx";
@@ -54,7 +55,7 @@ const scopeText: Record<ListedConnection["scope"], MessageDescriptor> = {
 };
 
 /** An ISO 8601 time as a date for people. */
-const dateOf = (iso: string): string => new Date(iso).toLocaleDateString();
+const dateOf = (iso: string): string => formatDate(iso);
 
 /** Who holds a permission, for people: the App's name, or the agent. */
 const holderOf = (
@@ -62,8 +63,10 @@ const holderOf = (
   appNames: ReadonlyMap<string, string>
 ): string =>
   subject.type === "app"
-    ? i18n._(msg`App ${appNames.get(subject.appId) ?? subject.appId}`)
-    : i18n._(msg`Agent ${subject.agentId}`);
+    ? i18n._(
+        msg`App ${ph({ app: appNames.get(subject.appId) ?? subject.appId })}`
+      )
+    : i18n._(msg`Agent ${ph({ agent: subject.agentId })}`);
 
 const HolderItem = ({
   permission,
@@ -81,7 +84,7 @@ const HolderItem = ({
     object.type === "connection" && object.resource !== undefined
       ? object.resource
       : t`the whole connection`;
-  const actions = permission.actions.join(", ");
+  const actions = formatList(permission.actions);
   return (
     <li className="flex flex-col gap-1">
       <div className="flex items-center justify-between gap-2">
@@ -181,7 +184,7 @@ const ConsentRecord = ({ connection }: { connection: ListedConnection }) => {
       <p>
         {connection.tools === undefined || connection.tools.length === 0
           ? t`Tools allowed: none recorded`
-          : t`Tools allowed: ${connection.tools.join(", ")}`}
+          : t`Tools allowed: ${ph({ tools: formatList(connection.tools) })}`}
       </p>
     </div>
   );

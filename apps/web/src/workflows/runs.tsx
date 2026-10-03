@@ -10,9 +10,11 @@ import {
 } from "@grasp-os/ui/components/table";
 import { i18n } from "@lingui/core";
 import type { MessageDescriptor } from "@lingui/core";
-import { msg } from "@lingui/core/macro";
+import { msg, ph } from "@lingui/core/macro";
 import { Trans, useLingui } from "@lingui/react/macro";
 import { Link } from "@tanstack/react-router";
+
+import { formatDateTime } from "../format.ts";
 
 // Runs as the Workflows page and a workflow's history list them: each
 // with where it is, and a run waiting for a decision with a link to where
@@ -30,11 +32,6 @@ const statusLabels: Readonly<Record<RunStatus, MessageDescriptor>> = {
 /** A run's status, in words, in the page's language. */
 export const runStatusLabel = (status: RunStatus): string =>
   i18n._(statusLabels[status]);
-
-export const dateTime = new Intl.DateTimeFormat(undefined, {
-  dateStyle: "medium",
-  timeStyle: "short",
-});
 
 /** Who started a run, in words, for the person `me`. */
 const startedByOf = ({ startedBy }: ListedRun, me: string): string => {
@@ -69,7 +66,7 @@ const RunStatusCell = ({ run }: { run: ListedRun }) => {
         <span className="text-muted-foreground text-xs">
           {run.failure.step === null
             ? run.failure.error.message
-            : t`At ${run.failure.step}: ${run.failure.error.message}`}
+            : t`At ${ph({ step: run.failure.step })}: ${ph({ error: run.failure.error.message })}`}
         </span>
       )}
       {run.detailsRemoved ? (
@@ -158,11 +155,9 @@ export const RunsTable = ({
               </TableCell>
               <TableCell>{run.version}</TableCell>
               <TableCell>{startedByOf(run, me)}</TableCell>
-              <TableCell>{dateTime.format(new Date(run.createdAt))}</TableCell>
+              <TableCell>{formatDateTime(run.createdAt)}</TableCell>
               <TableCell>
-                {run.endedAt === null
-                  ? "–"
-                  : dateTime.format(new Date(run.endedAt))}
+                {run.endedAt === null ? "–" : formatDateTime(run.endedAt)}
               </TableCell>
             </TableRow>
           ))}

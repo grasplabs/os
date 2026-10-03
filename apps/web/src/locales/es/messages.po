@@ -38,30 +38,9 @@ msgstr "{0, plural, one {# ejecución fallida} other {# ejecuciones fallidas}} d
 msgid "{0, plural, one {# waiting run} other {# waiting runs}} of {name}"
 msgstr "{0, plural, one {# ejecución en espera} other {# ejecuciones en espera}} de {name}"
 
-#. placeholder {0}: member.name ?? member.id
-#: src/routes/_shell.apps.$app.tsx
-msgid "{0} (team)"
-msgstr "{0} (equipo)"
-
-#. placeholder {0}: appName(directory, owner)
 #: src/activity/pending.tsx
-msgid "{0} already keeps {type} records here: this App's won't apply."
-msgstr "{0} ya guarda aquí registros de tipo {type}: los de esta aplicación no se aplicarán."
-
-#. placeholder {0}: app.name
-#: src/chat/side-panel.tsx
-msgid "{0} has no screen to show."
-msgstr "{0} no tiene ninguna pantalla que mostrar."
-
-#. placeholder {0}: dryRun.name
-#: src/routes/_shell.workflows.$app.$workflow.tsx
-msgid "{0}: completed"
-msgstr "{0}: completada"
-
-#. placeholder {0}: dryRun.name
-#: src/routes/_shell.workflows.$app.$workflow.tsx
-msgid "{0}: failed"
-msgstr "{0}: fallida"
+msgid "{app} already keeps {type} records here: this App's won't apply."
+msgstr "{app} ya guarda aquí registros de tipo {type}: los de esta aplicación no se aplicarán."
 
 #: src/activity/audit-log.tsx
 msgid "{app}: run of {workflowId}"
@@ -151,6 +130,10 @@ msgstr "{name} cambió"
 msgid "{name} changed: it {does}"
 msgstr "{name} cambió: {does}"
 
+#: src/chat/side-panel.tsx
+msgid "{name} has no screen to show."
+msgstr "{name} no tiene ninguna pantalla que mostrar."
+
 #: src/connections/catalog.tsx
 msgid "{name} is read-only"
 msgstr "{name} es de solo lectura"
@@ -183,6 +166,14 @@ msgstr "{path}, que dejaría de ejecutarse"
 msgid "{role}, Grasp staff"
 msgstr "{role}, personal de Grasp"
 
+#: src/routes/_shell.workflows.$app.$workflow.tsx
+msgid "{run}: completed"
+msgstr "{run}: completada"
+
+#: src/routes/_shell.workflows.$app.$workflow.tsx
+msgid "{run}: failed"
+msgstr "{run}: fallida"
+
 #: src/screens/screen-frame.tsx
 msgid "{screen} screen"
 msgstr "Pantalla {screen}"
@@ -194,6 +185,10 @@ msgstr "{status}, {date}"
 #: src/activity/pending.tsx
 msgid "{subject}: {actions} on {object}"
 msgstr "{subject}: {actions} sobre {object}"
+
+#: src/routes/_shell.apps.$app.tsx
+msgid "{team} (team)"
+msgstr "{team} (equipo)"
 
 #: src/chat/held-writes.tsx
 msgid "{title} on {connection}"
@@ -280,11 +275,10 @@ msgstr "Administrador"
 msgid "Admins can change anyone's role, end their sessions and remove them, other admins included."
 msgstr "Los administradores pueden cambiar el rol de cualquiera, cerrar sus sesiones y quitarlo, incluidos otros administradores."
 
-#. placeholder {0}: subject.agentId
 #: src/activity/pending.tsx
 #: src/connections/connection-list.tsx
-msgid "Agent {0}"
-msgstr "Agente {0}"
+msgid "Agent {agent}"
+msgstr "Agente {agent}"
 
 #: src/activity/audit-log.tsx
 msgid "Agent {agentId} for {person}"
@@ -356,10 +350,9 @@ msgstr "Cualquier tipo"
 msgid "App"
 msgstr "Aplicación"
 
-#. placeholder {0}: appNames.get(subject.appId) ?? subject.appId
 #: src/connections/connection-list.tsx
-msgid "App {0}"
-msgstr "Aplicación {0}"
+msgid "App {app}"
+msgstr "Aplicación {app}"
 
 #: src/screens/screen-frame.tsx
 msgid "App screen"
@@ -437,10 +430,9 @@ msgstr "Pedido por {app} ({workflow})"
 msgid "Asked by {app} ({workflow}), open until {until}"
 msgstr "Pedido por {app} ({workflow}), abierto hasta el {until}"
 
-#. placeholder {0}: new Date(action.requestedAt).toLocaleString()
 #: src/chat/held-writes.tsx
-msgid "Asked for <0>{0}</0>"
-msgstr "Pedido el <0>{0}</0>"
+msgid "Asked for <0>{asked}</0>"
+msgstr "Pedido el <0>{asked}</0>"
 
 #: src/activity/pending.tsx
 msgid "asked for by the agent, in their chat"
@@ -450,11 +442,9 @@ msgstr "pedido por el agente, en su chat"
 msgid "Asks for"
 msgstr "Pide"
 
-#. placeholder {0}: run.failure.step
-#. placeholder {1}: run.failure.error.message
 #: src/workflows/runs.tsx
-msgid "At {0}: {1}"
-msgstr "En {0}: {1}"
+msgid "At {step}: {error}"
+msgstr "En {step}: {error}"
 
 #: src/routes/_shell.activity.tsx
 msgid "Audit log"
@@ -488,10 +478,9 @@ msgstr "Presupuestos"
 msgid "Builder"
 msgstr "Creador"
 
-#. placeholder {0}: formatList(step.calls)
 #: src/chat/builds.tsx
-msgid "Calls {0}: may change things"
-msgstr "Llama a {0}: puede cambiar cosas"
+msgid "Calls {tools}: may change things"
+msgstr "Llama a {tools}: puede cambiar cosas"
 
 #: src/knowledge/document.tsx
 msgid "Cancel"
@@ -560,10 +549,9 @@ msgstr "Cerrar {name}"
 msgid "Code"
 msgstr "Código"
 
-#. placeholder {0}: formatList(workflow.shared)
 #: src/chat/builds.tsx
-msgid "Code it may use changed: {0}"
-msgstr "Cambió código que puede usar: {0}"
+msgid "Code it may use changed: {code}"
+msgstr "Cambió código que puede usar: {code}"
 
 #: src/chat/thread.tsx
 msgid "Code step"
@@ -1005,10 +993,9 @@ msgstr "Historial"
 msgid "Hosted in the EU"
 msgstr "Alojado en la UE"
 
-#. placeholder {0}: node.condition
 #: src/routes/_shell.workflows.$app.$workflow.tsx
-msgid "If {0}:"
-msgstr "Si {0}:"
+msgid "If {condition}:"
+msgstr "Si {condition}:"
 
 #: src/chat/builds.tsx
 msgid "In the proposer's words"
@@ -1678,10 +1665,9 @@ msgstr "Cambiar nombre"
 msgid "Rename this chat"
 msgstr "Cambiar el nombre de este chat"
 
-#. placeholder {0}: node.header
 #: src/routes/_shell.workflows.$app.$workflow.tsx
-msgid "Repeats, {0}:"
-msgstr "Se repite, {0}:"
+msgid "Repeats, {items}:"
+msgstr "Se repite, {items}:"
 
 #: src/routes/_shell.workflows.$app.$workflow.tsx
 msgid "Repeats, once per item:"
@@ -2208,10 +2194,9 @@ msgctxt "chats from today"
 msgid "Today"
 msgstr "Hoy"
 
-#. placeholder {0}: connection.tools.join(", ")
 #: src/connections/connection-list.tsx
-msgid "Tools allowed: {0}"
-msgstr "Herramientas permitidas: {0}"
+msgid "Tools allowed: {tools}"
+msgstr "Herramientas permitidas: {tools}"
 
 #: src/connections/connection-list.tsx
 msgid "Tools allowed: none recorded"

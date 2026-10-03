@@ -35,17 +35,18 @@ import {
 } from "@grasp-os/ui/components/tabs";
 import { i18n } from "@lingui/core";
 import type { MessageDescriptor } from "@lingui/core";
-import { msg, plural } from "@lingui/core/macro";
+import { msg, plural, ph } from "@lingui/core/macro";
 import { Trans, useLingui } from "@lingui/react/macro";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { ErrorText } from "../error-text.tsx";
+import { formatDateTime } from "../format.ts";
 import { SiteHeader } from "../frame/site-header.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import type { Loaded } from "../load-from-core.tsx";
 import { useCoreAction } from "../use-core-action.ts";
-import { dateTime, RunsTable } from "../workflows/runs.tsx";
+import { RunsTable } from "../workflows/runs.tsx";
 
 // One workflow: its steps in plain words, read from its code; its
 // parameters as a form, for the App's builders; a Test that dry-runs it
@@ -105,7 +106,7 @@ const Outline = ({ nodes }: { nodes: OutlineNode[] }) => {
               <span>
                 {node.header === ""
                   ? t`Repeats, once per item:`
-                  : t`Repeats, ${node.header}:`}
+                  : t`Repeats, ${ph({ items: node.header })}:`}
               </span>
               <Outline nodes={node.steps} />
             </li>
@@ -117,7 +118,7 @@ const Outline = ({ nodes }: { nodes: OutlineNode[] }) => {
             <span>
               {node.condition === ""
                 ? t`Only when a condition holds:`
-                : t`If ${node.condition}:`}
+                : t`If ${ph({ condition: node.condition })}:`}
             </span>
             <Outline nodes={node.steps} />
             {node.otherwise.length === 0 ? null : (
@@ -440,8 +441,8 @@ const DryRunReports = ({ tested }: { tested: WorkflowDryRun }) => {
         >
           <h3 className="font-medium">
             {dryRun.status === "completed"
-              ? t`${dryRun.name}: completed`
-              : t`${dryRun.name}: failed`}
+              ? t`${ph({ run: dryRun.name })}: completed`
+              : t`${ph({ run: dryRun.name })}: failed`}
           </h3>
           <pre className="bg-muted overflow-x-auto rounded-md p-3 text-xs whitespace-pre-wrap">
             {dryRun.report}
@@ -476,9 +477,7 @@ const Versions = ({ versions }: { versions: Loaded<AppVersion[]> }) => {
           <TableRow key={version.version}>
             <TableCell>{version.version}</TableCell>
             <TableCell>{version.message}</TableCell>
-            <TableCell>
-              {dateTime.format(new Date(version.createdAt))}
-            </TableCell>
+            <TableCell>{formatDateTime(version.createdAt)}</TableCell>
           </TableRow>
         ))}
       </TableBody>

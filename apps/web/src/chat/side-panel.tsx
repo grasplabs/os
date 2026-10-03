@@ -42,6 +42,7 @@ const OpenedApp = ({
   onClose: () => void;
 }) => {
   const [screen] = contents.screens;
+  const { name } = app;
   return (
     <div className="flex flex-1 flex-col gap-2">
       <div className="flex items-center gap-2">
@@ -59,7 +60,7 @@ const OpenedApp = ({
       </div>
       {screen === undefined || contents.version === null ? (
         <p className="text-muted-foreground text-sm">
-          <Trans>{app.name} has no screen to show.</Trans>
+          <Trans>{name} has no screen to show.</Trans>
         </p>
       ) : (
         <ScreenFrame app={app.id} embedded screen={screen} />

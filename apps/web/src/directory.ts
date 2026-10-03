@@ -2,6 +2,7 @@ import type { App } from "@grasp-os/shared/apps";
 
 import { timeoutMs, withTimeout } from "./core.ts";
 import type { Session } from "./core.ts";
+import { formatDateTime } from "./format.ts";
 
 // Who and what a page names by ID: people and Apps, read beside the page's
 // own data, only for their names. Either list may be refused (Grasp staff
@@ -60,5 +61,4 @@ export const appName = (directory: Directory, appId: string): string =>
   directory.apps.get(appId)?.name ?? appId;
 
 /** A time (ISO 8601) as the viewer's locale writes it. */
-export const formatTime = (iso: string): string =>
-  new Date(iso).toLocaleString();
+export const formatTime = (iso: string): string => formatDateTime(iso);
