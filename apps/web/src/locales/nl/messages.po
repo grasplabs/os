@@ -738,6 +738,7 @@ msgid "Description"
 msgstr "Beschrijving"
 
 #: src/activity/audit-log.tsx
+#: src/knowledge/document.tsx
 msgid "Details"
 msgstr "Details"
 
@@ -1102,6 +1103,10 @@ msgstr "Laatste run"
 #: src/knowledge/uploads.tsx
 msgid "Let go to add them"
 msgstr "Laat los om ze toe te voegen"
+
+#: src/knowledge/document.tsx
+msgid "Links to"
+msgstr "Linkt naar"
 
 #: src/activity/audit-log.tsx
 msgid "Load older"

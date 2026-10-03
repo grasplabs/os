@@ -738,6 +738,7 @@ msgid "Description"
 msgstr "Descripción"
 
 #: src/activity/audit-log.tsx
+#: src/knowledge/document.tsx
 msgid "Details"
 msgstr "Detalles"
 
@@ -1102,6 +1103,10 @@ msgstr "Última ejecución"
 #: src/knowledge/uploads.tsx
 msgid "Let go to add them"
 msgstr "Suelta para añadirlos"
+
+#: src/knowledge/document.tsx
+msgid "Links to"
+msgstr "Enlaza con"
 
 #: src/activity/audit-log.tsx
 msgid "Load older"

@@ -1,14 +1,20 @@
+import { linkPath, wikiLinkPattern } from "@grasp-os/shared/knowledge";
 import type {
   Backlink,
   DocumentRead,
   VersionSummary,
 } from "@grasp-os/shared/knowledge";
 import { Button } from "@grasp-os/ui/components/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@grasp-os/ui/components/collapsible";
 import { Input } from "@grasp-os/ui/components/input";
 import { Textarea } from "@grasp-os/ui/components/textarea";
 import { Trans, useLingui } from "@lingui/react/macro";
 import { Link, useRouter } from "@tanstack/react-router";
-import { DownloadIcon, PencilIcon } from "lucide-react";
+import { ChevronRightIcon, DownloadIcon, PencilIcon } from "lucide-react";
 import { useState } from "react";
 import type { ReactNode } from "react";
 
@@ -22,9 +28,9 @@ import type { ResolveLink } from "./wiki-links.ts";
 
 // One document, read like a note in the prototype's brain
 // (grasplabs/prototype `routes/brain/$noteId.tsx`): its kind, title and
-// when to use it, its properties with the documents that link to it as
-// chips, then its text, and its history as a timeline beside it, or under
-// it on a narrower window. Where the person may change it: an editor, and
+// when to use it, then its text, and its history as a timeline below it.
+// Its details (where it is, what it links to and what links to it, its
+// review date) sit beside it, or fold in at its foot on a narrower window. Where the person may change it: an editor, and
 // restoring from its history. Every save names the version it was edited
 // from, so a save that would overwrite one made since, in another tab or
 // by someone else, shows that version instead.
@@ -219,14 +225,61 @@ const Property = ({
   </div>
 );
 
+/** A document this one links to, by its ID, named as the link names it. */
+interface Linked {
+  documentId: string;
+  title: string;
+}
+
+/** Fenced code, whose `[[…]]` are code, not links. */
+const fencedCode = /^(?:```|~~~)[^\n]*\n[\s\S]*?^(?:```|~~~)[ \t]*$/gmu;
+
+/**
+ * The documents `text` links to with `[[links]]` that `resolve` knows, each
+ * once, in the order they first appear, named by the link's label or its
+ * target.
+ */
+const linksOf = (text: string, resolve: ResolveLink): Linked[] => {
+  const found = new Map<string, string>();
+  for (const match of text
+    .replaceAll(fencedCode, "")
+    .matchAll(wikiLinkPattern)) {
+    const [target = "", ...rest] = (match.groups?.inner ?? "").split("|");
+    const path = linkPath(target);
+    const documentId = path === undefined ? undefined : resolve(path);
+    if (documentId !== undefined && !found.has(documentId)) {
+      const label = rest.join("|").trim();
+      found.set(documentId, label === "" ? target.trim() : label);
+    }
+  }
+  return [...found].map(([documentId, title]) => ({ documentId, title }));
+};
+
+/** A part of the page folded at its foot, opened by its title. */
+const Fold = ({ title, children }: { title: string; children: ReactNode }) => (
+  <Collapsible>
+    <CollapsibleTrigger
+      render={<Button className="-ml-2.5" size="sm" variant="ghost" />}
+    >
+      <ChevronRightIcon className="text-muted-foreground transition-transform group-aria-expanded/button:rotate-90" />
+      {title}
+    </CollapsibleTrigger>
+    <CollapsibleContent>
+      <div className="pt-2 pb-4">{children}</div>
+    </CollapsibleContent>
+  </Collapsible>
+);
+
 /** The document's properties: where it is, its version and review, and what uses it. */
 const Properties = ({
   doc,
   collection,
+  links,
   backlinks,
 }: {
   doc: DocumentRead;
   collection: string;
+  links: Linked[];
   backlinks: Backlink[];
 }) => (
   <dl className="flex flex-col gap-2 text-sm">
@@ -248,6 +301,23 @@ const Properties = ({
     </Property>
     <Property label={<Trans>Review by</Trans>}>
       {doc.reviewDate ?? "–"}
+    </Property>
+    <Property label={<Trans>Links to</Trans>}>
+      {links.length === 0 ? (
+        <span className="text-muted-foreground">–</span>
+      ) : (
+        <ul className="flex flex-wrap gap-1.5">
+          {links.map((link) => (
+            <li className="min-w-0" key={link.documentId}>
+              <DocumentChip
+                collectionId={doc.collectionId}
+                documentId={link.documentId}
+                title={link.title}
+              />
+            </li>
+          ))}
+        </ul>
+      )}
     </Property>
     <Property label={<Trans>Used by</Trans>}>
       {backlinks.length === 0 ? (
@@ -315,11 +385,17 @@ export const DocumentView = ({
   me: string;
   writable: boolean;
 }) => {
+  const { t } = useLingui();
   const [editing, setEditing] = useState(false);
   // An earlier version, opened from the history: read only.
   const earlier = doc.version.number !== doc.currentVersion;
-  const timeline = (
-    <Timeline doc={doc} me={me} versions={versions} writable={writable} />
+  const details = (
+    <Properties
+      backlinks={backlinks}
+      collection={collection}
+      doc={doc}
+      links={linksOf(doc.version.text, resolve)}
+    />
   );
   return (
     <div className="flex min-h-0 min-w-0 flex-1">
@@ -369,11 +445,6 @@ export const DocumentView = ({
                 </p>
               )}
             </div>
-            <Properties
-              backlinks={backlinks}
-              collection={collection}
-              doc={doc}
-            />
           </header>
           {earlier ? <EarlierVersion doc={doc} /> : null}
           {editing ? (
@@ -391,14 +462,18 @@ export const DocumentView = ({
               title={doc.title}
             />
           )}
-          {/* Too narrow for the side panel: the history follows the page. */}
-          <div className="2xl:hidden">{timeline}</div>
+          {/* Too narrow for the side: the details fold in here instead. */}
+          <div className="border-t pt-4 2xl:hidden">
+            <Fold title={t`Details`}>{details}</Fold>
+          </div>
+          <Timeline doc={doc} me={me} versions={versions} writable={writable} />
         </div>
       </div>
-      <aside className="bg-sidebar hidden w-96 flex-none flex-col overflow-y-auto border-l 2xl:flex">
-        <div className="flex flex-1 flex-col gap-4 px-5 pt-4 pb-6">
-          {timeline}
-        </div>
+      <aside
+        aria-label={t`Details`}
+        className="bg-sidebar hidden w-96 flex-none flex-col overflow-y-auto border-l px-5 pt-4 pb-6 2xl:flex"
+      >
+        {details}
       </aside>
     </div>
   );

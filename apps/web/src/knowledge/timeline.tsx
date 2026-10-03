@@ -111,9 +111,15 @@ export const Timeline = ({
   const navigate = useNavigate();
   const { busy, failure, run } = useCoreAction();
   const { i18n } = useLingui();
-  const [unfolded, setUnfolded] = useState(false);
   const headingId = useId();
   const { earlier, recent } = splitHistory(versions);
+  // Unfolded when the version open on the page is among the earlier ones,
+  // so the one marked is always in view.
+  const [unfolded, setUnfolded] = useState(() =>
+    earlier.some((month) =>
+      month.versions.some(({ number }) => number === doc.version.number)
+    )
+  );
   const folded = earlier.reduce((sum, month) => sum + month.versions.length, 0);
   const restore = async (version: number): Promise<void> => {
     await run(async (session) => {

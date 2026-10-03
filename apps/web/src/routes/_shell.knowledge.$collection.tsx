@@ -185,6 +185,11 @@ const CollectionView = () => {
                 to: "/knowledge/$collection" as const,
                 params: { collection: collectionId },
               },
+              // The folders the document is in, as its path names them.
+              ...document.path
+                .split("/")
+                .slice(0, -1)
+                .map((folder) => ({ label: folder })),
               { label: document.title },
             ]),
       ]}
